@@ -7,9 +7,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 type message struct {
@@ -37,29 +41,33 @@ type messageRequest struct {
 }
 
 type sseChunk struct {
-	Content string `json:"content"`
-	Done    bool   `json:"done"`
+	Content   string `json:"content"`
+	Done      bool   `json:"done"`
+	SessionID string `json:"session_id,omitempty"`
 }
+
+type sessionSummary struct {
+	SessionID string `json:"session_id"`
+	Messages  int    `json:"messages"`
+}
+
+var (
+	sessionsMu sync.Mutex
+	sessions   = map[string][]message{}
+)
 
 func die(msg string, err error) {
 	fmt.Fprintln(os.Stderr, msg+":", err)
 	os.Exit(1)
 }
 
-func streamOllama(soul, userMessage, inferenceURL, model string) <-chan string {
+func streamOllama(messages []message, inferenceURL, model string) <-chan string {
 	chunks := make(chan string)
 	go func() {
 		defer close(chunks)
 
 		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/chat/completions"
-		body, err := json.Marshal(chatRequest{
-			Model: model,
-			Messages: []message{
-				{Role: "system", Content: soul},
-				{Role: "user", Content: userMessage},
-			},
-			Stream: true,
-		})
+		body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Stream: true})
 		if err != nil {
 			chunks <- "failed to marshal request: " + err.Error()
 			return
@@ -107,8 +115,10 @@ func streamOllama(soul, userMessage, inferenceURL, model string) <-chan string {
 				chunks <- "failed to parse chunk: " + err.Error()
 				return
 			}
-			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				chunks <- chunk.Choices[0].Delta.Content
+			if len(chunk.Choices) > 0 {
+				if chunk.Choices[0].Delta.Content != "" {
+					chunks <- chunk.Choices[0].Delta.Content
+				}
 			}
 		}
 	}()
@@ -121,6 +131,7 @@ func writeSSE(w http.ResponseWriter, payload sseChunk) {
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
 	soulPath := flag.String("soul", "./soul.md", "path to SOUL.md")
 	port := flag.String("port", "8081", "HTTP port")
 	inferenceURL := flag.String("inference-url", "http://localhost:11434", "inference base URL")
@@ -146,6 +157,27 @@ func main() {
 			"model":  *model,
 		})
 	})
+
+	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		sessionsMu.Lock()
+		ids := make([]string, 0, len(sessions))
+		for id := range sessions {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		out := make([]sessionSummary, 0, len(ids))
+		for _, id := range ids {
+			out = append(out, sessionSummary{SessionID: id, Messages: len(sessions[id])})
+		}
+		sessionsMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
+
 	mux.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -156,6 +188,19 @@ func main() {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
+		sessionID := req.SessionID
+		if sessionID == "" {
+			sessionID = fmt.Sprintf("%x", rand.Int63())
+		}
+
+		sessionsMu.Lock()
+		history := append([]message(nil), sessions[sessionID]...)
+		sessionsMu.Unlock()
+
+		messages := make([]message, 0, len(history)+2)
+		messages = append(messages, message{Role: "system", Content: soul})
+		messages = append(messages, history...)
+		messages = append(messages, message{Role: "user", Content: req.Content})
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -166,11 +211,21 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		for chunk := range streamOllama(soul, req.Content, *inferenceURL, *model) {
+		var full strings.Builder
+		for chunk := range streamOllama(messages, *inferenceURL, *model) {
+			full.WriteString(chunk)
 			writeSSE(w, sseChunk{Content: chunk, Done: false})
 			flusher.Flush()
 		}
-		writeSSE(w, sseChunk{Content: "", Done: true})
+
+		sessionsMu.Lock()
+		sessions[sessionID] = append(sessions[sessionID],
+			message{Role: "user", Content: req.Content},
+			message{Role: "assistant", Content: full.String()},
+		)
+		sessionsMu.Unlock()
+
+		writeSSE(w, sseChunk{Content: "", Done: true, SessionID: sessionID})
 		flusher.Flush()
 	})
 
