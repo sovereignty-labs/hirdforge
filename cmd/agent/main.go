@@ -295,9 +295,118 @@ var (
 	enabledTools []string
 )
 
+type delegateTool struct {
+	peers map[string]string
+}
+
+func (t *delegateTool) Name() string { return "delegate" }
+func (t *delegateTool) Description() string {
+	return "Send a task to another agent and get their response. Use this to delegate work to specialists."
+}
+func (t *delegateTool) Parameters() map[string]string {
+	return map[string]string{
+		"agent": "Name of the agent to delegate to (e.g. chuck, val, ragnar)",
+		"task":  "The task description to send to the agent",
+	}
+}
+func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	agent, _ := args["agent"].(string)
+	task, _ := args["task"].(string)
+	if strings.TrimSpace(agent) == "" || strings.TrimSpace(task) == "" {
+		return toolpkg.ToolResult{Error: "agent and task are required"}
+	}
+	peerURL, ok := t.peers[agent]
+	if !ok {
+		names := make([]string, 0, len(t.peers))
+		for name := range t.peers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return toolpkg.ToolResult{Error: fmt.Sprintf("unknown agent: %s. Available: %s", agent, strings.Join(names, ", "))}
+	}
+
+	body, _ := json.Marshal(map[string]string{
+		"content":    task,
+		"session_id": fmt.Sprintf("delegate-%x", rand.Int63()),
+	})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(peerURL, "/")+"/message", bytes.NewReader(body))
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return toolpkg.ToolResult{Error: fmt.Sprintf("peer returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
+	}
+
+	var full strings.Builder
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return toolpkg.ToolResult{Error: err.Error()}
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := line[6:]
+		if payload == "[DONE]" {
+			break
+		}
+		var evt struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+			Done    bool   `json:"done"`
+		}
+		if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+			continue
+		}
+		if evt.Type == "content" {
+			full.WriteString(evt.Content)
+		}
+		if evt.Done {
+			break
+		}
+	}
+	return toolpkg.ToolResult{Output: full.String()}
+}
+
 func die(msg string, err error) {
 	fmt.Fprintln(os.Stderr, msg+":", err)
 	os.Exit(1)
+}
+
+func parsePeers(raw string) (map[string]string, error) {
+	peers := map[string]string{}
+	if strings.TrimSpace(raw) == "" {
+		return peers, nil
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, url, ok := strings.Cut(part, "=")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(url) == "" {
+			return nil, fmt.Errorf("invalid peer entry %q", part)
+		}
+		name = strings.TrimSpace(name)
+		if _, exists := peers[name]; exists {
+			return nil, fmt.Errorf("duplicate peer name %q", name)
+		}
+		peers[name] = strings.TrimRight(strings.TrimSpace(url), "/")
+	}
+	return peers, nil
 }
 
 func buildToolDefs(reg *toolpkg.Registry) []toolDef {
@@ -422,6 +531,23 @@ func writeSSE(w http.ResponseWriter, payload sseChunk) {
 	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
+func trimMessages(msgs []message, maxPairs int) []message {
+	if maxPairs == 0 || len(msgs) <= 1 {
+		return msgs
+	}
+	maxNonSystem := maxPairs * 2
+	nonSystemCount := len(msgs) - 1
+	if nonSystemCount <= maxNonSystem {
+		return msgs
+	}
+	start := len(msgs) - maxNonSystem
+	trimmed := make([]message, 0, 1+maxNonSystem)
+	trimmed = append(trimmed, msgs[0])
+	trimmed = append(trimmed, msgs[start:]...)
+	fmt.Printf("trimmed context: kept %d of %d messages\n", len(trimmed), len(msgs))
+	return trimmed
+}
+
 func statusPayload() map[string]interface{} {
 	return map[string]interface{}{
 		"status":          "ready",
@@ -434,6 +560,17 @@ func statusPayload() map[string]interface{} {
 	}
 }
 
+func agentNameFromSoul(soul string) string {
+	line := strings.TrimSpace(strings.SplitN(soul, "\n", 2)[0])
+	line = strings.TrimPrefix(line, "# ")
+	line = strings.TrimPrefix(line, "#")
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "valhalla-agent"
+	}
+	return line
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	soulPath := flag.String("soul", "./soul.md", "path to SOUL.md")
@@ -441,7 +578,9 @@ func main() {
 	inferenceURL := flag.String("inference-url", "http://localhost:11434", "inference base URL")
 	model := flag.String("model", "qwen3:30b", "model name")
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
+	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
+	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
 	flag.Parse()
 
@@ -453,6 +592,16 @@ func main() {
 	if err := os.MkdirAll(*workspace, 0755); err != nil {
 		die("failed to create workspace", err)
 	}
+	peers, err := parsePeers(*peersFlag)
+	if err != nil {
+		die("failed to parse peers", err)
+	}
+	peerNames := make([]string, 0, len(peers))
+	for name := range peers {
+		peerNames = append(peerNames, name)
+	}
+	sort.Strings(peerNames)
+	agentName := agentNameFromSoul(soul)
 
 	reg := toolpkg.NewRegistry()
 	enabled := map[string]bool{}
@@ -470,6 +619,9 @@ func main() {
 	if enabled["write"] {
 		reg.Register(toolpkg.NewWriteTool(*workspace))
 	}
+	if enabled["delegate"] || len(peers) > 0 {
+		reg.Register(&delegateTool{peers: peers})
+	}
 	toolDefs := buildToolDefs(reg)
 	enabledTools = reg.List()
 	modelName = *model
@@ -482,6 +634,31 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, dashboardHTML)
+	})
+	mux.HandleFunc("/.well-known/agent.json", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		host, _ := os.Hostname()
+		if host == "" {
+			host = "localhost"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"name":        agentName,
+			"description": "Valhalla AI agent",
+			"url":         fmt.Sprintf("http://%s:%s", host, *port),
+			"version":     "0.0.2",
+			"capabilities": map[string]interface{}{
+				"streaming":  true,
+				"tools":      enabledTools,
+				"delegation": len(peers) > 0,
+			},
+			"peers":              peerNames,
+			"defaultInputModes":  []string{"text"},
+			"defaultOutputModes": []string{"text"},
+		})
 	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -538,6 +715,7 @@ func main() {
 		history := append([]message(nil), sessions[sessionID]...)
 		sessionsMu.Unlock()
 		messages := append(append([]message{{Role: "system", Content: soul}}, history...), message{Role: "user", Content: req.Content})
+		messages = trimMessages(messages, *maxContext)
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -570,8 +748,13 @@ func main() {
 				writeSSE(w, sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false})
 				flusher.Flush()
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
-				if t, ok := reg.Get(tc.Function.Name); ok {
-					result = t.Execute(args)
+				switch tc.Function.Name {
+				case "delegate":
+					result = (&delegateTool{peers: peers}).Execute(args)
+				default:
+					if t, ok := reg.Get(tc.Function.Name); ok {
+						result = t.Execute(args)
+					}
 				}
 				writeSSE(w, sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false})
 				flusher.Flush()
