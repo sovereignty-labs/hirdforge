@@ -3,21 +3,27 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 const dashboardHTML = `<!doctype html>
 <html lang="en">
@@ -44,20 +50,28 @@ body{margin:0;height:100vh;overflow:hidden;background:#12121f;color:#e0e0e0;font
 .refresh{border:0;background:#0d6efd;color:#fff;border-radius:10px;padding:9px 10px;font-weight:600;cursor:pointer}
 .center{display:grid;grid-template-rows:38px 1fr 56px;min-height:0}
 .chat-head{display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #2d2d44}
+.chat-head-main{display:flex;align-items:center;gap:8px;flex:1}
+.export-btn{border:1px solid #2d2d44;background:#22223b;color:#dbe4ff;border-radius:8px;padding:5px 8px;font-size:12px;cursor:pointer}
 .messages{overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
 .msg{max-width:85%;padding:10px 12px;border-radius:12px;white-space:pre-wrap;line-height:1.35}
 .msg.user{align-self:flex-end;background:#0d6efd;color:#fff;border-bottom-right-radius:6px}
 .msg.assistant{align-self:flex-start;background:#22223b;border:1px solid #2d2d44;border-bottom-left-radius:6px}
+.msg-text{white-space:pre-wrap}
+.msg-timestamp{font-size:.7rem;color:#888;margin-top:4px;user-select:none}
 .tools{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 details.toolbox{background:#151529;border:1px solid #2d2d44;border-radius:10px;padding:6px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 details.toolbox summary{cursor:pointer;color:#cdd7ff}details.toolbox pre{margin:8px 0 0;background:#0d0f1f;border:1px solid #242744;border-radius:8px;padding:10px;overflow:auto;color:#d3d8ef}
 .inputbar{display:flex;gap:10px;padding:10px;border-top:1px solid #2d2d44}#input{flex:1;border:1px solid #474a70;border-radius:10px;background:#141526;color:#e0e0e0;padding:11px 12px}
 #send{border:0;background:#0d6efd;color:#fff;border-radius:10px;padding:0 16px;font-weight:700;cursor:pointer}
 #send:disabled,.refresh:disabled{opacity:.55;cursor:not-allowed}
-.right{display:grid;grid-template-rows:1fr 1fr;gap:10px;padding:10px}
+.right{display:grid;grid-template-rows:auto auto auto auto auto;gap:10px;padding:10px;overflow-y:auto}
 .cluster-box{background:#151528;border:1px solid #2d2d44;border-radius:10px;padding:8px;display:flex;flex-direction:column;min-height:0}
-.rows{overflow:auto;display:flex;flex-direction:column;gap:6px}.node,.pod{display:grid;align-items:center;gap:6px;background:#20223a;border:1px solid #2d2d44;border-radius:8px;padding:6px 8px;font-size:12px}
+.rows{overflow:auto;display:flex;flex-direction:column;gap:6px}.node,.pod,.file,.k8sev,.repoitem{display:grid;align-items:center;gap:6px;background:#20223a;border:1px solid #2d2d44;border-radius:8px;padding:6px 8px;font-size:12px}
 .node{grid-template-columns:1fr auto}.pod{grid-template-columns:1fr auto auto}.role{font-size:10px;border-radius:999px;padding:2px 6px;background:#2b2f4f;color:#d8ddff}.cp{background:#12385f}.wk{background:#3a2b1a}
+.file{grid-template-columns:1fr auto}
+.pod-res{font-size:.7rem;color:#888}
+.k8sev{grid-template-columns:auto 1fr}
+.repohead{font-size:12px;color:#b8bfde;margin-bottom:6px}
 .eventbar{border-top:1px solid #2d2d44;background:#1a1a2e;padding:8px 10px;overflow-x:auto;overflow-y:hidden;white-space:nowrap}
 .events{display:flex;gap:8px;min-width:max-content}.ev{display:inline-flex;align-items:center;gap:6px;padding:8px 10px;border-radius:10px;border:1px solid #2d2d44;background:#22223b;font-size:12px}
 .ev.message{border-color:#1d3d7a;background:#122140}.ev.tool_call{border-color:#6d39b6;background:#2a1b45}.ev.health_change{border-color:#1d7a53;background:#153428}.ev.agent_start{border-color:#6c757d;background:#2b2f36}.ev.k8s_event{border-color:#856404;background:#3b3212}
@@ -75,21 +89,25 @@ details.toolbox summary{cursor:pointer;color:#cdd7ff}details.toolbox pre{margin:
       <button id="refreshAgents" class="refresh">Refresh Agents</button>
     </aside>
     <section class="panel center">
-      <div id="chatHead" class="chat-head"><span class="dot bad"></span><span>Talking to: none</span></div>
+      <div class="chat-head"><div id="chatHead" class="chat-head-main"><span class="dot bad"></span><span>Talking to: none</span></div><button id="exportBtn" class="export-btn">⬇ Export</button></div>
       <div id="messages" class="messages"></div>
       <div class="inputbar"><input id="input" type="text" placeholder="Send to selected agent..."/><button id="send">Send</button></div>
     </section>
     <aside class="panel right">
-      <div class="cluster-box"><h3>NODES</h3><div id="nodes" class="rows"></div></div>
       <div class="cluster-box"><h3>PODS</h3><div id="pods" class="rows"></div></div>
+      <div class="cluster-box"><h3>📁 FILES</h3><div id="files" class="rows"></div></div>
+      <div class="cluster-box"><h3>⚡ K8S EVENTS</h3><div id="k8sEvents" class="rows"></div></div>
+      <div class="cluster-box"><h3>📦 REPO</h3><div id="repoHead" class="repohead">Repository unavailable</div><div id="repoCommits" class="rows"></div></div>
+      <div class="cluster-box"><h3>NODES</h3><div id="nodes" class="rows"></div></div>
     </aside>
   </div>
   <div class="eventbar"><div id="events" class="events"></div></div>
 </div>
 <script>
-const agentListEl=document.getElementById("agentList"),messagesEl=document.getElementById("messages"),inputEl=document.getElementById("input"),sendEl=document.getElementById("send"),badgeEl=document.getElementById("badge"),chatHeadEl=document.getElementById("chatHead"),leftEl=document.getElementById("left"),eventsEl=document.getElementById("events"),nodesEl=document.getElementById("nodes"),podsEl=document.getElementById("pods");
+const agentListEl=document.getElementById("agentList"),messagesEl=document.getElementById("messages"),inputEl=document.getElementById("input"),sendEl=document.getElementById("send"),badgeEl=document.getElementById("badge"),chatHeadEl=document.getElementById("chatHead"),leftEl=document.getElementById("left"),eventsEl=document.getElementById("events"),nodesEl=document.getElementById("nodes"),podsEl=document.getElementById("pods"),filesEl=document.getElementById("files"),k8sEventsEl=document.getElementById("k8sEvents"),repoHeadEl=document.getElementById("repoHead"),repoCommitsEl=document.getElementById("repoCommits"),exportBtn=document.getElementById("exportBtn");
 let agents=[],selectedAgent="",streaming=false,currentAssistant=null;
 const sessionsByAgent={},agentMessages={},pendingByAgent={};
+let ws=null,wsConnected=false,eventPollTimer=null;
 function rndHex(){return Math.floor(Math.random()*Number.MAX_SAFE_INTEGER).toString(16)}
 function fmtUptime(sec){sec=Number(sec)||0;const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;if(h>0)return h+"h "+m+"m";if(m>0)return m+"m";return s+"s"}
 function esc(s){return String(s==null?"":s)}
@@ -100,7 +118,9 @@ function saveAgentView(name){if(!name)return;agentMessages[name]=Array.from(mess
 function restoreAgentView(name){clearChildren(messagesEl);const arr=agentMessages[name]||[];for(const n of arr)messagesEl.appendChild(n.cloneNode(true));scrollBottom()}
 function ensureSession(agent){if(!sessionsByAgent[agent])sessionsByAgent[agent]=rndHex();return sessionsByAgent[agent]}
 function pendingMap(agent){if(!pendingByAgent[agent])pendingByAgent[agent]={};return pendingByAgent[agent]}
-function bubble(text,role){const el=document.createElement("div");el.className="msg "+role;el.textContent=text||"";messagesEl.appendChild(el);scrollBottom();return el}
+function nowTs(){return new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+function bubble(text,role){const el=document.createElement("div");el.className="msg "+role;const txt=document.createElement("div");txt.className="msg-text";txt.textContent=text||"";const ts=document.createElement('div');ts.className='msg-timestamp';ts.textContent=nowTs();el.append(txt,ts);messagesEl.appendChild(el);scrollBottom();return el}
+function appendToBubble(el,text){const txt=el.querySelector('.msg-text');if(txt)txt.textContent+=(text||"")}
 function toolHeader(tool,args){let preview="";if(args&&typeof args==="object"&&"command" in args)preview=String(args.command);else if(args!==undefined)preview=JSON.stringify(args);return "🔨 "+tool+(preview?": "+preview:"")}
 function addToolCall(agent,tool,args){if(!currentAssistant)currentAssistant=bubble("","assistant");let wrap=currentAssistant.querySelector(".tools");if(!wrap){wrap=document.createElement("div");wrap.className="tools";currentAssistant.appendChild(wrap)}const d=document.createElement("details");d.className="toolbox";d.open=true;const s=document.createElement("summary");s.textContent=toolHeader(tool,args);const p=document.createElement("pre");p.textContent="running...";d.append(s,p);wrap.appendChild(d);const pm=pendingMap(agent);if(!pm[tool])pm[tool]=[];pm[tool].push(p);scrollBottom()}
 function setToolResult(agent,tool,result){const pm=pendingMap(agent);const q=pm[tool]||[];const pre=q.shift();if(!pre)return;const out=result&&result.output?String(result.output):"";const err=result&&result.error?String(result.error):"";pre.textContent=err?(out?err+"\n"+out:err):out;scrollBottom()}
@@ -122,7 +142,7 @@ function renderAgents(){
   badgeEl.textContent=healthy+"/"+agents.length+" healthy";
 }
 function updateChatHead(){const m=selectedMeta();if(!m){chatHeadEl.innerHTML='<span class="dot bad"></span><span>Talking to: none</span>';return}chatHeadEl.innerHTML='<span class="dot '+(m.healthy?'ok':'bad')+'"></span><span>Talking to: '+esc(m.name)+'</span>'}
-function selectAgent(name){if(streaming)return;saveAgentView(selectedAgent);selectedAgent=name;ensureSession(name);currentAssistant=null;restoreAgentView(name);renderAgents();updateChatHead();inputEl.focus()}
+function selectAgent(name){if(streaming)return;saveAgentView(selectedAgent);selectedAgent=name;ensureSession(name);currentAssistant=null;restoreAgentView(name);renderAgents();updateChatHead();loadFiles();inputEl.focus()}
 
 async function loadAgents(){
   try{const r=await fetch('/api/v1/agents');if(!r.ok)throw new Error('agents request failed');agents=await r.json();
@@ -136,13 +156,63 @@ async function loadNodes(){
   }catch(e){console.error(e)}
 }
 function podDot(status){status=String(status||'');if(status==='Running')return 'ok';if(status==='Pending')return 'warn';return 'bad'}
+function fmtBytes(n){n=Number(n)||0;if(n<1024)return n+" B";if(n<1024*1024)return (n/1024).toFixed(1)+" KB";return (n/(1024*1024)).toFixed(1)+" MB"}
 async function loadPods(){
-  try{const r=await fetch('/api/v1/cluster/pods');if(!r.ok)throw new Error('pods failed');const pods=await r.json();clearChildren(podsEl);pods.forEach(p=>{const row=document.createElement('div');row.className='pod';const n=document.createElement('div');n.innerHTML='<div>'+esc(p.name)+'</div><div class="tiny">'+esc(p.node)+'</div>';const rs=document.createElement('div');rs.className='tiny';rs.textContent='r'+(p.restarts||0);const st=document.createElement('div');const dot=document.createElement('span');dot.className='dot '+podDot(p.status);st.append(dot,document.createTextNode(' '+esc(p.status||'')));row.append(n,rs,st);podsEl.appendChild(row)})
+  try{
+    const [podsResp,resResp]=await Promise.all([fetch('/api/v1/cluster/pods'),fetch('/api/v1/k8s/resources')]);
+    if(!podsResp.ok)throw new Error('pods failed');
+    const pods=await podsResp.json();
+    const resList=resResp.ok?await resResp.json():[];
+    const resMap={};(resList||[]).forEach(r=>{resMap[r.pod]=r});
+    clearChildren(podsEl);
+    pods.forEach(p=>{const row=document.createElement('div');row.className='pod';
+      const n=document.createElement('div');
+      const rr=resMap[p.name]||{};
+      const resLine='CPU: '+esc(rr.cpu_request||'-')+'/'+esc(rr.cpu_limit||'-')+' | Mem: '+esc(rr.mem_request||'-')+'/'+esc(rr.mem_limit||'-');
+      n.innerHTML='<div>'+esc(p.name)+'</div><div class="tiny">'+esc(p.node)+'</div><div class="pod-res">'+resLine+'</div>';
+      const rs=document.createElement('div');rs.className='tiny';rs.textContent='r'+(p.restarts||0);
+      const st=document.createElement('div');const dot=document.createElement('span');dot.className='dot '+podDot(p.status);st.append(dot,document.createTextNode(' '+esc(p.status||'')));
+      row.append(n,rs,st);podsEl.appendChild(row)})
   }catch(e){console.error(e)}
+}
+async function loadK8sEvents(){
+  try{const r=await fetch('/api/v1/k8s/events');if(!r.ok)throw new Error('k8s events failed');const events=await r.json();clearChildren(k8sEventsEl);if(!Array.isArray(events)||events.length===0){const row=document.createElement('div');row.className='k8sev';row.textContent='No events';k8sEventsEl.appendChild(row);return}events.forEach(ev=>{const row=document.createElement('div');row.className='k8sev';const dot=document.createElement('span');dot.className='dot '+((ev.type||'')==='Warning'?'warn':'ok');const t=(ev.time||'').slice(11,16);const msg=String(ev.message||'');const trunc=msg.length>80?msg.slice(0,80)+'...':msg;const txt=document.createElement('div');txt.innerHTML='<div>'+t+' '+esc(ev.reason||'')+' • '+esc(ev.object||'')+'</div><div class="tiny">'+esc(trunc)+'</div>';row.append(dot,txt);k8sEventsEl.appendChild(row)})}
+  catch(e){clearChildren(k8sEventsEl);const row=document.createElement('div');row.className='k8sev';row.textContent='No events';k8sEventsEl.appendChild(row)}
+}
+async function loadRepo(){
+  try{
+    const [repoResp,commitsResp]=await Promise.all([fetch('/api/v1/gitea/repo'),fetch('/api/v1/gitea/commits')]);
+    const repo=repoResp.ok?await repoResp.json():null;
+    const commits=commitsResp.ok?await commitsResp.json():[];
+    if(repo&&repo.name){repoHeadEl.textContent=repo.name+' • branch '+esc(repo.default_branch||'main')+' • issues '+(repo.open_issues||0)+' • size '+fmtBytes((repo.size||0)*1024)}else{repoHeadEl.textContent='Repository unavailable'}
+    clearChildren(repoCommitsEl);
+    if(!Array.isArray(commits)||commits.length===0){const row=document.createElement('div');row.className='repoitem';row.textContent='No commits';repoCommitsEl.appendChild(row);return}
+    commits.forEach(c=>{const row=document.createElement('div');row.className='repoitem';const sha=String(c.sha||'').slice(0,7);const msg=String(c.message||'');const trunc=msg.length>60?msg.slice(0,60)+'...':msg;const tm=String(c.date||'').slice(11,16);row.innerHTML='<div><span class="tiny">'+sha+'</span> '+esc(trunc)+'</div><div class="tiny">'+esc(c.author||'')+' • '+tm+'</div>';repoCommitsEl.appendChild(row)})
+  }catch(e){repoHeadEl.textContent='Repository unavailable';clearChildren(repoCommitsEl);const row=document.createElement('div');row.className='repoitem';row.textContent='No commits';repoCommitsEl.appendChild(row)}
+}
+async function loadFiles(){
+  if(!selectedAgent){clearChildren(filesEl);const row=document.createElement('div');row.className='file';row.textContent='No files';filesEl.appendChild(row);return}
+  try{const r=await fetch('/api/v1/agents/'+encodeURIComponent(selectedAgent)+'/files');if(!r.ok)throw new Error('files failed');const files=await r.json();clearChildren(filesEl);if(!Array.isArray(files)||files.length===0){const row=document.createElement('div');row.className='file';row.textContent='No files';filesEl.appendChild(row);return}files.forEach(f=>{const row=document.createElement('div');row.className='file';const n=document.createElement('div');n.textContent=esc(f.name);const s=document.createElement('div');s.className='tiny';s.textContent=fmtBytes(f.size);row.append(n,s);filesEl.appendChild(row)})}
+  catch(e){clearChildren(filesEl);const row=document.createElement('div');row.className='file';row.textContent='No files';filesEl.appendChild(row)}
 }
 async function loadEvents(){
   try{const r=await fetch('/api/v1/events');if(!r.ok)throw new Error('events failed');const ev=await r.json();clearChildren(eventsEl);ev.forEach(e=>{const c=document.createElement('div');c.className='ev '+(e.type||'');const tm=(e.time||'').slice(11,16);c.textContent=tm+' • '+(e.agent||'-')+' • '+(e.type||'')+': '+(e.summary||'');eventsEl.appendChild(c)})
   }catch(e){console.error(e)}
+}
+function prependEvent(e){const c=document.createElement('div');c.className='ev '+(e.type||'');const tm=(e.time||'').slice(11,16);c.textContent=tm+' • '+(e.agent||'-')+' • '+(e.type||'')+': '+(e.summary||'');eventsEl.prepend(c);while(eventsEl.children.length>200)eventsEl.removeChild(eventsEl.lastChild)}
+function connectEventsWS(){
+  const proto=location.protocol==='https:'?'wss://':'ws://';
+  try{ws=new WebSocket(proto+location.host+'/ws/events')}catch(_){return}
+  ws.onopen=()=>{wsConnected=true;if(eventPollTimer){clearInterval(eventPollTimer);eventPollTimer=null}}
+  ws.onmessage=(m)=>{try{prependEvent(JSON.parse(m.data))}catch(_){ }}
+  ws.onclose=()=>{wsConnected=false;ws=null;if(!eventPollTimer){eventPollTimer=setInterval(loadEvents,10000)}setTimeout(connectEventsWS,5000)}
+}
+function exportChat(){
+  if(!selectedAgent)return;
+  const blocks=[];const msgs=Array.from(messagesEl.querySelectorAll('.msg'));
+  msgs.forEach(m=>{const role=m.classList.contains('user')?'User':selectedAgent;const ts=(m.querySelector('.msg-timestamp')||{}).textContent||'';const txt=(m.querySelector('.msg-text')||{}).textContent||'';blocks.push('**'+role+'** ('+ts+')\\n'+txt+'\\n')});
+  const md='# Chat with '+selectedAgent+'\\n\\n**Exported:** '+new Date().toLocaleString()+'\\n\\n---\\n\\n'+blocks.join('\\n---\\n\\n');
+  const blob=new Blob([md],{type:'text/markdown'});const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=selectedAgent+'-'+new Date().toISOString().slice(0,10)+'.md';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
 }
 
 async function sendMessage(){
@@ -154,7 +224,7 @@ async function sendMessage(){
     if(!resp.ok||!resp.body)throw new Error('request failed');
     const reader=resp.body.getReader(),dec=new TextDecoder();let buf='';
     while(true){const part=await reader.read();if(part.done)break;buf+=dec.decode(part.value,{stream:true});for(;;){const i=buf.indexOf('\n\n');if(i<0)break;const evt=parseSSE(buf.slice(0,i));buf=buf.slice(i+2);if(!evt)continue;
-      if(evt.type==='content'&&evt.content!==undefined){currentAssistant.textContent+=evt.content}
+      if(evt.type==='content'&&evt.content!==undefined){appendToBubble(currentAssistant,evt.content)}
       else if(evt.type==='tool_call'){addToolCall(selectedAgent,evt.tool||'tool',evt.args)}
       else if(evt.type==='tool_result'){setToolResult(selectedAgent,evt.tool||'tool',evt.result||{})}
       else if(evt.type==='done'){setStreaming(false)}
@@ -166,9 +236,10 @@ async function sendMessage(){
 
 document.getElementById('refreshAgents').onclick=loadAgents;
 sendEl.onclick=sendMessage;
+exportBtn.onclick=exportChat;
 inputEl.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendMessage()}});
-loadAgents();loadNodes();loadPods();loadEvents();
-setInterval(loadAgents,30000);setInterval(()=>{loadNodes();loadPods()},30000);setInterval(loadEvents,10000);
+loadAgents();loadNodes();loadPods();loadFiles();loadK8sEvents();loadRepo();loadEvents();connectEventsWS();
+setInterval(loadAgents,30000);setInterval(()=>{loadNodes();loadPods();loadFiles();loadK8sEvents();loadRepo()},30000);eventPollTimer=setInterval(loadEvents,10000);
 inputEl.focus();
 </script>
 </body>
@@ -214,6 +285,39 @@ type NodeInfo struct {
 	AllocatableMemory string   `json:"allocatable_memory"`
 }
 
+type K8sEventInfo struct {
+	Type    string `json:"type"`
+	Reason  string `json:"reason"`
+	Object  string `json:"object"`
+	Message string `json:"message"`
+	Time    string `json:"time"`
+	Count   int64  `json:"count"`
+}
+
+type PodResourceInfo struct {
+	Pod        string `json:"pod"`
+	CPURequest string `json:"cpu_request"`
+	CPULimit   string `json:"cpu_limit"`
+	MemRequest string `json:"mem_request"`
+	MemLimit   string `json:"mem_limit"`
+}
+
+type giteaCommit struct {
+	SHA     string `json:"sha"`
+	Message string `json:"message"`
+	Author  string `json:"author"`
+	Date    string `json:"date"`
+}
+
+type giteaRepoInfo struct {
+	Name          string `json:"name"`
+	Stars         int64  `json:"stars"`
+	Forks         int64  `json:"forks"`
+	OpenIssues    int64  `json:"open_issues"`
+	Size          int64  `json:"size"`
+	DefaultBranch string `json:"default_branch"`
+}
+
 type messageReq struct {
 	Agent     string `json:"agent"`
 	Content   string `json:"content"`
@@ -237,6 +341,8 @@ type gateway struct {
 	events   []Event
 	eventCap int
 	k8s      *k8sState
+	wsMu     sync.Mutex
+	wsConns  []net.Conn
 }
 
 type k8sState struct {
@@ -287,6 +393,59 @@ func (g *gateway) addEvent(eventType, agent, summary string) {
 		g.events = append(g.events, e)
 	}
 	g.eventMu.Unlock()
+	g.broadcastEvent(e)
+}
+
+func writeWSFrame(conn net.Conn, payload []byte) error {
+	header := []byte{0x81}
+	n := len(payload)
+	switch {
+	case n < 126:
+		header = append(header, byte(n))
+	case n < 65536:
+		header = append(header, 126, byte(n>>8), byte(n))
+	default:
+		header = append(header, 127, 0, 0, 0, 0, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	}
+	if _, err := conn.Write(header); err != nil {
+		return err
+	}
+	_, err := conn.Write(payload)
+	return err
+}
+
+func (g *gateway) removeWSConn(target net.Conn) {
+	g.wsMu.Lock()
+	defer g.wsMu.Unlock()
+	out := g.wsConns[:0]
+	for _, c := range g.wsConns {
+		if c != target {
+			out = append(out, c)
+		}
+	}
+	g.wsConns = out
+}
+
+func (g *gateway) broadcastEvent(e Event) {
+	payload, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	g.wsMu.Lock()
+	conns := append([]net.Conn(nil), g.wsConns...)
+	g.wsMu.Unlock()
+	for _, c := range conns {
+		if err := writeWSFrame(c, payload); err != nil {
+			_ = c.Close()
+			g.removeWSConn(c)
+		}
+	}
+}
+
+func wsAccept(key string) string {
+	h := sha1.New()
+	_, _ = h.Write([]byte(key + "258EAFA5-E914-47DA-95CA-5AB9DC65C4DA"))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
 func (g *gateway) eventsNewest() []Event {
@@ -608,6 +767,87 @@ func parseNodes(body map[string]interface{}) []NodeInfo {
 	return nodes
 }
 
+func parseK8sEvents(body map[string]interface{}) []K8sEventInfo {
+	items := asSlice(body["items"])
+	events := make([]K8sEventInfo, 0, len(items))
+	for _, item := range items {
+		im := asMap(item)
+		inv := asMap(im["involvedObject"])
+		t := asString(im["lastTimestamp"])
+		if t == "" {
+			t = asString(im["eventTime"])
+		}
+		if t == "" {
+			t = asString(im["firstTimestamp"])
+		}
+		events = append(events, K8sEventInfo{
+			Type:    asString(im["type"]),
+			Reason:  asString(im["reason"]),
+			Object:  strings.ToLower(asString(inv["kind"])) + "/" + asString(inv["name"]),
+			Message: asString(im["message"]),
+			Time:    t,
+			Count:   asInt64(im["count"]),
+		})
+	}
+	sort.Slice(events, func(i, j int) bool { return events[i].Time > events[j].Time })
+	if len(events) > 50 {
+		events = events[:50]
+	}
+	return events
+}
+
+func parsePodResources(body map[string]interface{}) []PodResourceInfo {
+	items := asSlice(body["items"])
+	out := make([]PodResourceInfo, 0, len(items))
+	for _, item := range items {
+		im := asMap(item)
+		meta := asMap(im["metadata"])
+		spec := asMap(im["spec"])
+		info := PodResourceInfo{Pod: asString(meta["name"])}
+		containers := asSlice(spec["containers"])
+		for _, c := range containers {
+			res := asMap(asMap(c)["resources"])
+			req := asMap(res["requests"])
+			lim := asMap(res["limits"])
+			if info.CPURequest == "" {
+				info.CPURequest = asString(req["cpu"])
+			}
+			if info.MemRequest == "" {
+				info.MemRequest = asString(req["memory"])
+			}
+			if info.CPULimit == "" {
+				info.CPULimit = asString(lim["cpu"])
+			}
+			if info.MemLimit == "" {
+				info.MemLimit = asString(lim["memory"])
+			}
+		}
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Pod < out[j].Pod })
+	return out
+}
+
+func fetchGiteaJSON(client *http.Client, baseURL, token, path string, out interface{}) error {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(baseURL, "/")+path, nil)
+	if err != nil {
+		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "token "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 func (k *k8sState) refreshPods() error {
 	path := "/api/v1/namespaces/valhalla/pods"
 	body, err := k.get(path)
@@ -638,6 +878,9 @@ func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 func main() {
 	port := flag.String("port", "8080", "HTTP port")
 	agentsFlag := flag.String("agents", "", "comma-separated name=url agent list")
+	giteaURL := flag.String("gitea-url", "", "Gitea base URL")
+	giteaToken := flag.String("gitea-token", "", "Gitea API token (optional)")
+	giteaRepo := flag.String("gitea-repo", "gitea_admin/project_valhalla", "Gitea repo in owner/name format")
 	flag.Parse()
 	if strings.TrimSpace(*agentsFlag) == "" {
 		die("missing --agents", fmt.Errorf("required"))
@@ -690,6 +933,7 @@ func main() {
 	}
 
 	proxyClient := &http.Client{}
+	giteaClient := &http.Client{Timeout: 5 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -699,12 +943,90 @@ func main() {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, dashboardHTML)
 	})
+	mux.HandleFunc("/ws/events", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+			http.Error(w, "upgrade required", http.StatusUpgradeRequired)
+			return
+		}
+		key := r.Header.Get("Sec-WebSocket-Key")
+		if key == "" {
+			http.Error(w, "missing websocket key", http.StatusBadRequest)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "websocket unsupported", http.StatusInternalServerError)
+			return
+		}
+		conn, rw, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+			"Upgrade: websocket\r\n" +
+			"Connection: Upgrade\r\n" +
+			"Sec-WebSocket-Accept: " + wsAccept(key) + "\r\n\r\n"
+		if _, err := rw.WriteString(resp); err != nil {
+			_ = conn.Close()
+			return
+		}
+		if err := rw.Flush(); err != nil {
+			_ = conn.Close()
+			return
+		}
+		gw.wsMu.Lock()
+		gw.wsConns = append(gw.wsConns, conn)
+		gw.wsMu.Unlock()
+		go func(c net.Conn) {
+			defer func() {
+				_ = c.Close()
+				gw.removeWSConn(c)
+			}()
+			_, _ = io.Copy(io.Discard, c)
+		}(conn)
+	})
 	mux.HandleFunc("/api/v1/agents", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		writeJSON(w, http.StatusOK, gw.snapshotAgents())
+	})
+	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
+		if !strings.HasSuffix(path, "/files") {
+			http.NotFound(w, r)
+			return
+		}
+		name := strings.TrimSuffix(path, "/files")
+		name = strings.Trim(name, "/")
+		if name == "" || strings.Contains(name, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		agent, ok := gw.getAgent(name)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+			return
+		}
+		uReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, strings.TrimRight(agent.URL, "/")+"/api/v1/files", nil)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
+			return
+		}
+		uResp, err := proxyClient.Do(uReq)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
+			return
+		}
+		defer uResp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(uResp.StatusCode)
+		_, _ = io.Copy(w, io.LimitReader(uResp.Body, 4<<20))
 	})
 	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -734,6 +1056,99 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, gw.k8s.snapshotNodes())
+	})
+	mux.HandleFunc("/api/v1/k8s/events", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if gw.k8s == nil || !gw.k8s.enabled {
+			writeJSON(w, http.StatusOK, []K8sEventInfo{})
+			return
+		}
+		body, err := gw.k8s.get("/api/v1/namespaces/valhalla/events")
+		if err != nil {
+			writeJSON(w, http.StatusOK, []K8sEventInfo{})
+			return
+		}
+		writeJSON(w, http.StatusOK, parseK8sEvents(body))
+	})
+	mux.HandleFunc("/api/v1/k8s/resources", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if gw.k8s == nil || !gw.k8s.enabled {
+			writeJSON(w, http.StatusOK, []PodResourceInfo{})
+			return
+		}
+		body, err := gw.k8s.get("/api/v1/namespaces/valhalla/pods")
+		if err != nil {
+			writeJSON(w, http.StatusOK, []PodResourceInfo{})
+			return
+		}
+		writeJSON(w, http.StatusOK, parsePodResources(body))
+	})
+	mux.HandleFunc("/api/v1/gitea/commits", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(*giteaURL) == "" {
+			writeJSON(w, http.StatusOK, []giteaCommit{})
+			return
+		}
+		var resp []map[string]interface{}
+		err := fetchGiteaJSON(giteaClient, *giteaURL, *giteaToken, "/api/v1/repos/"+*giteaRepo+"/commits?limit=10", &resp)
+		if err != nil {
+			writeJSON(w, http.StatusOK, []giteaCommit{})
+			return
+		}
+		out := make([]giteaCommit, 0, len(resp))
+		for _, c := range resp {
+			commit := asMap(c["commit"])
+			author := asMap(commit["author"])
+			sha := asString(c["sha"])
+			msg := asString(commit["message"])
+			if i := strings.Index(msg, "\n"); i >= 0 {
+				msg = msg[:i]
+			}
+			out = append(out, giteaCommit{
+				SHA:     sha,
+				Message: msg,
+				Author:  asString(author["name"]),
+				Date:    asString(author["date"]),
+			})
+		}
+		if len(out) > 10 {
+			out = out[:10]
+		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("/api/v1/gitea/repo", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(*giteaURL) == "" {
+			writeJSON(w, http.StatusOK, map[string]interface{}{})
+			return
+		}
+		var repo map[string]interface{}
+		err := fetchGiteaJSON(giteaClient, *giteaURL, *giteaToken, "/api/v1/repos/"+*giteaRepo, &repo)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]interface{}{})
+			return
+		}
+		out := giteaRepoInfo{
+			Name:          asString(repo["name"]),
+			Stars:         asInt64(repo["stars_count"]),
+			Forks:         asInt64(repo["forks_count"]),
+			OpenIssues:    asInt64(repo["open_issues_count"]),
+			Size:          asInt64(repo["size"]),
+			DefaultBranch: asString(repo["default_branch"]),
+		}
+		writeJSON(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("/api/v1/message", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -785,18 +1200,72 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 
 		reader := bufio.NewReader(uResp.Body)
+		var contentBuf strings.Builder
+		var doneEvt map[string]interface{}
+		forward := func(evt map[string]interface{}) bool {
+			b, err := json.Marshal(evt)
+			if err != nil {
+				return true
+			}
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+				return false
+			}
+			flusher.Flush()
+			return true
+		}
+		flushContent := func() bool {
+			clean := thinkTagRE.ReplaceAllString(contentBuf.String(), "")
+			if clean != "" {
+				if !forward(map[string]interface{}{"type": "content", "content": clean, "done": false}) {
+					return false
+				}
+			}
+			return true
+		}
 		for {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
-				if _, wErr := w.Write(line); wErr != nil {
-					return
+				trim := strings.TrimSpace(string(line))
+				if strings.HasPrefix(trim, "data:") {
+					payload := strings.TrimSpace(strings.TrimPrefix(trim, "data:"))
+					var evt map[string]interface{}
+					if json.Unmarshal([]byte(payload), &evt) == nil {
+						typ, _ := evt["type"].(string)
+						if typ == "content" {
+							if content, _ := evt["content"].(string); content != "" {
+								contentBuf.WriteString(content)
+							}
+							goto lineDone
+						}
+						if typ, _ := evt["type"].(string); typ == "tool_call" {
+							gw.addEvent("tool_call", in.Agent, "Tool call observed")
+						}
+						if typ == "done" {
+							doneEvt = evt
+							if !flushContent() {
+								return
+							}
+							if !forward(doneEvt) {
+								return
+							}
+							return
+						}
+						if !forward(evt) {
+							return
+						}
+					}
 				}
-				if strings.HasPrefix(string(bytes.TrimSpace(line)), "data:") && bytes.Contains(line, []byte(`"type":"tool_call"`)) {
-					gw.addEvent("tool_call", in.Agent, "Tool call observed")
-				}
-				flusher.Flush()
+			lineDone:
 			}
 			if err == io.EOF {
+				if !flushContent() {
+					return
+				}
+				if doneEvt != nil {
+					_ = forward(doneEvt)
+				} else {
+					_ = forward(map[string]interface{}{"type": "done", "done": true})
+				}
 				return
 			}
 			if err != nil {

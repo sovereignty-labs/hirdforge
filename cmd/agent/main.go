@@ -7,9 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -293,6 +296,15 @@ var (
 	toolCalls    int64
 	modelName    string
 	enabledTools []string
+	thinkTagRE   = regexp.MustCompile(`(?s)<think>.*?</think>`)
+
+	metricsRequestsTotal      int64
+	metricsToolCallsTotal     int64
+	metricsErrorsTotal        int64
+	metricsActiveRequests     int64
+	metricsLastRequestDurBits uint64
+	toolMetricMu              sync.Mutex
+	metricsToolCallsByTool    = map[string]*int64{}
 )
 
 type delegateTool struct {
@@ -324,27 +336,34 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 		sort.Strings(names)
 		return toolpkg.ToolResult{Error: fmt.Sprintf("unknown agent: %s. Available: %s", agent, strings.Join(names, ", "))}
 	}
+	resp, err := callPeerAgentTask(agent, peerURL, task)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	return toolpkg.ToolResult{Output: resp}
+}
 
+func callPeerAgentTask(agentName, peerURL, task string) (string, error) {
+	logJSON("info", "delegating", map[string]interface{}{"target_agent": agentName})
 	body, _ := json.Marshal(map[string]string{
 		"content":    task,
 		"session_id": fmt.Sprintf("delegate-%x", rand.Int63()),
 	})
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(peerURL, "/")+"/message", bytes.NewReader(body))
 	if err != nil {
-		return toolpkg.ToolResult{Error: err.Error()}
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 120 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return toolpkg.ToolResult{Error: err.Error()}
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return toolpkg.ToolResult{Error: fmt.Sprintf("peer returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
+		return "", fmt.Errorf("peer returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
-
 	var full strings.Builder
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -353,7 +372,7 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 			break
 		}
 		if err != nil {
-			return toolpkg.ToolResult{Error: err.Error()}
+			return "", err
 		}
 		line = strings.TrimRight(line, "\r\n")
 		if !strings.HasPrefix(line, "data: ") {
@@ -372,17 +391,144 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 			continue
 		}
 		if evt.Type == "content" {
-			full.WriteString(evt.Content)
+			full.WriteString(stripThinkTags(evt.Content))
 		}
 		if evt.Done {
 			break
 		}
 	}
-	return toolpkg.ToolResult{Output: full.String()}
+	return full.String(), nil
+}
+
+type broadcastTool struct {
+	peers map[string]string
+}
+
+func (t *broadcastTool) Name() string { return "broadcast" }
+func (t *broadcastTool) Description() string {
+	return "Send a task to ALL peer agents in parallel and collect their responses. Use for gathering information or coordinating across the entire team."
+}
+func (t *broadcastTool) Parameters() map[string]string {
+	return map[string]string{
+		"task": "The task to send to all agents",
+	}
+}
+func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	task, _ := args["task"].(string)
+	if strings.TrimSpace(task) == "" {
+		return toolpkg.ToolResult{Error: "task is required"}
+	}
+	if len(t.peers) == 0 {
+		return toolpkg.ToolResult{Error: "no peers configured"}
+	}
+	names := make([]string, 0, len(t.peers))
+	for name := range t.peers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	type out struct {
+		name string
+		resp string
+		err  error
+	}
+	results := make(chan out, len(names))
+	var wg sync.WaitGroup
+	for _, name := range names {
+		wg.Add(1)
+		go func(peerName string) {
+			defer wg.Done()
+			resp, err := callPeerAgentTask(peerName, t.peers[peerName], task)
+			results <- out{name: peerName, resp: resp, err: err}
+		}(name)
+	}
+	wg.Wait()
+	close(results)
+	collected := map[string]out{}
+	for r := range results {
+		collected[r.name] = r
+	}
+	var b strings.Builder
+	for _, name := range names {
+		r := collected[name]
+		b.WriteString("=== " + name + " ===\n")
+		if r.err != nil {
+			b.WriteString("ERROR: " + r.err.Error() + "\n\n")
+		} else {
+			b.WriteString(r.resp + "\n\n")
+		}
+	}
+	return toolpkg.ToolResult{Output: b.String()}
+}
+
+func logJSON(level, msg string, fields map[string]interface{}) {
+	entry := map[string]interface{}{
+		"ts":    time.Now().UTC().Format(time.RFC3339),
+		"level": level,
+		"msg":   msg,
+	}
+	for k, v := range fields {
+		entry[k] = v
+	}
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	b = append(b, '\n')
+	_, _ = os.Stdout.Write(b)
+}
+
+func incError(msg string, err error, fields map[string]interface{}) {
+	atomic.AddInt64(&metricsErrorsTotal, 1)
+	if fields == nil {
+		fields = map[string]interface{}{}
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	logJSON("error", msg, fields)
+}
+
+func stripThinkTags(s string) string {
+	return thinkTagRE.ReplaceAllString(s, "")
+}
+
+func setLastDuration(d time.Duration) {
+	atomic.StoreUint64(&metricsLastRequestDurBits, math.Float64bits(d.Seconds()))
+}
+
+func getLastDuration() float64 {
+	return math.Float64frombits(atomic.LoadUint64(&metricsLastRequestDurBits))
+}
+
+func incToolMetric(tool string) {
+	toolMetricMu.Lock()
+	ptr, ok := metricsToolCallsByTool[tool]
+	if !ok {
+		ptr = new(int64)
+		metricsToolCallsByTool[tool] = ptr
+	}
+	toolMetricMu.Unlock()
+	atomic.AddInt64(ptr, 1)
+}
+
+func snapshotToolMetrics() map[string]int64 {
+	toolMetricMu.Lock()
+	defer toolMetricMu.Unlock()
+	out := make(map[string]int64, len(metricsToolCallsByTool))
+	for k, v := range metricsToolCallsByTool {
+		out[k] = atomic.LoadInt64(v)
+	}
+	return out
+}
+
+type fileInfo struct {
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	Modified string `json:"modified"`
 }
 
 func die(msg string, err error) {
-	fmt.Fprintln(os.Stderr, msg+":", err)
+	incError(msg, err, nil)
 	os.Exit(1)
 }
 
@@ -462,6 +608,9 @@ func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, mo
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return chatResponse{}, fmt.Errorf("failed to parse response: %w", err)
 	}
+	if len(out.Choices) > 0 {
+		out.Choices[0].Message.Content = stripThinkTags(out.Choices[0].Message.Content)
+	}
 	return out, nil
 }
 
@@ -519,7 +668,7 @@ func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKe
 				return
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				chunks <- chunk.Choices[0].Delta.Content
+				chunks <- stripThinkTags(chunk.Choices[0].Delta.Content)
 			}
 		}
 	}()
@@ -544,7 +693,7 @@ func trimMessages(msgs []message, maxPairs int) []message {
 	trimmed := make([]message, 0, 1+maxNonSystem)
 	trimmed = append(trimmed, msgs[0])
 	trimmed = append(trimmed, msgs[start:]...)
-	fmt.Printf("trimmed context: kept %d of %d messages\n", len(trimmed), len(msgs))
+	logJSON("info", "context trimmed", map[string]interface{}{"kept": len(trimmed), "total": len(msgs)})
 	return trimmed
 }
 
@@ -569,6 +718,74 @@ func agentNameFromSoul(soul string) string {
 		return "valhalla-agent"
 	}
 	return line
+}
+
+func listWorkspaceFiles(workspace string, limit int) ([]fileInfo, error) {
+	files := make([]fileInfo, 0)
+	root, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil, err
+	}
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if len(files) >= limit {
+			return io.EOF
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, fileInfo{
+			Name:     filepath.ToSlash(rel),
+			Size:     info.Size(),
+			Modified: info.ModTime().UTC().Format(time.RFC3339),
+		})
+		return nil
+	})
+	if err == io.EOF {
+		err = nil
+	}
+	return files, err
+}
+
+func metricsText() string {
+	var b strings.Builder
+	b.WriteString("# HELP valhalla_agent_requests_total Total messages processed\n")
+	b.WriteString("# TYPE valhalla_agent_requests_total counter\n")
+	b.WriteString(fmt.Sprintf("valhalla_agent_requests_total %d\n", atomic.LoadInt64(&metricsRequestsTotal)))
+	b.WriteString("# HELP valhalla_agent_request_duration_seconds Last request duration in seconds\n")
+	b.WriteString("# TYPE valhalla_agent_request_duration_seconds gauge\n")
+	b.WriteString(fmt.Sprintf("valhalla_agent_request_duration_seconds %.6f\n", getLastDuration()))
+	b.WriteString("# HELP valhalla_agent_tool_calls_total Total tool calls by tool name\n")
+	b.WriteString("# TYPE valhalla_agent_tool_calls_total counter\n")
+	toolMap := snapshotToolMetrics()
+	toolNames := make([]string, 0, len(toolMap))
+	for name := range toolMap {
+		toolNames = append(toolNames, name)
+	}
+	sort.Strings(toolNames)
+	for _, name := range toolNames {
+		b.WriteString(fmt.Sprintf("valhalla_agent_tool_calls_total{tool=%q} %d\n", name, toolMap[name]))
+	}
+	b.WriteString("# HELP valhalla_agent_errors_total Total errors\n")
+	b.WriteString("# TYPE valhalla_agent_errors_total counter\n")
+	b.WriteString(fmt.Sprintf("valhalla_agent_errors_total %d\n", atomic.LoadInt64(&metricsErrorsTotal)))
+	b.WriteString("# HELP valhalla_agent_uptime_seconds Agent uptime in seconds\n")
+	b.WriteString("# TYPE valhalla_agent_uptime_seconds gauge\n")
+	b.WriteString(fmt.Sprintf("valhalla_agent_uptime_seconds %d\n", int(time.Since(startTime).Seconds())))
+	b.WriteString("# HELP valhalla_agent_active_requests Active in-flight requests\n")
+	b.WriteString("# TYPE valhalla_agent_active_requests gauge\n")
+	b.WriteString(fmt.Sprintf("valhalla_agent_active_requests %d\n", atomic.LoadInt64(&metricsActiveRequests)))
+	return b.String()
 }
 
 func main() {
@@ -604,6 +821,8 @@ func main() {
 	agentName := agentNameFromSoul(soul)
 
 	reg := toolpkg.NewRegistry()
+	delegateExec := &delegateTool{peers: peers}
+	broadcastExec := &broadcastTool{peers: peers}
 	enabled := map[string]bool{}
 	for _, name := range strings.Split(*toolsFlag, ",") {
 		if name = strings.TrimSpace(name); name != "" {
@@ -620,7 +839,10 @@ func main() {
 		reg.Register(toolpkg.NewWriteTool(*workspace))
 	}
 	if enabled["delegate"] || len(peers) > 0 {
-		reg.Register(&delegateTool{peers: peers})
+		reg.Register(delegateExec)
+	}
+	if enabled["broadcast"] || len(peers) > 0 {
+		reg.Register(broadcastExec)
 	}
 	toolDefs := buildToolDefs(reg)
 	enabledTools = reg.List()
@@ -695,14 +917,45 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	})
+	mux.HandleFunc("/api/v1/files", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		files, err := listWorkspaceFiles(*workspace, 1000)
+		if err != nil {
+			incError("workspace list failed", err, nil)
+			http.Error(w, "failed listing files", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(files)
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		_, _ = io.WriteString(w, metricsText())
+	})
 	mux.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		startReq := time.Now()
 		atomic.AddInt64(&requestCount, 1)
+		atomic.AddInt64(&metricsRequestsTotal, 1)
+		atomic.AddInt64(&metricsActiveRequests, 1)
+		defer func() {
+			atomic.AddInt64(&metricsActiveRequests, -1)
+			setLastDuration(time.Since(startReq))
+		}()
+		logJSON("info", "request received", nil)
 		var req messageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			incError("invalid request body", err, nil)
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
 			return
 		}
@@ -729,6 +982,7 @@ func main() {
 		for i := 0; i < 10; i++ {
 			resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
 			if err != nil {
+				incError("inference non-streaming failed", err, nil)
 				writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
 				writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
 				flusher.Flush()
@@ -741,20 +995,30 @@ func main() {
 			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
 			for _, tc := range assistant.ToolCalls {
 				atomic.AddInt64(&toolCalls, 1)
+				atomic.AddInt64(&metricsToolCallsTotal, 1)
+				incToolMetric(tc.Function.Name)
 				args := map[string]interface{}{}
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 					args = map[string]interface{}{"_raw": tc.Function.Arguments}
 				}
+				logJSON("info", "tool called", map[string]interface{}{"tool": tc.Function.Name})
 				writeSSE(w, sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false})
 				flusher.Flush()
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
 				switch tc.Function.Name {
 				case "delegate":
-					result = (&delegateTool{peers: peers}).Execute(args)
+					result = delegateExec.Execute(args)
+				case "broadcast":
+					result = broadcastExec.Execute(args)
 				default:
 					if t, ok := reg.Get(tc.Function.Name); ok {
 						result = t.Execute(args)
 					}
+				}
+				if result.Error != "" {
+					logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error})
+				} else {
+					logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
 				}
 				writeSSE(w, sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false})
 				flusher.Flush()
@@ -776,19 +1040,25 @@ func main() {
 		var full strings.Builder
 		for chunk := range streamOllama(messages, nil, *inferenceURL, *model, *apiKey) {
 			full.WriteString(chunk)
-			writeSSE(w, sseChunk{Type: "content", Content: chunk, Done: false})
+		}
+		cleaned := stripThinkTags(full.String())
+		if cleaned != "" {
+			writeSSE(w, sseChunk{Type: "content", Content: cleaned, Done: false})
 			flusher.Flush()
 		}
 		sessionsMu.Lock()
-		sessions[sessionID] = append(sessions[sessionID], message{Role: "user", Content: req.Content}, message{Role: "assistant", Content: full.String()})
+		sessions[sessionID] = append(sessions[sessionID], message{Role: "user", Content: req.Content}, message{Role: "assistant", Content: cleaned})
 		sessionsMu.Unlock()
 		writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
 		flusher.Flush()
 	})
 
 	addr := ":" + *port
-	fmt.Printf("Valhalla Agent listening on %s\n", addr)
-	fmt.Printf("SOUL loaded: %s (%d bytes)\n", *soulPath, len(soulBytes))
-	fmt.Printf("Inference: %s model=%s\n", *inferenceURL, *model)
+	logJSON("info", "agent started", map[string]interface{}{
+		"port":  *port,
+		"model": *model,
+		"tools": enabledTools,
+		"peers": peerNames,
+	})
 	die("server failed", http.ListenAndServe(addr, mux))
 }
