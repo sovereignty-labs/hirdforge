@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
@@ -286,6 +287,13 @@ type (
 
 var sessionsMu sync.Mutex
 var sessions = map[string][]message{}
+var (
+	startTime    = time.Now()
+	requestCount int64
+	toolCalls    int64
+	modelName    string
+	enabledTools []string
+)
 
 func die(msg string, err error) {
 	fmt.Fprintln(os.Stderr, msg+":", err)
@@ -408,6 +416,18 @@ func writeSSE(w http.ResponseWriter, payload sseChunk) {
 	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
+func statusPayload() map[string]interface{} {
+	return map[string]interface{}{
+		"status":          "ready",
+		"agent":           "valhalla-agent",
+		"model":           modelName,
+		"tools":           enabledTools,
+		"uptime_seconds":  int(time.Since(startTime).Seconds()),
+		"requests_served": atomic.LoadInt64(&requestCount),
+		"tool_calls_made": atomic.LoadInt64(&toolCalls),
+	}
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	soulPath := flag.String("soul", "./soul.md", "path to SOUL.md")
@@ -444,6 +464,8 @@ func main() {
 		reg.Register(toolpkg.NewWriteTool(*workspace))
 	}
 	toolDefs := buildToolDefs(reg)
+	enabledTools = reg.List()
+	modelName = *model
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -460,7 +482,15 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ready", "agent": "valhalla-agent", "model": *model})
+		_ = json.NewEncoder(w).Encode(statusPayload())
+	})
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(statusPayload())
 	})
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -486,6 +516,7 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		atomic.AddInt64(&requestCount, 1)
 		var req messageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON body", http.StatusBadRequest)
@@ -524,6 +555,7 @@ func main() {
 			assistant := resp.Choices[0].Message
 			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
 			for _, tc := range assistant.ToolCalls {
+				atomic.AddInt64(&toolCalls, 1)
 				args := map[string]interface{}{}
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 					args = map[string]interface{}{"_raw": tc.Function.Arguments}

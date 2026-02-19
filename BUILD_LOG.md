@@ -105,3 +105,58 @@
 - 13.5MB image, non-root, 1-second startup
 - Two agents, two personalities, one binary
 - **The hall has warriors.**
+
+## Session 3 — 2026-02-18 (Command Center)
+
+### Gateway Command Center — DEPLOYED
+- Full rewrite of gateway as multi-panel command center
+- 4-panel layout: agents sidebar, chat center, cluster panel, event bar
+- K8s API integration via ServiceAccount (read-only RBAC)
+- Live pod and node status with health dots
+- Agent cards showing model, tools, uptime, request/tool call counts
+- Per-agent chat history preserved when switching agents
+- In-memory event ring buffer (200 events, newest first)
+- Event types: message, tool_call, health_change, agent_start, k8s_event
+- Responsive layout (cluster panel hides on narrow screens)
+
+### Agent Enhancements
+- /health now returns: model, tools[], uptime_seconds, requests_served, tool_calls_made
+- Added /status endpoint (same payload)
+- Atomic counters for request and tool call tracking
+
+### Infrastructure
+- Fixed Gitea container registry (ROOT_URL in Secret)
+- Patched all 3 Talos nodes for insecure HTTP registry
+- Gateway ServiceAccount + ClusterRole (read-only pods/nodes/deployments/services)
+- Deployment security: runAsNonRoot, drop ALL caps, seccomp RuntimeDefault
+
+### Final Fleet Status
+```
+kubectl get all -n valhalla
+  deployment/chuck    1/1
+  deployment/ragnar   1/1
+  deployment/gateway  1/1
+  service/chuck       NodePort :30881
+  service/ragnar      NodePort :30882
+  service/gateway     NodePort :30880
+```
+
+### Known Issues
+- [ ] Event log timestamps may show UTC, need local time conversion
+- [ ] No context compaction — long sessions will hit token limits
+- [ ] No auth on gateway
+- [ ] No tests
+
+### Session 3 Stats
+- Gateway rewrite: ~750 lines Go (cmd/gateway/main.go)
+- Agent enhancement: +33 lines
+- Total project: ~1100 lines of Go
+- Zero external dependencies
+- 3 pods running on Valhalla cluster
+- Build + push + deploy pipeline: ~30 seconds end to end
+
+### Milestone
+**v0.0.1-rc1 — Valhalla Command Center operational.**
+Multi-agent AI platform running on Kubernetes with unified dashboard,
+tool calling, session memory, K8s cluster visibility, and event logging.
+Built from scratch in ~5 hours across 3 sessions.
