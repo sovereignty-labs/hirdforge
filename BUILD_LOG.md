@@ -94,3 +94,14 @@
 - Tool calling works from inside the pod
 - Chuck demonstrated multi-step tool recovery (systemctl fail → ps aux fallback)
 - **The warrior is in the hall.**
+
+### Multi-Agent Deployment (Session 2, overtime)
+- Chuck: Deployment + Service at :30881, tools=exec,read,write
+- Ragnar: Deployment + Service at :30882, tools=read,write (no exec — architects don't need shells)
+- Both using same valhalla-agent binary with different SOULs
+- PodSecurity compliant (runAsNonRoot, drop ALL caps, seccomp RuntimeDefault)
+- Gitea container registry fixed (ROOT_URL patched in Secret)
+- Talos nodes patched to trust HTTP registry
+- 13.5MB image, non-root, 1-second startup
+- Two agents, two personalities, one binary
+- **The hall has warriors.**
