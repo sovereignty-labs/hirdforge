@@ -58,3 +58,12 @@
 - Tool framework: exec, read, write with security
 - Zero external dependencies
 - Everything compiles and runs against live Ollama on workstation
+
+### Agentic Tool Loop (Session 2, final)
+- Tool calling wired into Ollama via OpenAI function calling API
+- Non-streaming for tool detection, streaming for final response
+- Loop: model → tool_call → execute → tool_result → model (up to 10 rounds)
+- Tested: exec (ls), write (created hello.txt), all working
+- SSE events: tool_call, tool_result, content, done
+- Chuck Norse successfully used tools autonomously
+- **The warrior has his hammer.**
