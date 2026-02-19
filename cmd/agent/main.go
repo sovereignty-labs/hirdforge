@@ -460,6 +460,110 @@ func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult 
 	return toolpkg.ToolResult{Output: b.String()}
 }
 
+type recallTool struct {
+	memoryURL string
+	agentName string
+}
+
+func (t *recallTool) Name() string { return "recall" }
+func (t *recallTool) Description() string {
+	return "Search your memories and the knowledge base for relevant information. Use this before starting a task to check if you've done something similar before."
+}
+func (t *recallTool) Parameters() map[string]string {
+	return map[string]string{"query": "What to search for in memories"}
+}
+func (t *recallTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	query, _ := args["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return toolpkg.ToolResult{Output: "No relevant memories found."}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"query": query,
+		"agent": t.agentName,
+		"limit": 5,
+	})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(t.memoryURL, "/")+"/query", bytes.NewReader(body))
+	if err != nil {
+		return toolpkg.ToolResult{Output: "No relevant memories found."}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return toolpkg.ToolResult{Output: "No relevant memories found."}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return toolpkg.ToolResult{Output: "No relevant memories found."}
+	}
+	var out struct {
+		Results []struct {
+			Content    string  `json:"content"`
+			Similarity float64 `json:"similarity"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Results) == 0 {
+		return toolpkg.ToolResult{Output: "No relevant memories found."}
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Found %d relevant memories:\n\n", len(out.Results))
+	for i, r := range out.Results {
+		fmt.Fprintf(&b, "%d. [%.2f] %s\n", i+1, r.Similarity, strings.TrimSpace(r.Content))
+	}
+	return toolpkg.ToolResult{Output: b.String()}
+}
+
+type rememberTool struct {
+	memoryURL string
+	agentName string
+}
+
+func (t *rememberTool) Name() string { return "remember" }
+func (t *rememberTool) Description() string {
+	return "Store important information for future reference. Use this to save decisions, code patterns, lessons learned, or task completions."
+}
+func (t *rememberTool) Parameters() map[string]string {
+	return map[string]string{
+		"content": "The information to remember",
+		"tags":    "Comma-separated tags for categorization (optional)",
+	}
+}
+func (t *rememberTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	content, _ := args["content"].(string)
+	if strings.TrimSpace(content) == "" {
+		return toolpkg.ToolResult{Error: "content is required"}
+	}
+	tagsRaw, _ := args["tags"].(string)
+	tags := make([]string, 0)
+	for _, tag := range strings.Split(tagsRaw, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"agent":   t.agentName,
+		"content": content,
+		"tags":    tags,
+	})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(t.memoryURL, "/")+"/remember", bytes.NewReader(body))
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return toolpkg.ToolResult{Error: strings.TrimSpace(string(b))}
+	}
+	return toolpkg.ToolResult{Output: "Remembered."}
+}
+
 func logJSON(level, msg string, fields map[string]interface{}) {
 	entry := map[string]interface{}{
 		"ts":    time.Now().UTC().Format(time.RFC3339),
@@ -566,6 +670,9 @@ func buildToolDefs(reg *toolpkg.Registry) []toolDef {
 		params := t.Parameters()
 		required := make([]string, 0, len(params))
 		for k := range params {
+			if t.Name() == "remember" && k == "tags" {
+				continue
+			}
 			required = append(required, k)
 		}
 		sort.Strings(required)
@@ -798,6 +905,7 @@ func main() {
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
+	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
 	flag.Parse()
 
@@ -823,6 +931,8 @@ func main() {
 	reg := toolpkg.NewRegistry()
 	delegateExec := &delegateTool{peers: peers}
 	broadcastExec := &broadcastTool{peers: peers}
+	recallExec := &recallTool{memoryURL: *memoryURL, agentName: agentName}
+	rememberExec := &rememberTool{memoryURL: *memoryURL, agentName: agentName}
 	enabled := map[string]bool{}
 	for _, name := range strings.Split(*toolsFlag, ",") {
 		if name = strings.TrimSpace(name); name != "" {
@@ -843,6 +953,10 @@ func main() {
 	}
 	if enabled["broadcast"] || len(peers) > 0 {
 		reg.Register(broadcastExec)
+	}
+	if strings.TrimSpace(*memoryURL) != "" {
+		reg.Register(recallExec)
+		reg.Register(rememberExec)
 	}
 	toolDefs := buildToolDefs(reg)
 	enabledTools = reg.List()

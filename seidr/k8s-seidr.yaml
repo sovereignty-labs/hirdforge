@@ -1,0 +1,116 @@
+# ChromaDB — Vector Database (CPU-only, PVC-backed)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chromadb-data
+  namespace: valhalla
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chromadb
+  namespace: valhalla
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chromadb
+  template:
+    metadata:
+      labels:
+        app: chromadb
+    spec:
+      containers:
+      - name: chromadb
+        image: chromadb/chroma:0.5.0
+        ports:
+        - containerPort: 8000
+        env:
+        - name: IS_PERSISTENT
+          value: "TRUE"
+        - name: ANONYMIZED_TELEMETRY
+          value: "FALSE"
+        volumeMounts:
+        - name: data
+          mountPath: /chroma/chroma
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: chromadb-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromadb
+  namespace: valhalla
+spec:
+  selector:
+    app: chromadb
+  ports:
+  - port: 8000
+    targetPort: 8000
+---
+# Seidr — Knowledge & Memory API (CPU-only)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: seidr
+  namespace: valhalla
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: seidr
+  template:
+    metadata:
+      labels:
+        app: seidr
+    spec:
+      containers:
+      - name: seidr
+        image: 203.0.113.26:30637/gitea_admin/valhalla-seidr:latest
+        ports:
+        - containerPort: 8082
+        env:
+        - name: CHROMA_HOST
+          value: chromadb.valhalla.svc
+        - name: CHROMA_PORT
+          value: "8000"
+        - name: COLLECTION_NAME
+          value: valhalla_knowledge
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: seidr
+  namespace: valhalla
+spec:
+  selector:
+    app: seidr
+  ports:
+  - port: 8082
+    targetPort: 8082
+    nodePort: 30885
+  type: NodePort
