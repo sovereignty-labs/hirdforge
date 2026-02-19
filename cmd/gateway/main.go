@@ -128,7 +128,7 @@ async function loadAgents(){
   try{const r=await fetch('/api/v1/agents');if(!r.ok)throw new Error('agents request failed');agents=await r.json();
     if(!selectedAgent&&agents.length)selectedAgent=agents[0].name;
     if(selectedAgent&&!agents.find(a=>a.name===selectedAgent)){saveAgentView(selectedAgent);selectedAgent=agents.length?agents[0].name:""}
-    renderAgents();updateChatHead();if(selectedAgent)restoreAgentView(selectedAgent);
+    renderAgents();updateChatHead();
   }catch(e){console.error(e)}
 }
 async function loadNodes(){

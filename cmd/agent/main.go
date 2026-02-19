@@ -326,7 +326,7 @@ func buildToolDefs(reg *toolpkg.Registry) []toolDef {
 	return defs
 }
 
-func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, model string) (chatResponse, error) {
+func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/chat/completions"
 	body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Stream: false, Tools: defs})
 	if err != nil {
@@ -337,6 +337,9 @@ func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, mo
 		return chatResponse{}, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("request failed: %w", err)
@@ -353,7 +356,7 @@ func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, mo
 	return out, nil
 }
 
-func streamOllama(messages []message, defs []toolDef, inferenceURL, model string) <-chan string {
+func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan string {
 	chunks := make(chan string)
 	go func() {
 		defer close(chunks)
@@ -369,6 +372,9 @@ func streamOllama(messages []message, defs []toolDef, inferenceURL, model string
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			chunks <- "request failed: " + err.Error()
@@ -434,6 +440,7 @@ func main() {
 	port := flag.String("port", "8081", "HTTP port")
 	inferenceURL := flag.String("inference-url", "http://localhost:11434", "inference base URL")
 	model := flag.String("model", "qwen3:30b", "model name")
+	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
 	flag.Parse()
@@ -542,7 +549,7 @@ func main() {
 		w.Header().Set("Connection", "keep-alive")
 
 		for i := 0; i < 10; i++ {
-			resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model)
+			resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
 			if err != nil {
 				writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
 				writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
@@ -584,7 +591,7 @@ func main() {
 		}
 
 		var full strings.Builder
-		for chunk := range streamOllama(messages, nil, *inferenceURL, *model) {
+		for chunk := range streamOllama(messages, nil, *inferenceURL, *model, *apiKey) {
 			full.WriteString(chunk)
 			writeSSE(w, sseChunk{Type: "content", Content: chunk, Done: false})
 			flusher.Flush()
