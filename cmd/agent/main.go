@@ -907,6 +907,7 @@ func main() {
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
 	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
+	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
 	flag.Parse()
 
 	soulBytes, err := os.ReadFile(*soulPath)
@@ -947,6 +948,18 @@ func main() {
 	}
 	if enabled["write"] {
 		reg.Register(toolpkg.NewWriteTool(*workspace))
+	}
+	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] {
+		giteaToken := os.Getenv("GITEA_TOKEN")
+		if enabled["git-clone"] {
+			reg.Register(toolpkg.NewGitCloneTool(*workspace, *giteaURL, giteaToken))
+		}
+		if enabled["git-commit"] {
+			reg.Register(toolpkg.NewGitCommitTool(*workspace, *giteaURL, giteaToken))
+		}
+		if enabled["git-diff"] {
+			reg.Register(toolpkg.NewGitDiffTool(*workspace))
+		}
 	}
 	if enabled["delegate"] || len(peers) > 0 {
 		reg.Register(delegateExec)
