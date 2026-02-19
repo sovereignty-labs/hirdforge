@@ -67,3 +67,19 @@
 - SSE events: tool_call, tool_result, content, done
 - Chuck Norse successfully used tools autonomously
 - **The warrior has his hammer.**
+
+### Web Dashboard (Session 2, bonus)
+- Embedded HTML/CSS/JS dashboard served from GET /
+- Dark theme, chat bubbles, tool call collapsibles
+- SSE streaming via fetch ReadableStream (no WebSocket needed)
+- Works first try — no Raven-style delivery bugs
+- Chuck responds in character and uses tools from the browser
+- **The warrior has a face.**
+
+### Session 2 Final Stats
+- 8 commits to main
+- ~800 lines of Go (cmd/agent/main.go + pkg/tools/*)
+- Zero external dependencies
+- Working: HTTP server, SSE streaming, sessions, 3 tools, agentic loop, web UI
+- Tested against qwen3:30b on workstation RTX 3090
+- Time: ~3 hours from first Go file to browser-accessible AI agent

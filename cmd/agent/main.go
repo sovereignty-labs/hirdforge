@@ -18,6 +18,201 @@ import (
 	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
 )
 
+const dashboardHTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Valhalla Dashboard</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; background: #1a1a2e; color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex; justify-content: center;
+    }
+    .app { width: 100%; max-width: 800px; height: 100vh; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
+    .header {
+      background: #22223b; border: 1px solid #33344d; border-radius: 12px;
+      padding: 12px 14px; display: flex; align-items: center; justify-content: space-between;
+    }
+    .title { font-size: 20px; font-weight: 700; letter-spacing: 0.2px; }
+    .status { display: flex; align-items: center; gap: 8px; color: #b7ffd0; font-size: 14px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #2bd576; box-shadow: 0 0 10px #2bd576; }
+    .messages {
+      flex: 1; overflow-y: auto; background: #1f1f33; border: 1px solid #31324a;
+      border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .msg { max-width: 85%; padding: 10px 12px; border-radius: 12px; white-space: pre-wrap; line-height: 1.4; }
+    .msg.user { align-self: flex-end; background: #0d6efd; color: #fff; border-bottom-right-radius: 6px; }
+    .msg.assistant { align-self: flex-start; background: #2d2d44; color: #e0e0e0; border-bottom-left-radius: 6px; }
+    .tools { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+    details.toolbox {
+      background: #1a1b2c; border: 1px solid #363856; border-radius: 10px; padding: 6px 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    details.toolbox summary { cursor: pointer; color: #cfd6ff; outline: none; }
+    details.toolbox pre {
+      margin: 8px 0 0; background: #10111f; border: 1px solid #2b2d45; border-radius: 8px;
+      padding: 10px; overflow-x: auto; color: #cdd2ef;
+    }
+    .inputbar {
+      display: flex; gap: 10px; background: #22223b; border: 1px solid #33344d;
+      border-radius: 12px; padding: 10px;
+    }
+    input[type="text"] {
+      flex: 1; border: 1px solid #474a70; border-radius: 10px; background: #141526; color: #e0e0e0;
+      padding: 12px 14px; font-size: 15px;
+    }
+    button {
+      border: 0; border-radius: 10px; background: #0d6efd; color: #fff; padding: 12px 16px;
+      font-weight: 600; cursor: pointer;
+    }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="header">
+      <div class="title">⚔️ Valhalla</div>
+      <div class="status"><span class="dot"></span><span>connected</span></div>
+    </div>
+    <div id="messages" class="messages"></div>
+    <div class="inputbar">
+      <input id="input" type="text" placeholder="Ask Valhalla..." />
+      <button id="send">Send</button>
+    </div>
+  </div>
+  <script>
+    const messagesEl = document.getElementById("messages");
+    const inputEl = document.getElementById("input");
+    const sendEl = document.getElementById("send");
+    const sessionId = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER).toString(16);
+    let streaming = false;
+    let currentAssistant = null;
+    const pendingTools = {};
+
+    function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+    function appendBubble(text, role) {
+      const el = document.createElement("div");
+      el.className = "msg " + role;
+      el.textContent = text || "";
+      messagesEl.appendChild(el);
+      scrollBottom();
+      return el;
+    }
+    function parseSSEBlock(block) {
+      const lines = block.split("\n");
+      let data = "";
+      for (const line of lines) {
+        if (line.startsWith("data:")) data += line.slice(5).trimStart();
+      }
+      if (!data) return null;
+      try { return JSON.parse(data); } catch { return null; }
+    }
+    function toolHeader(tool, args) {
+      let preview = "";
+      if (args && typeof args === "object" && "command" in args) preview = String(args.command);
+      else if (args !== undefined) preview = JSON.stringify(args);
+      return "🔨 " + tool + (preview ? ": " + preview : "");
+    }
+    function addToolCall(tool, args) {
+      if (!currentAssistant) currentAssistant = appendBubble("", "assistant");
+      let wrap = currentAssistant.querySelector(".tools");
+      if (!wrap) {
+        wrap = document.createElement("div");
+        wrap.className = "tools";
+        currentAssistant.appendChild(wrap);
+      }
+      const details = document.createElement("details");
+      details.className = "toolbox";
+      details.open = true;
+      const summary = document.createElement("summary");
+      summary.textContent = toolHeader(tool, args);
+      const pre = document.createElement("pre");
+      pre.textContent = "running...";
+      details.append(summary, pre);
+      wrap.appendChild(details);
+      if (!pendingTools[tool]) pendingTools[tool] = [];
+      pendingTools[tool].push(pre);
+      scrollBottom();
+    }
+    function setToolResult(tool, result) {
+      const queue = pendingTools[tool] || [];
+      const pre = queue.shift();
+      if (!pre) return;
+      const out = result && result.output ? String(result.output) : "";
+      const err = result && result.error ? String(result.error) : "";
+      pre.textContent = err ? (out ? (err + "\n" + out) : err) : out;
+      scrollBottom();
+    }
+
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text || streaming) return;
+      streaming = true;
+      sendEl.disabled = true;
+      inputEl.disabled = true;
+      appendBubble(text, "user");
+      currentAssistant = appendBubble("", "assistant");
+      inputEl.value = "";
+
+      try {
+        const resp = await fetch("/message", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: text, session_id: sessionId })
+        });
+        if (!resp.ok || !resp.body) throw new Error("Request failed");
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          for (;;) {
+            const idx = buffer.indexOf("\n\n");
+            if (idx < 0) break;
+            const block = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            const evt = parseSSEBlock(block);
+            if (!evt) continue;
+            if (evt.type === "content" && evt.content !== undefined) {
+              currentAssistant.textContent += evt.content;
+            } else if (evt.type === "tool_call") {
+              addToolCall(evt.tool || "tool", evt.args);
+            } else if (evt.type === "tool_result") {
+              setToolResult(evt.tool || "tool", evt.result || {});
+            } else if (evt.type === "done") {
+              streaming = false;
+              sendEl.disabled = false;
+              inputEl.disabled = false;
+              inputEl.focus();
+            }
+            scrollBottom();
+          }
+        }
+      } catch (err) {
+        appendBubble("Error: " + (err && err.message ? err.message : String(err)), "assistant");
+      } finally {
+        streaming = false;
+        sendEl.disabled = false;
+        inputEl.disabled = false;
+        inputEl.focus();
+      }
+    }
+
+    sendEl.addEventListener("click", sendMessage);
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); sendMessage(); }
+    });
+    inputEl.focus();
+  </script>
+</body>
+</html>`
+
 type (
 	toolCallFunction struct {
 		Name      string `json:"name"`
@@ -251,6 +446,14 @@ func main() {
 	toolDefs := buildToolDefs(reg)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, dashboardHTML)
+	})
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
