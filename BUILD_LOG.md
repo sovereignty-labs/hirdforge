@@ -83,3 +83,14 @@
 - Working: HTTP server, SSE streaming, sessions, 3 tools, agentic loop, web UI
 - Tested against qwen3:30b on workstation RTX 3090
 - Time: ~3 hours from first Go file to browser-accessible AI agent
+
+### Kubernetes Deployment (Session 2, final final)
+- Fixed Gitea container registry ROOT_URL (patched Secret, was redirecting to port 80)
+- Patched Talos nodes to trust HTTP registry via talosctl machineconfig
+- Pushed 13.5MB image to Gitea registry
+- Chuck deployed as pod in valhalla namespace
+- Accessible at http://203.0.113.26:30881
+- Web dashboard works from browser
+- Tool calling works from inside the pod
+- Chuck demonstrated multi-step tool recovery (systemctl fail → ps aux fallback)
+- **The warrior is in the hall.**
