@@ -43,3 +43,18 @@
 - **Inference**: Ollama on localhost:11434, model qwen3:30b
 - **Codex**: Connected to repo, creates PRs merged to main
 - **Workflow**: Claude designs → Codex writes → Kit tests → Claude fixes
+
+### Tools Built (Session 2, continued)
+- pkg/tools/tools.go — Tool interface, Registry, RegisterDefaults
+- pkg/tools/exec.go — Shell exec with 30s timeout, 1MB output cap
+- pkg/tools/file.go — Read/write with path traversal protection
+- All tested: exec, write, read, path escape blocked
+- 249 lines total, standard library only
+
+### Session 2 Summary
+- 4 commits to main
+- ~484 lines of Go
+- Agent runtime: HTTP server + SSE + sessions + health
+- Tool framework: exec, read, write with security
+- Zero external dependencies
+- Everything compiles and runs against live Ollama on workstation
