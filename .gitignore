@@ -1,0 +1,19 @@
+# Binaries
+valhalla-agent
+valhalla-gateway
+*.exe
+
+# Go
+vendor/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+*.swp
+
+# Build
+dist/
+*.tar.gz
