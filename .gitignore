@@ -17,4 +17,4 @@ vendor/
 # Build
 dist/
 *.tar.gz
-agent
+/agent
