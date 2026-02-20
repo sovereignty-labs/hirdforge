@@ -943,6 +943,9 @@ func main() {
 	if enabled["exec"] {
 		reg.Register(toolpkg.NewExecTool())
 	}
+	if enabled["http"] {
+		reg.Register(toolpkg.NewHTTPTool())
+	}
 	if enabled["read"] {
 		reg.Register(toolpkg.NewReadTool(*workspace))
 	}
