@@ -354,7 +354,7 @@ func callPeerAgentTask(agentName, peerURL, task string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 120 * time.Second}
+	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err

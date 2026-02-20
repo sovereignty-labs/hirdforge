@@ -252,11 +252,13 @@ func (t *GitDiffTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: fmt.Sprintf("repo %s not found in workspace — clone it first", repo)}
 	}
 
+	// Fetch all remote refs so branch comparisons work
+	runGit(repoDir, []string{"git", "fetch", "origin"}, 60*time.Second)
 	if branch != "" {
-		diffArgs := []string{"git", "diff", "main..." + branch}
+		diffArgs := []string{"git", "diff", "origin/main...origin/" + branch}
 		res := runGit(repoDir, diffArgs, 30*time.Second)
 		if res.Error != "" {
-			diffArgs = []string{"git", "diff", "master..." + branch}
+			diffArgs = []string{"git", "diff", "origin/master...origin/" + branch}
 			res = runGit(repoDir, diffArgs, 30*time.Second)
 		}
 		if res.Error != "" {
