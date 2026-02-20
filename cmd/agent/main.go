@@ -949,7 +949,7 @@ func main() {
 	if enabled["write"] {
 		reg.Register(toolpkg.NewWriteTool(*workspace))
 	}
-	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] {
+	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] || enabled["gitea"] {
 		giteaToken := os.Getenv("GITEA_TOKEN")
 		if enabled["git-clone"] {
 			reg.Register(toolpkg.NewGitCloneTool(*workspace, *giteaURL, giteaToken))
@@ -959,6 +959,9 @@ func main() {
 		}
 		if enabled["git-diff"] {
 			reg.Register(toolpkg.NewGitDiffTool(*workspace))
+		}
+		if enabled["gitea"] {
+			reg.Register(toolpkg.NewGiteaAPITool(*giteaURL, giteaToken))
 		}
 	}
 	if enabled["delegate"] || len(peers) > 0 {
@@ -1159,7 +1162,7 @@ func main() {
 				}
 				messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
 			}
-			if i == 9 {
+			if i == 19 {
 				writeSSE(w, sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
 			}
 		}
