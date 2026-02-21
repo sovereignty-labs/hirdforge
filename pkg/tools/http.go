@@ -2,27 +2,52 @@ package tools
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
 
 type HTTPTool struct {
-	Client *http.Client
+	Client         *http.Client
+	SecureClient   *http.Client
 }
 
 func NewHTTPTool() *HTTPTool {
+	// Default client with system certs
+	defaultClient := &http.Client{Timeout: 30 * time.Second}
+
+	// Try to load K8s service account CA for in-cluster API calls
+	secureClient := defaultClient
+	caCert, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
+	if err == nil {
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM(caCert) {
+			secureClient = &http.Client{
+				Timeout: 30 * time.Second,
+				Transport: &http.Transport{
+					TLSClientConfig: &tls.Config{
+						RootCAs: pool,
+					},
+				},
+			}
+		}
+	}
+
 	return &HTTPTool{
-		Client: &http.Client{Timeout: 30 * time.Second},
+		Client:       defaultClient,
+		SecureClient: secureClient,
 	}
 }
 
 func (t *HTTPTool) Name() string { return "http" }
 
 func (t *HTTPTool) Description() string {
-	return "Make HTTP requests. Methods: GET, POST, PUT, DELETE. Returns status code and body."
+	return "Make HTTP requests. Methods: GET, POST, PUT, DELETE. Returns status code and body. Supports HTTPS to Kubernetes API."
 }
 
 func (t *HTTPTool) Parameters() map[string]string {
@@ -30,7 +55,7 @@ func (t *HTTPTool) Parameters() map[string]string {
 		"method":  "HTTP method: GET, POST, PUT, DELETE (default GET)",
 		"url":     "Full URL to request",
 		"body":    "Request body (for POST/PUT)",
-		"headers": "Optional headers as key:value pairs separated by semicolons (e.g. Content-Type:application/json;Authorization:token abc)",
+		"headers": "Optional headers as key:value pairs separated by semicolons (e.g. Content-Type:application/json;Authorization:Bearer abc)",
 	}
 }
 
@@ -69,7 +94,13 @@ func (t *HTTPTool) Execute(args map[string]interface{}) ToolResult {
 		}
 	}
 
-	resp, err := t.Client.Do(req)
+	// Use SecureClient for kubernetes.default.svc URLs
+	client := t.Client
+	if strings.Contains(urlStr, "kubernetes.default.svc") {
+		client = t.SecureClient
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return ToolResult{Error: fmt.Sprintf("request failed: %s", err)}
 	}
