@@ -88,16 +88,6 @@ async function apiFetch(path, fallback) {
         pods:0, cpu_percent:0, memory_percent:0,
       }));
     }
-    if (path.includes('cluster/pods') && !path.includes('/logs') && !path.includes('/restart') && data.items) {
-      return data.items.map(p => ({
-        name: p.metadata?.name||"unknown",
-        phase: p.status?.phase||"Unknown",
-        node: p.spec?.nodeName||"—",
-        metadata: p.metadata,
-        status: p.status,
-        spec: p.spec,
-      }));
-    }
     return data;
   } catch(e) { console.warn(`API ${path} failed:`,e.message); return fallback; }
 }
@@ -440,13 +430,13 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
   const [restartingPod, setRestartingPod] = useState(null);
   const handleRestart = async (name) => { setRestartingPod(name); await apiPost(`/api/v1/cluster/pods/${name}/restart`); setTimeout(()=>setRestartingPod(null),3000); };
 
-  const runningPods = (pods||[]).filter(p=>(p.phase||p.status?.phase)==="Running");
+  const runningPods = (pods||[]).filter(p=>p.status==="Running");
   const totalPods = (pods||[]).length;
 
   const activity = useMemo(() => {
     const items = [];
     (k8sEvents||[]).forEach(e => { items.push({ time:e.lastTimestamp||e.metadata?.creationTimestamp||"", type:e.type==="Warning"?"warning":"k8s", source:e.involvedObject?.name||"k8s", message:`${e.reason||""}: ${e.message||""}`.slice(0,120) }); });
-    (commits||[]).forEach(c => { items.push({ time:c.commit?.committer?.date||c.commit?.author?.date||c.created||"", type:"git", source:c.commit?.author?.name||c.author?.login||"git", message:c.commit?.message||"—" }); });
+    (commits||[]).forEach(c => { items.push({ time:c.date||"", type:"git", source:c.author||"git", message:c.message||"—" }); });
     items.sort((a,b)=>new Date(b.time)-new Date(a.time));
     return items.slice(0,30);
   }, [k8sEvents, commits]);
@@ -459,7 +449,7 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
         <MetricCard label="Pods" value={`${totalPods}`} sub={`${runningPods.length} Running`} color="#34d399" />
         <MetricCard label="Nodes" value={`${nodes.length}`} sub={`${nodes.filter(n=>n.status==="Ready").length} Ready`} color="#fbbf24" />
         <MetricCard label="Agents" value={`${agents.filter(a=>a.status==="online").length}/${agents.length}`} sub="Online" color="#c084fc" />
-        <MetricCard label="Commits" value={`${(commits||[]).length||"—"}`} sub={(commits||[])[0]?.commit?.message?.split('\n')[0]?.slice(0,28)||"—"} color="#818cf8" />
+        <MetricCard label="Commits" value={`${(commits||[]).length||"—"}`} sub={(commits||[])[0]?.message?.split('\n')[0]?.slice(0,28)||"—"} color="#818cf8" />
         <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
       </div>
       {/* MAIN */}
@@ -493,7 +483,7 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
               <span></span><span>Name</span><span>Node</span><span>Status</span><span style={{textAlign:"right"}}>Actions</span>
             </div>
             {(pods||[]).map((p,i) => {
-              const name=p.name||p.metadata?.name||"unknown"; const phase=p.phase||p.status?.phase||"Unknown"; const node=p.node||p.spec?.nodeName||"—"; const ready=phase==="Running";
+              const name=p.name||"unknown"; const phase=p.status||"Unknown"; const node=p.node||"—"; const ready=phase==="Running";
               const isAgent=Object.keys(AGENT_COLORS).some(a=>name.startsWith(a));
               return (
                 <div key={i} style={{display:"grid",gridTemplateColumns:"6px 1fr 100px 70px 90px",gap:8,padding:"8px 12px",alignItems:"center",borderBottom:"1px solid rgba(255,255,255,0.02)",background:isAgent?"rgba(129,140,248,0.02)":"transparent"}}>
@@ -599,7 +589,7 @@ function App() {
       </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:28,minHeight:28,borderTop:"1px solid rgba(255,255,255,0.03)",background:"rgba(0,0,0,0.3)",fontSize:10,color:"rgba(255,255,255,0.2)",flexShrink:0}}>
         <div style={{display:"flex",gap:18}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
-        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.2-s7</span></div>
+        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.3-s7</span></div>
       </div>
     </div>
   );
