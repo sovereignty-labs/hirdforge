@@ -51,28 +51,11 @@
 <script type="text/babel" data-type="module">
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
-// ═══════════════════════════════════════════════════════════
-//  CONFIG
-// ═══════════════════════════════════════════════════════════
-const CONFIG = {
-  API_BASE: '',
-  WS_URL: '',
-  POLL_INTERVAL: 5000,
-  USE_MOCK: false,
-};
+const CONFIG = { API_BASE:'', WS_URL:'', POLL_INTERVAL:5000, USE_MOCK:false };
 
-// ═══════════════════════════════════════════════════════════
-//  COLORS & CONSTANTS
-// ═══════════════════════════════════════════════════════════
-const AGENT_COLORS = {
-  ragnar:"#818cf8", chuck:"#f472b6", knut:"#34d399", ivar:"#fbbf24",
-  orm:"#22d3ee", val:"#c084fc", system:"#6b7280", kit:"#10b981",
-};
+const AGENT_COLORS = { ragnar:"#818cf8", chuck:"#f472b6", knut:"#34d399", ivar:"#fbbf24", orm:"#22d3ee", val:"#c084fc", system:"#6b7280", kit:"#10b981" };
 const statusColor = s => s==="online"?"#34d399":s==="degraded"?"#fbbf24":"#ef4444";
 
-// ═══════════════════════════════════════════════════════════
-//  FALLBACK DATA (only used when API unreachable)
-// ═══════════════════════════════════════════════════════════
 const FALLBACK_AGENTS = [
   {id:"ragnar",name:"Ragnar Codebrok",role:"Architect / PM",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"R"},
   {id:"chuck",name:"Chuck Norse",role:"Primary Builder",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"C"},
@@ -81,7 +64,6 @@ const FALLBACK_AGENTS = [
   {id:"orm",name:"Orm the Scribe",role:"Documentation",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"O"},
   {id:"val",name:"Val Kyrie",role:"Operations",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"V"},
 ];
-
 const FALLBACK_NODES = [
   {name:"node-cp-1",ip:"203.0.113.26",role:"Control+Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},
   {name:"node-worker-1",ip:"203.0.113.27",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},
@@ -99,19 +81,18 @@ async function apiFetch(path, fallback) {
     const data = await res.json();
     if (path.includes('cluster/nodes') && data.items) {
       return data.items.map(n => ({
-        name: n.metadata?.name || "unknown",
-        ip: (n.status?.addresses?.find(a => a.type === "InternalIP") || {}).address || "—",
-        role: Object.keys(n.metadata?.labels || {}).filter(l => l.startsWith("node-role")).map(l => l.split("/")[1]).join("+") || "worker",
-        status: n.status?.conditions?.find(c => c.type === "Ready")?.status === "True" ? "Ready" : "NotReady",
-        pods: 0, cpu_percent: 0, memory_percent: 0,
+        name: n.metadata?.name||"unknown",
+        ip: (n.status?.addresses?.find(a=>a.type==="InternalIP")||{}).address||"—",
+        role: Object.keys(n.metadata?.labels||{}).filter(l=>l.startsWith("node-role")).map(l=>l.split("/")[1]).join("+")||"worker",
+        status: n.status?.conditions?.find(c=>c.type==="Ready")?.status==="True"?"Ready":"NotReady",
+        pods:0, cpu_percent:0, memory_percent:0,
       }));
     }
     return data;
-  } catch (e) {
-    console.warn(`API ${path} failed:`, e.message);
-    return fallback;
-  }
+  } catch(e) { console.warn(`API ${path} failed:`,e.message); return fallback; }
 }
+async function apiPost(path) { try { const r=await fetch(CONFIG.API_BASE+path,{method:'POST'}); return await r.json(); } catch(e) { return {error:e.message}; } }
+async function apiFetchText(path) { try { const r=await fetch(CONFIG.API_BASE+path); if(!r.ok) throw new Error(r.status); return await r.text(); } catch(e) { return `Failed to fetch: ${e.message}`; } }
 
 function usePolledData(path, fallback, interval) {
   const [data, setData] = useState(fallback);
@@ -120,32 +101,22 @@ function usePolledData(path, fallback, interval) {
     const poll = async () => {
       const d = await apiFetch(path, fallback);
       if (mounted) {
-        if (path === '/api/v1/agents' && Array.isArray(d)) {
+        if (path==='/api/v1/agents' && Array.isArray(d)) {
           const normalized = d.map(a => ({
-            id: a.name || a.id,
-            name: a.display_name || a.name || a.id,
-            role: a.role || "Agent",
-            model: a.model || "unknown",
-            backend: a.backend || "unknown",
-            status: a.healthy === false ? "offline" : (a.healthy ? "online" : (a.status || "offline")),
-            tools: a.tools || [],
-            uptime_seconds: a.uptime_seconds || 0,
-            tasks_completed: a.tasks_completed || 0,
-            last_action: a.last_action || "—",
-            ping_ms: a.ping_ms || a.latency_ms || null,
-            cpu_percent: a.cpu_percent || 0,
-            memory_percent: a.memory_percent || 0,
-            initial: (a.display_name || a.name || a.id || "?")[0].toUpperCase(),
+            id:a.name||a.id, name:a.display_name||a.name||a.id, role:a.role||"Agent", model:a.model||"unknown", backend:a.backend||"unknown",
+            status:a.healthy===false?"offline":(a.healthy?"online":(a.status||"offline")),
+            tools:a.tools||[], uptime_seconds:a.uptime_seconds||0, tasks_completed:a.tasks_completed||0,
+            last_action:a.last_action||"—", ping_ms:a.ping_ms||a.latency_ms||null,
+            cpu_percent:a.cpu_percent||0, memory_percent:a.memory_percent||0,
+            initial:(a.display_name||a.name||a.id||"?")[0].toUpperCase(),
           }));
-          setData(normalized.length > 0 ? normalized : fallback);
-        } else {
-          setData(d);
-        }
+          setData(normalized.length>0?normalized:fallback);
+        } else setData(d);
       }
     };
     poll();
-    const id = setInterval(poll, interval || CONFIG.POLL_INTERVAL);
-    return () => { mounted = false; clearInterval(id); };
+    const id = setInterval(poll, interval||CONFIG.POLL_INTERVAL);
+    return () => { mounted=false; clearInterval(id); };
   }, [path]);
   return data;
 }
@@ -155,19 +126,13 @@ function useEventStream() {
   const [connected, setConnected] = useState(false);
   useEffect(() => {
     if (CONFIG.USE_MOCK) return;
-    const wsUrl = CONFIG.WS_URL || `${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;
-    let ws;
-    let retryDelay = 3000;
+    const wsUrl = CONFIG.WS_URL||`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;
+    let ws, retryDelay=3000;
     const connect = () => {
       ws = new WebSocket(wsUrl);
-      ws.onopen = () => { setConnected(true); retryDelay = 3000; };
-      ws.onclose = () => { setConnected(false); retryDelay = Math.min(retryDelay * 2, 30000); setTimeout(connect, retryDelay); };
-      ws.onmessage = (e) => {
-        try {
-          const evt = JSON.parse(e.data);
-          setEvents(prev => [evt, ...prev].slice(0, 100));
-        } catch {}
-      };
+      ws.onopen = () => { setConnected(true); retryDelay=3000; };
+      ws.onclose = () => { setConnected(false); retryDelay=Math.min(retryDelay*2,30000); setTimeout(connect,retryDelay); };
+      ws.onmessage = (e) => { try { const evt=JSON.parse(e.data); setEvents(prev=>[evt,...prev].slice(0,100)); } catch{} };
     };
     connect();
     return () => ws?.close();
@@ -176,70 +141,43 @@ function useEventStream() {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  CHAT API — with replace event support
+//  CHAT API
 // ═══════════════════════════════════════════════════════════
 async function streamChat(agentId, message, onChunk, onReplace, onToolCall, onToolResult, onDone, onError) {
   try {
-    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent: agentId, content: message, session_id: "hirdforge-" + Date.now() }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({error: res.statusText}));
-      onError(`Error: ${err.error || res.statusText}`);
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent:agentId,content:message,session_id:"hirdforge-"+Date.now()}) });
+    if (!res.ok) { const err=await res.json().catch(()=>({error:res.statusText})); onError(`Error: ${err.error||res.statusText}`); return; }
+    const reader=res.body.getReader(); const decoder=new TextDecoder(); let buffer='';
     while (true) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, {stream: true});
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
+      const {done,value}=await reader.read(); if(done) break;
+      buffer+=decoder.decode(value,{stream:true}); const lines=buffer.split('\n'); buffer=lines.pop();
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         try {
-          const chunk = JSON.parse(line.slice(6));
-          if (chunk.type === 'content' && chunk.content) onChunk(chunk.content);
-          else if (chunk.type === 'replace' && chunk.content) onReplace(chunk.content);
-          else if (chunk.type === 'tool_call') onToolCall(chunk.tool || 'tool', chunk.args);
-          else if (chunk.type === 'tool_result') onToolResult(chunk.tool || 'tool', chunk.result);
-          if (chunk.done) { onDone(); return; }
-        } catch {}
+          const chunk=JSON.parse(line.slice(6));
+          if(chunk.type==='content'&&chunk.content) onChunk(chunk.content);
+          else if(chunk.type==='replace'&&chunk.content) onReplace(chunk.content);
+          else if(chunk.type==='tool_call') onToolCall(chunk.tool||'tool',chunk.args);
+          else if(chunk.type==='tool_result') onToolResult(chunk.tool||'tool',chunk.result);
+          if(chunk.done){onDone();return;}
+        } catch{}
       }
     }
     onDone();
-  } catch (e) {
-    onError(`Failed to reach ${agentId}: ${e.message}`);
-  }
+  } catch(e) { onError(`Failed to reach ${agentId}: ${e.message}`); }
 }
 
 // ═══════════════════════════════════════════════════════════
 //  PRIMITIVES
 // ═══════════════════════════════════════════════════════════
-const GlowPip = ({status, size=7}) => {
-  const c = statusColor(status);
-  return React.createElement('span', {style:{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",width:size,height:size,flexShrink:0}},
-    status==="online" && React.createElement('span', {style:{position:"absolute",width:size*2.5,height:size*2.5,borderRadius:"50%",background:c,opacity:0.15,animation:"glow-pulse 2s ease-in-out infinite"}}),
-    React.createElement('span', {style:{position:"relative",width:size,height:size,borderRadius:"50%",background:c,boxShadow:`0 0 ${size}px ${c}60`}})
-  );
-};
+const GlowPip = ({status, size=7}) => { const c=statusColor(status); return React.createElement('span',{style:{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",width:size,height:size,flexShrink:0}}, status==="online"&&React.createElement('span',{style:{position:"absolute",width:size*2.5,height:size*2.5,borderRadius:"50%",background:c,opacity:0.15,animation:"glow-pulse 2s ease-in-out infinite"}}), React.createElement('span',{style:{position:"relative",width:size,height:size,borderRadius:"50%",background:c,boxShadow:`0 0 ${size}px ${c}60`}})); };
 
-const Glass = ({children, style={}, glow}) => (
-  <div style={{background:"linear-gradient(135deg,rgba(255,255,255,0.025) 0%,rgba(255,255,255,0.005) 100%)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",border:"1px solid rgba(255,255,255,0.04)",position:"relative",overflow:"hidden",...style}}>
+const Glass = ({children, style={}, glow, onClick}) => (
+  <div onClick={onClick} style={{background:"linear-gradient(135deg,rgba(255,255,255,0.025) 0%,rgba(255,255,255,0.005) 100%)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",border:"1px solid rgba(255,255,255,0.04)",position:"relative",overflow:"hidden",...style}}>
     {glow && <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${glow}35,transparent)`}} />}
     {children}
   </div>
 );
-
-const Sparkline = ({data, color="#818cf8", w=64, h=20}) => {
-  const max=Math.max(...data), min=Math.min(...data), r=max-min||1;
-  const pts = data.map((v,i)=>`${(i/(data.length-1))*w},${h-((v-min)/r)*h}`).join(" ");
-  return <svg width={w} height={h} style={{display:"block"}}><polyline points={`${pts} ${w},${h} 0,${h}`} fill={`${color}08`} stroke="none"/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.2" opacity="0.6"/></svg>;
-};
 
 const Bar = ({value, max=100, color="#818cf8", h=3}) => (
   <div style={{height:h,background:"rgba(255,255,255,0.04)",position:"relative",overflow:"hidden"}}>
@@ -247,46 +185,35 @@ const Bar = ({value, max=100, color="#818cf8", h=3}) => (
   </div>
 );
 
-const Badge = ({text, color="rgba(255,255,255,0.4)"}) => (
-  <span style={{display:"inline-block",padding:"2px 7px",fontSize:9,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color,background:`${color}12`,border:`1px solid ${color}20`}}>{text}</span>
-);
+const Badge = ({text, color="rgba(255,255,255,0.4)"}) => (<span style={{display:"inline-block",padding:"2px 7px",fontSize:9,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color,background:`${color}12`,border:`1px solid ${color}20`}}>{text}</span>);
 
-const MetricCard = ({label,value,sub,color="#e2e8f0",spark}) => (
+const Sparkline = ({data, color="#818cf8", w=64, h=20}) => { const max=Math.max(...data),min=Math.min(...data),r=max-min||1; const pts=data.map((v,i)=>`${(i/(data.length-1))*w},${h-((v-min)/r)*h}`).join(" "); return <svg width={w} height={h} style={{display:"block"}}><polyline points={`${pts} ${w},${h} 0,${h}`} fill={`${color}08`} stroke="none"/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.2" opacity="0.6"/></svg>; };
+
+const MetricCard = ({label,value,sub,color="#e2e8f0"}) => (
   <Glass glow={color!=="#e2e8f0"?color:null} style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:4}}>
-    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-      <span style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.25)"}}>{label}</span>
-      {spark && <Sparkline data={spark} color={color} w={48} h={16}/>}
-    </div>
+    <span style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.25)"}}>{label}</span>
     <div style={{fontSize:24,fontWeight:800,color,fontFamily:"'Space Grotesk',sans-serif",lineHeight:1,letterSpacing:"-0.02em"}}>{value}</div>
     {sub && <span style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{sub}</span>}
   </Glass>
 );
 
-const ActionBtn = ({label, icon, color="#818cf8", onClick, disabled}) => (
-  <button onClick={onClick} disabled={disabled} style={{
-    padding:"6px 12px",fontSize:9,fontWeight:700,letterSpacing:"0.1em",
-    background:`linear-gradient(135deg,${color}15,${color}08)`,
-    border:`1px solid ${color}30`,color:disabled?`${color}40`:color,
-    cursor:disabled?"not-allowed":"pointer",textTransform:"uppercase",
-    fontFamily:"'IBM Plex Mono',monospace",opacity:disabled?0.5:1,
-    display:"flex",alignItems:"center",gap:5,
-  }}>{icon && <span>{icon}</span>}{label}</button>
+const ActionBtn = ({label, icon, color="#818cf8", onClick, disabled, small}) => (
+  <button onClick={onClick} disabled={disabled} style={{padding:small?"4px 8px":"6px 12px",fontSize:small?8:9,fontWeight:700,letterSpacing:"0.1em",background:`linear-gradient(135deg,${color}15,${color}08)`,border:`1px solid ${color}30`,color:disabled?`${color}40`:color,cursor:disabled?"not-allowed":"pointer",textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",opacity:disabled?0.5:1,display:"inline-flex",alignItems:"center",gap:4,transition:"all 0.15s"}}>{icon&&<span style={{fontSize:small?9:11}}>{icon}</span>}{label}</button>
 );
 
-const makeSparkline = (n=16, base=30, v=25) => Array.from({length:n}, () => base + Math.random()*v);
+const makeSparkline = (n=16,base=30,v=25) => Array.from({length:n},()=>base+Math.random()*v);
 const fmtUptime = s => s<=0?"—":`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
-const fmtTime = ts => { try { const d = new Date(ts); return d.toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } };
+const fmtTime = ts => { try { return new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } };
+const fmtTimeAgo = ts => { try { const s=(Date.now()-new Date(ts).getTime())/1000; if(s<60) return `${Math.floor(s)}s ago`; if(s<3600) return `${Math.floor(s/60)}m ago`; if(s<86400) return `${Math.floor(s/3600)}h ago`; return `${Math.floor(s/86400)}d ago`; } catch { return "—"; } };
 
 // ═══════════════════════════════════════════════════════════
 //  AGENT AVATAR
 // ═══════════════════════════════════════════════════════════
 const AgentAvatar = ({agent, size=32, showStatus=true}) => {
-  const c = AGENT_COLORS[agent.id] || "#818cf8";
-  const sc = statusColor(agent.status);
-  const initial = agent.initial || agent.name?.[0] || "?";
+  const c=AGENT_COLORS[agent.id]||"#818cf8"; const sc=statusColor(agent.status); const initial=agent.initial||agent.name?.[0]||"?";
   return (
     <div style={{position:"relative",width:size,height:size,flexShrink:0}}>
-      <div style={{position:"absolute",inset:-2,borderRadius:"50%",background:`conic-gradient(from 0deg, ${c}00, ${c}40, ${c}00, ${c}30, ${c}00)`,animation: agent.status==="online" ? "avatar-spin 8s linear infinite" : "none",opacity: agent.status==="online" ? 1 : 0.3}} />
+      <div style={{position:"absolute",inset:-2,borderRadius:"50%",background:`conic-gradient(from 0deg, ${c}00, ${c}40, ${c}00, ${c}30, ${c}00)`,animation:agent.status==="online"?"avatar-spin 8s linear infinite":"none",opacity:agent.status==="online"?1:0.3}} />
       <div style={{position:"absolute",inset:0,borderRadius:"50%",background:`linear-gradient(135deg, ${c}25, ${c}08)`,border:`1px solid ${c}30`,display:"flex",alignItems:"center",justifyContent:"center"}}>
         <span style={{fontSize:size*0.4,fontWeight:800,color:c,fontFamily:"'Space Grotesk',sans-serif",textShadow:`0 0 12px ${c}40`,lineHeight:1}}>{initial}</span>
       </div>
@@ -296,35 +223,59 @@ const AgentAvatar = ({agent, size=32, showStatus=true}) => {
 };
 
 // ═══════════════════════════════════════════════════════════
+//  LOG VIEWER MODAL
+// ═══════════════════════════════════════════════════════════
+const LogModal = ({podName, onClose}) => {
+  const [logs, setLogs] = useState("Loading logs...");
+  const [lines, setLines] = useState(100);
+  const logRef = useRef(null);
+  useEffect(() => {
+    let mounted = true;
+    const fetchLogs = async () => {
+      const text = await apiFetchText(`/api/v1/cluster/pods/${podName}/logs?lines=${lines}`);
+      if (mounted) { setLogs(text); if(logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight; }
+    };
+    fetchLogs();
+    const id = setInterval(fetchLogs, 5000);
+    return () => { mounted=false; clearInterval(id); };
+  }, [podName, lines]);
+
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:10000,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.7)",backdropFilter:"blur(4px)"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{width:"80%",maxWidth:900,height:"70vh",background:"linear-gradient(135deg,#0d0d1a,#08080f)",border:"1px solid rgba(255,255,255,0.08)",display:"flex",flexDirection:"column"}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 18px",borderBottom:"1px solid rgba(255,255,255,0.06)",flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontSize:13,fontWeight:700,color:"#22d3ee",fontFamily:"'Space Grotesk',sans-serif"}}>⬡ {podName}</span>
+            <Badge text="logs" color="#22d3ee" />
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            {[50,100,500].map(n=>(
+              <button key={n} onClick={()=>setLines(n)} style={{padding:"3px 8px",fontSize:9,fontWeight:lines===n?700:400,background:lines===n?"rgba(34,211,238,0.12)":"transparent",border:`1px solid ${lines===n?"rgba(34,211,238,0.3)":"rgba(255,255,255,0.06)"}`,color:lines===n?"#22d3ee":"rgba(255,255,255,0.3)",cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace"}}>{n}L</button>
+            ))}
+            <button onClick={onClose} style={{padding:"3px 10px",fontSize:12,background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace",fontWeight:700}}>✕</button>
+          </div>
+        </div>
+        <div ref={logRef} style={{flex:1,overflow:"auto",padding:"12px 18px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,lineHeight:1.6,color:"rgba(255,255,255,0.5)",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
+          {logs}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
 //  COMMS VIEW
 // ═══════════════════════════════════════════════════════════
-const TypingIndicator = ({color="#818cf8"}) => (
-  <div style={{display:"flex",gap:3,alignItems:"center",padding:"6px 0"}}>
-    {[0,1,2].map(i => <div key={i} style={{width:5,height:5,borderRadius:"50%",background:color,opacity:0.4,animation:`typing-bounce 1.2s ease-in-out ${i*0.15}s infinite`}} />)}
-  </div>
-);
+const TypingIndicator = ({color="#818cf8"}) => (<div style={{display:"flex",gap:3,alignItems:"center",padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:color,opacity:0.4,animation:`typing-bounce 1.2s ease-in-out ${i*0.15}s infinite`}} />)}</div>);
 
-const ToolCallChip = ({tool, args}) => (
-  <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:6,background:"rgba(34,211,238,0.06)",border:"1px solid rgba(34,211,238,0.12)",fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}}>
-    <span style={{color:"#22d3ee",fontWeight:700,fontSize:9,letterSpacing:"0.1em"}}>TOOL</span>
-    <span style={{color:"rgba(255,255,255,0.5)"}}>{tool}</span>
-    {args && <span style={{color:"rgba(255,255,255,0.2)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{typeof args === 'string' ? args : JSON.stringify(args)}</span>}
-  </div>
-);
+const ToolCallChip = ({tool,args}) => (<div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:6,background:"rgba(34,211,238,0.06)",border:"1px solid rgba(34,211,238,0.12)",fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}}><span style={{color:"#22d3ee",fontWeight:700,fontSize:9,letterSpacing:"0.1em"}}>TOOL</span><span style={{color:"rgba(255,255,255,0.5)"}}>{tool}</span>{args&&<span style={{color:"rgba(255,255,255,0.2)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{typeof args==='string'?args:JSON.stringify(args)}</span>}</div>);
 
-const ToolResultChip = ({tool, result}) => (
-  <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:2,background:"rgba(52,211,153,0.04)",border:"1px solid rgba(52,211,153,0.10)",fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}}>
-    <span style={{color:"#34d399",fontWeight:700,fontSize:9,letterSpacing:"0.1em"}}>RESULT</span>
-    <span style={{color:"rgba(255,255,255,0.4)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{typeof result === 'string' ? result : JSON.stringify(result)}</span>
-  </div>
-);
+const ToolResultChip = ({tool,result}) => (<div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:2,background:"rgba(52,211,153,0.04)",border:"1px solid rgba(52,211,153,0.10)",fontSize:11,fontFamily:"'IBM Plex Mono',monospace"}}><span style={{color:"#34d399",fontWeight:700,fontSize:9,letterSpacing:"0.1em"}}>RESULT</span><span style={{color:"rgba(255,255,255,0.4)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{typeof result==='string'?result:JSON.stringify(result)}</span></div>);
 
 const ChatBubble = ({msg}) => {
-  const isSelf = msg.from === "kit";
-  const c = AGENT_COLORS[msg.from] || "#818cf8";
-  const elRef = useRef(null);
-  const [animated, setAnimated] = useState(false);
-  useEffect(() => { if (!animated && elRef.current) { setAnimated(true); } }, []);
+  const isSelf=msg.from==="kit"; const c=AGENT_COLORS[msg.from]||"#818cf8";
+  const elRef=useRef(null); const [animated,setAnimated]=useState(false);
+  useEffect(()=>{if(!animated&&elRef.current)setAnimated(true);},[]);
   return (
     <div ref={elRef} style={{display:"flex",gap:12,maxWidth:"85%",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:!animated?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1)":"none"}}>
       <AgentAvatar agent={msg.agent} size={28} />
@@ -336,8 +287,8 @@ const ChatBubble = ({msg}) => {
         <div style={{padding:"12px 16px",background:isSelf?"linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.03))":"linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01))",border:`1px solid ${isSelf?"rgba(16,185,129,0.12)":"rgba(255,255,255,0.04)"}`,position:"relative"}}>
           <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${c}15,transparent)`}} />
           <span style={{fontSize:13,color:"rgba(255,255,255,0.75)",lineHeight:1.7,display:"block",whiteSpace:"pre-wrap",wordBreak:"break-word"}}>{msg.text}</span>
-          {msg.toolCalls && msg.toolCalls.map((tc,i) => <ToolCallChip key={`tc${i}`} tool={tc.tool} args={tc.args} />)}
-          {msg.toolResults && msg.toolResults.map((tr,i) => <ToolResultChip key={`tr${i}`} tool={tr.tool} result={tr.result} />)}
+          {msg.toolCalls&&msg.toolCalls.map((tc,i)=><ToolCallChip key={`tc${i}`} tool={tc.tool} args={tc.args} />)}
+          {msg.toolResults&&msg.toolResults.map((tr,i)=><ToolResultChip key={`tr${i}`} tool={tr.tool} result={tr.result} />)}
         </div>
       </div>
     </div>
@@ -345,9 +296,8 @@ const ChatBubble = ({msg}) => {
 };
 
 const EventEntry = ({event, idx}) => {
-  const typeColors = {delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24",sync:"#34d399",pulse:"#c084fc",infra:"#6b7280",tool_call:"#22d3ee",tool_result:"#34d399"};
-  const accent = typeColors[event.type] || "#6b7280";
-  const src = (event.source||"SYS").slice(0,3).toUpperCase();
+  const typeColors={delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24",sync:"#34d399",pulse:"#c084fc",infra:"#6b7280"};
+  const accent=typeColors[event.type]||"#6b7280"; const src=(event.source||"SYS").slice(0,3).toUpperCase();
   return (
     <div style={{display:"flex",gap:8,padding:"8px 16px",borderBottom:"1px solid rgba(255,255,255,0.02)",animation:`event-fade-in 0.3s ease ${Math.min(idx,10)*0.03}s both`,position:"relative"}}>
       <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:`${accent}20`}} />
@@ -362,179 +312,70 @@ const EventEntry = ({event, idx}) => {
 };
 
 const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending}) => {
-  const messagesEl = useRef(null);
-  const textareaEl = useRef(null);
-  const ta = agents.find(a => a.id === target) || FALLBACK_AGENTS[0];
-  const tc = AGENT_COLORS[target] || "#818cf8";
-
-  const scrollBottom = useCallback(() => {
-    if (messagesEl.current) {
-      messagesEl.current.scrollTop = messagesEl.current.scrollHeight;
-    }
-  }, []);
-
-  useEffect(() => { requestAnimationFrame(scrollBottom); }, [chatHistory]);
+  const messagesEl=useRef(null); const textareaEl=useRef(null);
+  const ta=agents.find(a=>a.id===target)||FALLBACK_AGENTS[0]; const tc=AGENT_COLORS[target]||"#818cf8";
+  const scrollBottom=useCallback(()=>{if(messagesEl.current) messagesEl.current.scrollTop=messagesEl.current.scrollHeight;},[]);
+  useEffect(()=>{requestAnimationFrame(scrollBottom);},[chatHistory]);
 
   const handleSend = async () => {
-    if (!msg.trim() || sending) return;
-    const userMsg = {from:"kit",agent:{id:"kit",name:"Kit (Sovereign)",initial:"K",status:"online"},text:msg,time:new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),toolCalls:[],toolResults:[]};
-    const sentMsg = msg;
-    setChatHistory(prev => [...prev, userMsg]);
-    setMsg("");
-    setSending(true);
-    if (textareaEl.current) { textareaEl.current.style.height = '56px'; }
-    const timeStr = new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
-    setChatHistory(prev => [...prev, {from:target,agent:ta,text:"",time:timeStr,streaming:true,toolCalls:[],toolResults:[]}]);
-
-    await streamChat(target, sentMsg,
-      // onChunk
-      (chunk) => {
-        setChatHistory(prev => {
-          const u = [...prev]; const last = {...u[u.length-1]};
-          last.text = (last.text||"") + chunk;
-          u[u.length-1] = last; return u;
-        });
-        requestAnimationFrame(scrollBottom);
-      },
-      // onReplace — swap entire content (think tag cleanup)
-      (cleaned) => {
-        setChatHistory(prev => {
-          const u = [...prev]; const last = {...u[u.length-1]};
-          last.text = cleaned;
-          u[u.length-1] = last; return u;
-        });
-      },
-      // onToolCall
-      (tool, args) => {
-        setChatHistory(prev => {
-          const u = [...prev]; const last = {...u[u.length-1]};
-          last.toolCalls = [...(last.toolCalls||[]), {tool, args}];
-          u[u.length-1] = last; return u;
-        });
-        requestAnimationFrame(scrollBottom);
-      },
-      // onToolResult
-      (tool, result) => {
-        setChatHistory(prev => {
-          const u = [...prev]; const last = {...u[u.length-1]};
-          last.toolResults = [...(last.toolResults||[]), {tool, result}];
-          u[u.length-1] = last; return u;
-        });
-        requestAnimationFrame(scrollBottom);
-      },
-      // onDone
-      () => {
-        setChatHistory(prev => {
-          const u = [...prev]; const last = {...u[u.length-1]};
-          last.streaming = false;
-          if (!last.text && !(last.toolCalls||[]).length) last.text = "(empty response)";
-          u[u.length-1] = last; return u;
-        });
-        setSending(false);
-      },
-      // onError
-      (err) => {
-        setChatHistory(prev => {
-          const u = [...prev]; const last = {...u[u.length-1]};
-          last.text = err; last.streaming = false;
-          u[u.length-1] = last; return u;
-        });
-        setSending(false);
-      }
+    if(!msg.trim()||sending) return;
+    const userMsg={from:"kit",agent:{id:"kit",name:"Kit (Sovereign)",initial:"K",status:"online"},text:msg,time:new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),toolCalls:[],toolResults:[]};
+    const sentMsg=msg; setChatHistory(prev=>[...prev,userMsg]); setMsg(""); setSending(true);
+    if(textareaEl.current) textareaEl.current.style.height='56px';
+    const timeStr=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
+    setChatHistory(prev=>[...prev,{from:target,agent:ta,text:"",time:timeStr,streaming:true,toolCalls:[],toolResults:[]}]);
+    await streamChat(target,sentMsg,
+      (chunk)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=(l.text||"")+chunk;u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
+      (cleaned)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=cleaned;u[u.length-1]=l;return u;});},
+      (tool,args)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.toolCalls=[...(l.toolCalls||[]),{tool,args}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
+      (tool,result)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.toolResults=[...(l.toolResults||[]),{tool,result}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
+      ()=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.streaming=false;if(!l.text&&!(l.toolCalls||[]).length)l.text="(empty response)";u[u.length-1]=l;return u;});setSending(false);},
+      (err)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=err;l.streaming=false;u[u.length-1]=l;return u;});setSending(false);}
     );
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
-  const handleInput = (e) => {
-    setMsg(e.target.value);
-    // Auto-resize textarea
-    const el = e.target;
-    el.style.height = '56px';
-    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
   };
 
   return (
     <div style={{display:"grid",gridTemplateColumns:"1fr 420px",height:"100%"}}>
-      {/* CHAT PANE */}
       <div style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",height:"100%",minHeight:0}}>
-        {/* Agent selector — STICKY */}
         <div style={{display:"flex",alignItems:"center",gap:0,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.15)",flexShrink:0,flexWrap:"wrap"}}>
-          {agents.map(a => {
-            const ac = AGENT_COLORS[a.id]; const sel = target===a.id;
-            return (
-              <button key={a.id} onClick={()=>setTarget(a.id)} style={{display:"flex",alignItems:"center",gap:6,padding:"10px 16px",background:sel?`${ac}08`:"transparent",border:"none",borderBottom:sel?`2px solid ${ac}`:"2px solid transparent",cursor:"pointer",transition:"all 0.15s"}}>
-                <AgentAvatar agent={a} size={22} showStatus={false} />
-                <span style={{fontSize:11,fontWeight:sel?700:400,color:sel?ac:"rgba(255,255,255,0.3)",fontFamily:"'IBM Plex Mono',monospace"}}>{(a.name||a.id).split(' ')[0]}</span>
-              </button>
-            );
-          })}
-          <div style={{marginLeft:"auto",padding:"0 14px"}}>
-            <button style={{padding:"6px 14px",fontSize:9,fontWeight:700,letterSpacing:"0.12em",background:"linear-gradient(135deg,rgba(251,191,36,0.12),rgba(251,191,36,0.04))",border:"1px solid rgba(251,191,36,0.2)",color:"#fbbf24",cursor:"pointer",textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ Broadcast</button>
-          </div>
+          {agents.map(a=>{const ac=AGENT_COLORS[a.id];const sel=target===a.id;return(
+            <button key={a.id} onClick={()=>setTarget(a.id)} style={{display:"flex",alignItems:"center",gap:6,padding:"10px 16px",background:sel?`${ac}08`:"transparent",border:"none",borderBottom:sel?`2px solid ${ac}`:"2px solid transparent",cursor:"pointer",transition:"all 0.15s"}}>
+              <AgentAvatar agent={a} size={22} showStatus={false} />
+              <span style={{fontSize:11,fontWeight:sel?700:400,color:sel?ac:"rgba(255,255,255,0.3)",fontFamily:"'IBM Plex Mono',monospace"}}>{(a.name||a.id).split(' ')[0]}</span>
+            </button>
+          );})}
+          <div style={{marginLeft:"auto",padding:"0 14px"}}><button style={{padding:"6px 14px",fontSize:9,fontWeight:700,letterSpacing:"0.12em",background:"linear-gradient(135deg,rgba(251,191,36,0.12),rgba(251,191,36,0.04))",border:"1px solid rgba(251,191,36,0.2)",color:"#fbbf24",cursor:"pointer",textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ Broadcast</button></div>
         </div>
-
-        {/* Context strip */}
         <div style={{display:"flex",alignItems:"center",gap:12,padding:"8px 18px",background:`linear-gradient(90deg, ${tc}06, transparent)`,borderBottom:"1px solid rgba(255,255,255,0.03)",flexShrink:0}}>
           <AgentAvatar agent={ta} size={26} />
           <div style={{flex:1}}><span style={{fontSize:12,fontWeight:700,color:tc}}>{ta.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginLeft:8}}>{ta.role}</span></div>
-          <Badge text={ta.model} color={tc} />
-          <span style={{fontSize:10,color:"rgba(255,255,255,0.25)",fontFamily:"'IBM Plex Mono',monospace"}}>{ta.ping_ms?`${ta.ping_ms}ms`:"—"}</span>
+          <Badge text={ta.model} color={tc} /><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",fontFamily:"'IBM Plex Mono',monospace"}}>{ta.ping_ms?`${ta.ping_ms}ms`:"—"}</span>
         </div>
-
-        {/* Messages — SCROLLABLE */}
         <div ref={messagesEl} style={{flex:1,overflowY:"auto",scrollBehavior:"smooth",padding:"20px",display:"flex",flexDirection:"column",gap:20,minHeight:0}}>
-          {chatHistory.length === 0 && (
-            <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",gap:12,opacity:0.3}}>
-              <span style={{fontSize:32,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc}}>⚔</span>
-              <span style={{fontSize:12,color:"rgba(255,255,255,0.3)"}}>Command the warband</span>
-            </div>
-          )}
-          {chatHistory.map((m,i) => <ChatBubble key={i} msg={m} />)}
-          {sending && chatHistory.length > 0 && chatHistory[chatHistory.length-1].text === "" && !(chatHistory[chatHistory.length-1].toolCalls||[]).length && (
-            <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}>
-              <AgentAvatar agent={ta} size={22} showStatus={false} />
-              <Glass style={{padding:"8px 14px",display:"flex",alignItems:"center",gap:6}}>
-                <span style={{fontSize:10,color:tc,fontWeight:600}}>{ta.name.split(' ')[0]}</span>
-                <TypingIndicator color={tc} />
-              </Glass>
-            </div>
+          {chatHistory.length===0&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",gap:12,opacity:0.3}}><span style={{fontSize:32,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc}}>⚔</span><span style={{fontSize:12,color:"rgba(255,255,255,0.3)"}}>Command the warband</span></div>}
+          {chatHistory.map((m,i)=><ChatBubble key={i} msg={m} />)}
+          {sending&&chatHistory.length>0&&chatHistory[chatHistory.length-1].text===""&&!(chatHistory[chatHistory.length-1].toolCalls||[]).length&&(
+            <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}><AgentAvatar agent={ta} size={22} showStatus={false} /><Glass style={{padding:"8px 14px",display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:10,color:tc,fontWeight:600}}>{ta.name.split(' ')[0]}</span><TypingIndicator color={tc} /></Glass></div>
           )}
         </div>
-
-        {/* Input — TALLER TEXTAREA */}
         <div style={{padding:"12px 18px",borderTop:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(180deg, rgba(0,0,0,0.1), rgba(0,0,0,0.25))",display:"flex",gap:8,flexShrink:0,alignItems:"flex-end"}}>
-          <textarea ref={textareaEl} value={msg} onChange={handleInput} onKeyDown={handleKeyDown} placeholder={`Command ${ta.name}...`} rows={2}
+          <textarea ref={textareaEl} value={msg} onChange={e=>{setMsg(e.target.value);const el=e.target;el.style.height='56px';el.style.height=Math.min(el.scrollHeight,140)+'px';}} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();}}} placeholder={`Command ${ta.name}...`} rows={2}
             style={{flex:1,background:"rgba(255,255,255,0.02)",border:`1px solid ${tc}15`,padding:"14px 18px",color:"#e2e8f0",fontSize:13,fontFamily:"'IBM Plex Mono',monospace",outline:"none",lineHeight:1.5,minHeight:56,maxHeight:140,overflowY:"auto"}} />
           <button onClick={handleSend} disabled={sending} style={{padding:"14px 28px",background:`linear-gradient(135deg, ${tc}30, ${tc}15)`,border:`1px solid ${tc}40`,color:tc,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,cursor:sending?"wait":"pointer",letterSpacing:"0.14em",textTransform:"uppercase",boxShadow:`0 0 24px ${tc}15`,alignSelf:"stretch",minHeight:56,opacity:sending?0.5:1}}>SEND</button>
         </div>
       </div>
-
-      {/* EVENT STREAM — WIDER */}
+      {/* EVENT STREAM */}
       <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.2)",height:"100%",minHeight:0}}>
         <div style={{padding:"12px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
-          <div style={{display:"flex",alignItems:"center",gap:6}}>
-            <div style={{width:6,height:6,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}} />
-            <span style={{fontSize:10,fontWeight:700,color:"rgba(255,255,255,0.35)",letterSpacing:"0.16em",textTransform:"uppercase"}}>{wsConnected?"Live Feed":"Disconnected"}</span>
-          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:6,height:6,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}} /><span style={{fontSize:10,fontWeight:700,color:"rgba(255,255,255,0.35)",letterSpacing:"0.16em",textTransform:"uppercase"}}>{wsConnected?"Live Feed":"Disconnected"}</span></div>
           <span style={{fontSize:10,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>{events.length} events</span>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:1,padding:"1px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
           {[{l:"DELEGATES",val:events.filter(e=>e.type==="delegate").length,c:"#818cf8"},{l:"GIT OPS",val:events.filter(e=>e.type==="git").length,c:"#34d399"},{l:"ALERTS",val:events.filter(e=>e.type==="alert").length,c:"#fbbf24"}].map(s=>(
-            <div key={s.l} style={{padding:"10px 12px",background:"rgba(0,0,0,0.15)",textAlign:"center"}}>
-              <div style={{fontSize:18,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.val}</div>
-              <div style={{fontSize:8,color:"rgba(255,255,255,0.2)",letterSpacing:"0.14em",marginTop:2}}>{s.l}</div>
-            </div>
+            <div key={s.l} style={{padding:"10px 12px",background:"rgba(0,0,0,0.15)",textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.val}</div><div style={{fontSize:8,color:"rgba(255,255,255,0.2)",letterSpacing:"0.14em",marginTop:2}}>{s.l}</div></div>
           ))}
         </div>
-        <div style={{flex:1,overflowY:"auto",minHeight:0}}>{events.length === 0 ? (
-          <div style={{padding:20,textAlign:"center",color:"rgba(255,255,255,0.12)",fontSize:11}}>Waiting for events...</div>
-        ) : events.map((e,i)=><EventEntry key={i} event={e} idx={i} />)}</div>
+        <div style={{flex:1,overflowY:"auto",minHeight:0}}>{events.length===0?<div style={{padding:20,textAlign:"center",color:"rgba(255,255,255,0.12)",fontSize:11}}>Waiting for events...</div>:events.map((e,i)=><EventEntry key={i} event={e} idx={i} />)}</div>
       </div>
     </div>
   );
@@ -543,79 +384,38 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
 // ═══════════════════════════════════════════════════════════
 //  FLEET VIEW
 // ═══════════════════════════════════════════════════════════
-const AgentRow = ({agent, selected, onClick}) => {
-  const c = AGENT_COLORS[agent.id];
-  const sparkData = useMemo(() => makeSparkline(16, agent.cpu_percent||10, 15), [agent.id]);
-  return (
-    <div onClick={onClick} style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",alignItems:"center",gap:8,padding:"12px 14px",background:selected?`${c}06`:"transparent",borderLeft:selected?`2px solid ${c}`:"2px solid transparent",borderBottom:"1px solid rgba(255,255,255,0.02)",cursor:"pointer",transition:"all 0.15s"}}>
-      <AgentAvatar agent={agent} size={30} />
-      <div>
-        <div style={{fontSize:12,fontWeight:600,color:"#e2e8f0",lineHeight:1.1}}>{agent.name}</div>
-        <div style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginTop:3,display:"flex",gap:6}}>
-          <span>{agent.role}</span><span style={{color:c}}>{agent.model}</span>
-        </div>
-      </div>
-      <Sparkline data={sparkData} color={c} w={72} h={20} />
-      <div>
-        <Bar value={agent.cpu_percent||0} color={agent.cpu_percent>60?"#fbbf24":"#34d399"} />
-        <div style={{display:"flex",justifyContent:"space-between",marginTop:3,fontSize:9,color:"rgba(255,255,255,0.25)"}}>
-          <span>CPU {agent.cpu_percent||0}%</span><span>MEM {agent.memory_percent||0}%</span>
-        </div>
-      </div>
-      <div style={{textAlign:"right"}}>
-        <div style={{fontSize:16,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.tasks_completed||0}</div>
-        <div style={{fontSize:8,color:"rgba(255,255,255,0.2)",letterSpacing:"0.08em"}}>tasks</div>
-      </div>
-    </div>
-  );
-};
+const AgentRow = ({agent,selected,onClick}) => { const c=AGENT_COLORS[agent.id]; const sparkData=useMemo(()=>makeSparkline(16,agent.cpu_percent||10,15),[agent.id]); return (
+  <div onClick={onClick} style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",alignItems:"center",gap:8,padding:"12px 14px",background:selected?`${c}06`:"transparent",borderLeft:selected?`2px solid ${c}`:"2px solid transparent",borderBottom:"1px solid rgba(255,255,255,0.02)",cursor:"pointer",transition:"all 0.15s"}}>
+    <AgentAvatar agent={agent} size={30} />
+    <div><div style={{fontSize:12,fontWeight:600,color:"#e2e8f0",lineHeight:1.1}}>{agent.name}</div><div style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginTop:3,display:"flex",gap:6}}><span>{agent.role}</span><span style={{color:c}}>{agent.model}</span></div></div>
+    <Sparkline data={sparkData} color={c} w={72} h={20} />
+    <div><Bar value={agent.cpu_percent||0} color={agent.cpu_percent>60?"#fbbf24":"#34d399"} /><div style={{display:"flex",justifyContent:"space-between",marginTop:3,fontSize:9,color:"rgba(255,255,255,0.25)"}}><span>CPU {agent.cpu_percent||0}%</span><span>MEM {agent.memory_percent||0}%</span></div></div>
+    <div style={{textAlign:"right"}}><div style={{fontSize:16,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.tasks_completed||0}</div><div style={{fontSize:8,color:"rgba(255,255,255,0.2)",letterSpacing:"0.08em"}}>tasks</div></div>
+  </div>
+); };
 
-const AgentDetail = ({agent}) => {
-  const c = AGENT_COLORS[agent.id];
-  return (
-    <div style={{padding:"20px",display:"flex",flexDirection:"column",gap:18}}>
-      <div style={{display:"flex",alignItems:"center",gap:14}}>
-        <AgentAvatar agent={agent} size={44} />
-        <div style={{flex:1}}>
-          <div style={{fontSize:18,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.name}</div>
-          <div style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{agent.role}</div>
-        </div>
-        <Badge text={agent.status} color={statusColor(agent.status)} />
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-        {[{l:"CPU",v:`${agent.cpu_percent||0}%`,c:agent.cpu_percent>60?"#fbbf24":"#34d399"},{l:"Memory",v:`${agent.memory_percent||0}%`,c:"#818cf8"},{l:"Latency",v:agent.ping_ms?`${agent.ping_ms}ms`:"—",c:"#22d3ee"},{l:"Uptime",v:fmtUptime(agent.uptime_seconds||0),c:"#e2e8f0"}].map(m=>(
-          <Glass key={m.l} style={{padding:"12px 14px"}}>
-            <div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.12em"}}>{m.l}</div>
-            <div style={{fontSize:20,fontWeight:800,color:m.c,fontFamily:"'Space Grotesk',sans-serif",marginTop:3}}>{m.v}</div>
-          </Glass>
-        ))}
-      </div>
-      <div>
-        <div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Pipeline</div>
-        <Glass style={{padding:"12px 14px",display:"flex",alignItems:"center",gap:8}}>
-          <span style={{fontSize:12,fontWeight:600,color:c}}>{agent.model}</span>
-          <span style={{color:`${c}30`,fontSize:14}}>→</span>
-          <span style={{fontSize:12,color:"rgba(255,255,255,0.4)"}}>{agent.backend}</span>
-        </Glass>
-      </div>
-      <div>
-        <div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Tools ({(agent.tools||[]).length})</div>
-        <div style={{display:"flex",flexWrap:"wrap",gap:4}}>{(agent.tools||[]).map(t=><Badge key={t} text={t} color="rgba(255,255,255,0.35)" />)}</div>
-      </div>
-      <div>
-        <div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Last Action</div>
-        <Glass style={{padding:"12px 14px"}}><span style={{fontSize:12,color:"rgba(255,255,255,0.45)",lineHeight:1.5}}>{agent.last_action||"—"}</span></Glass>
-      </div>
+const AgentDetail = ({agent}) => { const c=AGENT_COLORS[agent.id]; return (
+  <div style={{padding:"20px",display:"flex",flexDirection:"column",gap:18}}>
+    <div style={{display:"flex",alignItems:"center",gap:14}}>
+      <AgentAvatar agent={agent} size={44} />
+      <div style={{flex:1}}><div style={{fontSize:18,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.name}</div><div style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{agent.role}</div></div>
+      <Badge text={agent.status} color={statusColor(agent.status)} />
     </div>
-  );
-};
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+      {[{l:"CPU",v:`${agent.cpu_percent||0}%`,c:agent.cpu_percent>60?"#fbbf24":"#34d399"},{l:"Memory",v:`${agent.memory_percent||0}%`,c:"#818cf8"},{l:"Latency",v:agent.ping_ms?`${agent.ping_ms}ms`:"—",c:"#22d3ee"},{l:"Uptime",v:fmtUptime(agent.uptime_seconds||0),c:"#e2e8f0"}].map(m=>(
+        <Glass key={m.l} style={{padding:"12px 14px"}}><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.12em"}}>{m.l}</div><div style={{fontSize:20,fontWeight:800,color:m.c,fontFamily:"'Space Grotesk',sans-serif",marginTop:3}}>{m.v}</div></Glass>
+      ))}
+    </div>
+    <div><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Pipeline</div><Glass style={{padding:"12px 14px",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:12,fontWeight:600,color:c}}>{agent.model}</span><span style={{color:`${c}30`,fontSize:14}}>→</span><span style={{fontSize:12,color:"rgba(255,255,255,0.4)"}}>{agent.backend}</span></Glass></div>
+    <div><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Tools ({(agent.tools||[]).length})</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{(agent.tools||[]).map(t=><Badge key={t} text={t} color="rgba(255,255,255,0.35)" />)}</div></div>
+    <div><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Last Action</div><Glass style={{padding:"12px 14px"}}><span style={{fontSize:12,color:"rgba(255,255,255,0.45)",lineHeight:1.5}}>{agent.last_action||"—"}</span></Glass></div>
+  </div>
+); };
 
-const FleetView = ({agents, selected, setSelected}) => (
+const FleetView = ({agents,selected,setSelected}) => (
   <div style={{display:"grid",gridTemplateColumns:"1fr 320px",height:"100%"}}>
     <div style={{borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto"}}>
-      <div style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",gap:8,padding:"10px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:9,color:"rgba(255,255,255,0.15)",textTransform:"uppercase",letterSpacing:"0.16em"}}>
-        <span></span><span>Agent</span><span>Activity</span><span>Load</span><span style={{textAlign:"right"}}>Tasks</span>
-      </div>
+      <div style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",gap:8,padding:"10px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:9,color:"rgba(255,255,255,0.15)",textTransform:"uppercase",letterSpacing:"0.16em"}}><span></span><span>Agent</span><span>Activity</span><span>Load</span><span style={{textAlign:"right"}}>Tasks</span></div>
       {agents.map((a,i)=><AgentRow key={a.id} agent={a} selected={selected===i} onClick={()=>setSelected(i)} />)}
     </div>
     <div style={{overflow:"auto",background:"rgba(0,0,0,0.2)"}}><AgentDetail agent={agents[selected]||agents[0]} /></div>
@@ -623,193 +423,173 @@ const FleetView = ({agents, selected, setSelected}) => (
 );
 
 // ═══════════════════════════════════════════════════════════
-//  OPS VIEW — Real data, no mock GPU
+//  REALM VIEW — Command Center
 // ═══════════════════════════════════════════════════════════
-const PodRow = ({pod}) => {
-  const phase = pod.status?.phase || pod.phase || "Unknown";
-  const ready = phase === "Running";
-  const name = pod.metadata?.name || pod.name || "unknown";
-  const node = pod.spec?.nodeName || pod.node || "—";
-  return (
-    <Glass style={{padding:"8px 12px",marginBottom:3,display:"flex",alignItems:"center",gap:10}}>
-      <GlowPip status={ready?"online":"offline"} size={5} />
-      <span style={{fontSize:11,color:"#e2e8f0",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:500}}>{name}</span>
-      <span style={{fontSize:10,color:"rgba(255,255,255,0.2)",fontFamily:"'IBM Plex Mono',monospace"}}>{node}</span>
-      <Badge text={phase} color={ready?"#34d399":"#ef4444"} />
-    </Glass>
-  );
-};
+const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
+  const [logPod, setLogPod] = useState(null);
+  const [restartingPod, setRestartingPod] = useState(null);
+  const handleRestart = async (name) => { setRestartingPod(name); await apiPost(`/api/v1/cluster/pods/${name}/restart`); setTimeout(()=>setRestartingPod(null),3000); };
 
-const OpsView = ({agents, nodes, pods, commits}) => (
-  <div style={{display:"flex",flexDirection:"column",gap:1,overflow:"auto",padding:18}}>
-    <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,marginBottom:18}}>
-      <MetricCard label="Pods" value={`${(pods||[]).length || "—"}`} sub={`${((pods||[]).filter(p=>(p.status?.phase||p.phase)==="Running")).length} Running`} color="#34d399" />
-      <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
-      <MetricCard label="Commits" value={`${(commits||[]).length||"—"}`} sub={(commits||[])[0]?.message?.slice(0,28)||"Fetching..."} color="#818cf8" />
-      <MetricCard label="Nodes" value={`${nodes.length}`} sub={`${nodes.filter(n=>n.status==="Ready").length} Ready`} color="#fbbf24" />
-      <MetricCard label="Agents" value={`${agents.filter(a=>a.status==="online").length}/${agents.length}`} sub="Online" color="#c084fc" />
-    </div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18,flex:1}}>
-      <div style={{display:"flex",flexDirection:"column",gap:18}}>
-        {/* CLUSTER NODES */}
-        <div>
-          <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Cluster · {nodes.length} Nodes</div>
-          {nodes.map(n=>(
-            <Glass key={n.name} glow="#34d399" style={{padding:"12px 16px",marginBottom:5}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-                <div style={{display:"flex",alignItems:"center",gap:8}}>
-                  <GlowPip status={n.status==="Ready"?"online":"offline"} size={5} />
-                  <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{n.name}</span>
-                  <span style={{fontSize:10,color:"rgba(255,255,255,0.18)"}}>{n.ip}</span>
-                </div>
-                <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                  <Badge text={n.role||"worker"} color="rgba(255,255,255,0.3)" />
-                </div>
-              </div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
-                {[{l:"CPU",v:n.cpu_percent,c:n.cpu_percent>60?"#fbbf24":"#34d399"},{l:"MEM",v:n.memory_percent,c:n.memory_percent>75?"#fbbf24":"#818cf8"}].map(x=>(
-                  <div key={x.l}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:9,color:"rgba(255,255,255,0.2)"}}>{x.l}</span><span style={{fontSize:10,fontWeight:700,color:x.c,fontFamily:"'Space Grotesk',sans-serif"}}>{x.v}%</span></div><Bar value={x.v} color={x.c} h={3}/></div>
-                ))}
-              </div>
-            </Glass>
-          ))}
-        </div>
-        {/* PODS */}
-        <div>
-          <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Pods · {(pods||[]).length}</div>
-          <div style={{maxHeight:240,overflowY:"auto"}}>
-            {(pods||[]).map((p,i)=><PodRow key={i} pod={p} />)}
-            {(pods||[]).length===0 && <div style={{fontSize:11,color:"rgba(255,255,255,0.15)",padding:10}}>No pods loaded</div>}
-          </div>
-        </div>
+  const runningPods = (pods||[]).filter(p=>(p.status?.phase||p.phase)==="Running");
+  const totalPods = (pods||[]).length;
+
+  const activity = useMemo(() => {
+    const items = [];
+    (k8sEvents||[]).forEach(e => { items.push({ time:e.lastTimestamp||e.metadata?.creationTimestamp||"", type:e.type==="Warning"?"warning":"k8s", source:e.involvedObject?.name||"k8s", message:`${e.reason||""}: ${e.message||""}`.slice(0,120) }); });
+    (commits||[]).forEach(c => { items.push({ time:c.created||c.commit?.author?.date||"", type:"git", source:c.author||c.commit?.author?.name||"git", message:c.message||c.commit?.message||"—" }); });
+    items.sort((a,b)=>new Date(b.time)-new Date(a.time));
+    return items.slice(0,30);
+  }, [k8sEvents, commits]);
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0}}>
+      {logPod && <LogModal podName={logPod} onClose={()=>setLogPod(null)} />}
+      {/* METRICS */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,padding:"16px 18px",flexShrink:0}}>
+        <MetricCard label="Pods" value={`${totalPods}`} sub={`${runningPods.length} Running`} color="#34d399" />
+        <MetricCard label="Nodes" value={`${nodes.length}`} sub={`${nodes.filter(n=>n.status==="Ready").length} Ready`} color="#fbbf24" />
+        <MetricCard label="Agents" value={`${agents.filter(a=>a.status==="online").length}/${agents.length}`} sub="Online" color="#c084fc" />
+        <MetricCard label="Commits" value={`${(commits||[]).length||"—"}`} sub={(commits||[])[0]?.message?.slice(0,28)||"—"} color="#818cf8" />
+        <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
       </div>
-      <div style={{display:"flex",flexDirection:"column",gap:18}}>
-        {/* RECENT COMMITS */}
-        <div>
-          <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Recent Commits · {(commits||[]).length}</div>
-          <div style={{maxHeight:180,overflow:"auto"}}>
-            {(commits||[]).slice(0,10).map((c,i)=>(
-              <Glass key={i} style={{padding:"8px 12px",marginBottom:3,display:"flex",gap:8,alignItems:"center"}}>
-                <span style={{fontSize:9,color:"#34d399",fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",minWidth:56}}>{(c.sha||c.id||"").slice(0,7)}</span>
-                <span style={{fontSize:11,color:"rgba(255,255,255,0.45)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.message||c.commit?.message||"—"}</span>
-                <span style={{fontSize:9,color:"rgba(255,255,255,0.18)",fontFamily:"'IBM Plex Mono',monospace"}}>{(c.author||c.commit?.author?.name||"").slice(0,8)}</span>
-              </Glass>
-            ))}
-            {(commits||[]).length===0 && <div style={{fontSize:11,color:"rgba(255,255,255,0.15)",padding:10}}>No commits loaded</div>}
-          </div>
-        </div>
-        {/* GITOPS PIPELINE */}
-        <div>
-          <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>GitOps Pipeline</div>
-          <Glass glow="#34d399" style={{padding:"16px 18px"}}>
-            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-              {["PUSH","PR","REVIEW","MERGE","SYNC"].map((s,i)=>(
-                <div key={s} style={{display:"flex",alignItems:"center"}}>
-                  <div style={{padding:"6px 12px",fontSize:10,fontWeight:700,letterSpacing:"0.08em",color:s==="REVIEW"?"#fbbf24":"#34d399",background:s==="REVIEW"?"rgba(251,191,36,0.08)":"rgba(52,211,153,0.06)",border:`1px solid ${s==="REVIEW"?"rgba(251,191,36,0.15)":"rgba(52,211,153,0.1)"}`}}>{s}</div>
-                  {i<4 && <div style={{width:16,height:1,background:"rgba(255,255,255,0.06)"}} />}
-                </div>
+      {/* MAIN */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 380px",flex:1,minHeight:0}}>
+        {/* LEFT */}
+        <div style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto",padding:"0 18px 18px"}}>
+          {/* NODES */}
+          <div style={{marginBottom:18}}>
+            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Cluster Nodes <span style={{color:"rgba(255,255,255,0.1)",fontWeight:400}}>{nodes.length}</span></div>
+            <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.min(nodes.length,3)},1fr)`,gap:8}}>
+              {nodes.map(n=>(
+                <Glass key={n.name} glow={n.status==="Ready"?"#34d399":"#ef4444"} style={{padding:"14px 16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}><GlowPip status={n.status==="Ready"?"online":"offline"} size={6} /><span style={{fontSize:14,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{n.name}</span></div>
+                    <Badge text={n.role||"worker"} color="rgba(255,255,255,0.3)" />
+                  </div>
+                  <div style={{fontSize:10,color:"rgba(255,255,255,0.15)",marginBottom:10}}>{n.ip}</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {[{l:"CPU",v:n.cpu_percent,c:n.cpu_percent>60?"#fbbf24":"#34d399"},{l:"MEM",v:n.memory_percent,c:n.memory_percent>75?"#fbbf24":"#818cf8"}].map(x=>(
+                      <div key={x.l}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:9,color:"rgba(255,255,255,0.2)"}}>{x.l}</span><span style={{fontSize:11,fontWeight:700,color:x.c,fontFamily:"'Space Grotesk',sans-serif"}}>{x.v}%</span></div><Bar value={x.v} color={x.c} h={4}/></div>
+                    ))}
+                  </div>
+                </Glass>
               ))}
             </div>
-            <div style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginTop:12}}>Agent → Gitea → PR → Sovereign approves → ArgoCD sync</div>
-          </Glass>
+          </div>
+          {/* PODS */}
+          <div>
+            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Pods <span style={{color:"rgba(255,255,255,0.1)",fontWeight:400}}>{totalPods}</span></div>
+            <div style={{display:"grid",gridTemplateColumns:"6px 1fr 100px 70px 90px",gap:8,padding:"6px 12px",fontSize:9,color:"rgba(255,255,255,0.12)",textTransform:"uppercase",letterSpacing:"0.14em",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
+              <span></span><span>Name</span><span>Node</span><span>Status</span><span style={{textAlign:"right"}}>Actions</span>
+            </div>
+            {(pods||[]).map((p,i) => {
+              const name=p.metadata?.name||p.name||"unknown"; const phase=p.status?.phase||p.phase||"Unknown"; const node=p.spec?.nodeName||p.node||"—"; const ready=phase==="Running";
+              const isAgent=Object.keys(AGENT_COLORS).some(a=>name.startsWith(a));
+              return (
+                <div key={i} style={{display:"grid",gridTemplateColumns:"6px 1fr 100px 70px 90px",gap:8,padding:"8px 12px",alignItems:"center",borderBottom:"1px solid rgba(255,255,255,0.02)",background:isAgent?"rgba(129,140,248,0.02)":"transparent"}}>
+                  <GlowPip status={ready?"online":"offline"} size={5} />
+                  <span style={{fontSize:11,color:"#e2e8f0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:isAgent?600:400}}>{name}</span>
+                  <span style={{fontSize:10,color:"rgba(255,255,255,0.18)",fontFamily:"'IBM Plex Mono',monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{node}</span>
+                  <Badge text={phase} color={ready?"#34d399":"#ef4444"} />
+                  <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
+                    <ActionBtn label="Logs" icon="⬡" color="#22d3ee" small onClick={()=>setLogPod(name)} />
+                    <ActionBtn label="↻" color="#fbbf24" small onClick={()=>handleRestart(name)} disabled={restartingPod===name} />
+                  </div>
+                </div>
+              );
+            })}
+            {totalPods===0&&<div style={{padding:16,textAlign:"center",fontSize:11,color:"rgba(255,255,255,0.12)"}}>No pods loaded</div>}
+          </div>
         </div>
-        {/* SERVICES */}
-        <div>
-          <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Services</div>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
-            {[{n:"Gateway",p:"8080"},{n:"Seidr",p:"8082"},{n:"ChromaDB",p:"8000"},{n:"Bifrost",p:"3000"},{n:"Gitea",p:"30637"},{n:"ArgoCD"},{n:"cert-manager"},{n:"ingress-nginx",p:"30447"}].map(s=>(
-              <Glass key={s.n} style={{padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div style={{display:"flex",alignItems:"center",gap:6}}><GlowPip status="online" size={4} /><span style={{fontSize:11,color:"#e2e8f0"}}>{s.n}</span></div>
-                {s.p && <span style={{fontSize:10,color:"rgba(255,255,255,0.18)",fontFamily:"'IBM Plex Mono',monospace"}}>:{s.p}</span>}
-              </Glass>
-            ))}
+        {/* RIGHT — Activity + Controls */}
+        <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.15)",overflow:"auto",minHeight:0}}>
+          <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0}}>
+            <div style={{padding:"14px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)"}}>Activity Feed</span>
+              <span style={{fontSize:10,color:"rgba(255,255,255,0.1)",fontFamily:"'IBM Plex Mono',monospace"}}>{activity.length}</span>
+            </div>
+            <div style={{flex:1,overflowY:"auto",minHeight:0}}>
+              {activity.map((a,i)=>{const colors={git:"#34d399",k8s:"#818cf8",warning:"#fbbf24"};const c=colors[a.type]||"#6b7280";return(
+                <div key={i} style={{display:"flex",gap:8,padding:"8px 16px",borderBottom:"1px solid rgba(255,255,255,0.02)",position:"relative"}}>
+                  <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:`${c}25`}} />
+                  <div style={{width:5,height:5,borderRadius:"50%",background:c,marginTop:6,flexShrink:0,boxShadow:`0 0 6px ${c}40`}} />
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:2}}><Badge text={a.type} color={c} /><span style={{fontSize:9,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>{fmtTimeAgo(a.time)}</span></div>
+                    <span style={{fontSize:11,color:"rgba(255,255,255,0.4)",lineHeight:1.5,display:"block",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.message}</span>
+                  </div>
+                </div>
+              );})}
+              {activity.length===0&&<div style={{padding:20,textAlign:"center",fontSize:11,color:"rgba(255,255,255,0.12)"}}>No recent activity</div>}
+            </div>
+          </div>
+          {/* GITOPS PIPELINE */}
+          <div style={{padding:"16px",borderTop:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
+            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>GitOps Pipeline</div>
+            <Glass glow="#34d399" style={{padding:"14px 16px"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+                {["PUSH","PR","REVIEW","MERGE","SYNC"].map((s,i)=>(<div key={s} style={{display:"flex",alignItems:"center"}}><div style={{padding:"5px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.08em",color:s==="REVIEW"?"#fbbf24":"#34d399",background:s==="REVIEW"?"rgba(251,191,36,0.08)":"rgba(52,211,153,0.06)",border:`1px solid ${s==="REVIEW"?"rgba(251,191,36,0.15)":"rgba(52,211,153,0.1)"}`}}>{s}</div>{i<4&&<div style={{width:12,height:1,background:"rgba(255,255,255,0.06)"}} />}</div>))}
+              </div>
+              <div style={{fontSize:10,color:"rgba(255,255,255,0.2)",marginTop:10}}>Agent → Gitea → PR → Sovereign → ArgoCD</div>
+            </Glass>
+          </div>
+          {/* SERVICES */}
+          <div style={{padding:"0 16px 16px",flexShrink:0}}>
+            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Services</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
+              {[{n:"Gateway",p:"8080"},{n:"Seidr",p:"8082"},{n:"ChromaDB",p:"8000"},{n:"Bifrost",p:"3000"},{n:"Gitea",p:"30637"},{n:"ArgoCD"},{n:"cert-manager"},{n:"ingress",p:"30447"}].map(s=>(
+                <Glass key={s.n} style={{padding:"7px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",alignItems:"center",gap:5}}><GlowPip status="online" size={4} /><span style={{fontSize:11,color:"#e2e8f0"}}>{s.n}</span></div>{s.p&&<span style={{fontSize:10,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>:{s.p}</span>}</Glass>
+              ))}
+            </div>
           </div>
         </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 // ═══════════════════════════════════════════════════════════
 //  MAIN APP
 // ═══════════════════════════════════════════════════════════
-const Tab = ({active,label,count,onClick}) => (
-  <button onClick={onClick} style={{background:"none",border:"none",position:"relative",color:active?"#e2e8f0":"rgba(255,255,255,0.25)",padding:"14px 0",marginRight:28,cursor:"pointer",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:"0.14em",textTransform:"uppercase",transition:"all 0.15s"}}>
-    <span>{label}</span>
-    {count && <span style={{marginLeft:6,fontSize:10,fontWeight:700,color:active?"#818cf8":"rgba(255,255,255,0.12)"}}>{count}</span>}
-    {active && <div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:"linear-gradient(90deg,#818cf8,#818cf800)",boxShadow:"0 0 8px rgba(129,140,248,0.3)"}} />}
-  </button>
-);
+const Tab = ({active,label,count,onClick}) => (<button onClick={onClick} style={{background:"none",border:"none",position:"relative",color:active?"#e2e8f0":"rgba(255,255,255,0.25)",padding:"14px 0",marginRight:28,cursor:"pointer",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:"0.14em",textTransform:"uppercase",transition:"all 0.15s"}}><span>{label}</span>{count&&<span style={{marginLeft:6,fontSize:10,fontWeight:700,color:active?"#818cf8":"rgba(255,255,255,0.12)"}}>{count}</span>}{active&&<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:"linear-gradient(90deg,#818cf8,#818cf800)",boxShadow:"0 0 8px rgba(129,140,248,0.3)"}} />}</button>);
 
 function App() {
-  const [tab, setTab] = useState("comms");
-  const [selected, setSelected] = useState(0);
-  const [chatHistory, setChatHistory] = useState([]);
-  const [msg, setMsg] = useState("");
-  const [target, setTarget] = useState("ragnar");
-  const [sending, setSending] = useState(false);
-
-  const agents = usePolledData('/api/v1/agents', FALLBACK_AGENTS, CONFIG.POLL_INTERVAL);
-  const nodes = usePolledData('/api/v1/cluster/nodes', FALLBACK_NODES, CONFIG.POLL_INTERVAL * 2);
-  const pods = usePolledData('/api/v1/cluster/pods', [], CONFIG.POLL_INTERVAL * 2);
-  const commits = usePolledData('/api/v1/gitea/commits', [], CONFIG.POLL_INTERVAL * 3);
-  const { events, connected: wsConnected } = useEventStream();
-
-  const online = agents.filter(a => a.status === "online").length;
+  const [tab,setTab]=useState("comms"); const [selected,setSelected]=useState(0);
+  const [chatHistory,setChatHistory]=useState([]); const [msg,setMsg]=useState(""); const [target,setTarget]=useState("ragnar"); const [sending,setSending]=useState(false);
+  const agents=usePolledData('/api/v1/agents',FALLBACK_AGENTS,CONFIG.POLL_INTERVAL);
+  const nodes=usePolledData('/api/v1/cluster/nodes',FALLBACK_NODES,CONFIG.POLL_INTERVAL*2);
+  const pods=usePolledData('/api/v1/cluster/pods',[],CONFIG.POLL_INTERVAL*2);
+  const commits=usePolledData('/api/v1/gitea/commits',[],CONFIG.POLL_INTERVAL*3);
+  const k8sEvents=usePolledData('/api/v1/k8s/events',[],CONFIG.POLL_INTERVAL*2);
+  const {events,connected:wsConnected}=useEventStream();
+  const online=agents.filter(a=>a.status==="online").length;
 
   return (
     <div style={{height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
-      {/* TOP BAR */}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:48,minHeight:48,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(90deg,rgba(10,10,20,0.95),rgba(6,6,16,0.95))",position:"relative"}}>
         <div style={{position:"absolute",bottom:0,left:0,right:0,height:1,background:"linear-gradient(90deg,transparent,rgba(99,102,241,0.12),transparent)"}} />
         <div style={{display:"flex",alignItems:"center",gap:14}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            <div style={{width:9,height:9,background:"#818cf8",boxShadow:"0 0 14px rgba(129,140,248,0.5)",borderRadius:1}} />
-            <span style={{fontSize:14,fontWeight:800,letterSpacing:"0.22em",color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>HIRDFORGE</span>
-          </div>
-          <div style={{width:1,height:20,background:"rgba(255,255,255,0.05)"}} />
-          <span style={{fontSize:10,color:"rgba(255,255,255,0.18)",letterSpacing:"0.12em"}}>VALHALLA CLUSTER</span>
+          <div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:9,height:9,background:"#818cf8",boxShadow:"0 0 14px rgba(129,140,248,0.5)",borderRadius:1}} /><span style={{fontSize:14,fontWeight:800,letterSpacing:"0.22em",color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>HIRDFORGE</span></div>
+          <div style={{width:1,height:20,background:"rgba(255,255,255,0.05)"}} /><span style={{fontSize:10,color:"rgba(255,255,255,0.18)",letterSpacing:"0.12em"}}>VALHALLA CLUSTER</span>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:18}}>
-          {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=>(
-            <div key={x.l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:"rgba(255,255,255,0.25)"}}>
-              <GlowPip status={x.s} size={5} /><span>{x.l}</span>
-            </div>
-          ))}
+          {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=>(<div key={x.l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:"rgba(255,255,255,0.25)"}}><GlowPip status={x.s} size={5} /><span>{x.l}</span></div>))}
           <div style={{width:1,height:20,background:"rgba(255,255,255,0.05)"}} />
-          <span style={{fontSize:12,fontFamily:"'Space Grotesk',sans-serif"}}>
-            <span style={{color:"#34d399",fontWeight:700}}>{online}</span>
-            <span style={{color:"rgba(255,255,255,0.15)"}}> / {agents.length}</span>
-          </span>
+          <span style={{fontSize:12,fontFamily:"'Space Grotesk',sans-serif"}}><span style={{color:"#34d399",fontWeight:700}}>{online}</span><span style={{color:"rgba(255,255,255,0.15)"}}> / {agents.length}</span></span>
         </div>
       </div>
-
-      {/* TABS */}
       <div style={{display:"flex",padding:"0 20px",borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.12)",flexShrink:0}}>
         <Tab active={tab==="comms"} label="Comms" count={String(events.length)} onClick={()=>setTab("comms")} />
         <Tab active={tab==="fleet"} label="Warriors" count={String(agents.length)} onClick={()=>setTab("fleet")} />
-        <Tab active={tab==="ops"} label="Realm" onClick={()=>setTab("ops")} />
+        <Tab active={tab==="realm"} label="Realm" onClick={()=>setTab("realm")} />
       </div>
-
-      {/* CONTENT */}
       <div style={{flex:1,overflow:"hidden",minHeight:0}}>
-        {tab==="fleet" && <FleetView agents={agents} selected={selected} setSelected={setSelected} />}
-        {tab==="ops" && <OpsView agents={agents} nodes={nodes} pods={pods} commits={commits} />}
-        {tab==="comms" && <CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} />}
+        {tab==="fleet"&&<FleetView agents={agents} selected={selected} setSelected={setSelected} />}
+        {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} />}
+        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} />}
       </div>
-
-      {/* STATUS BAR */}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:28,minHeight:28,borderTop:"1px solid rgba(255,255,255,0.03)",background:"rgba(0,0,0,0.3)",fontSize:10,color:"rgba(255,255,255,0.2)",flexShrink:0}}>
-        <div style={{display:"flex",gap:18}}>
-          <span>{(pods||[]).length} pods</span>
-          <span>{nodes.length} nodes</span>
-          <span>{agents.length} agents</span>
-        </div>
-        <div style={{display:"flex",gap:18}}>
-          <span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span>
-          <span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span>
-          <span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.0-s7</span>
-        </div>
+        <div style={{display:"flex",gap:18}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
+        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.1-s7</span></div>
       </div>
     </div>
   );
