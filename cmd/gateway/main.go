@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	_ "embed"
 	"bytes"
 	"crypto/sha1"
 	"crypto/tls"
@@ -25,225 +26,8 @@ import (
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
-const dashboardHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Valhalla Command</title>
-<style>
-:root{color-scheme:dark}*{box-sizing:border-box}
-body{margin:0;height:100vh;overflow:hidden;background:#12121f;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.app{height:100vh;display:grid;grid-template-rows:50px 1fr 80px}
-.header{display:flex;justify-content:space-between;align-items:center;padding:0 14px;background:#1a1a2e;border-bottom:1px solid #2d2d44}
-.title{font-size:18px;font-weight:700}.badge{background:#0d6efd;color:#fff;padding:4px 10px;border-radius:999px;font-size:12px}
-.main{min-height:0;display:grid;grid-template-columns:260px 1fr 280px;gap:10px;padding:10px}
-.panel{background:#1a1a2e;border:1px solid #2d2d44;border-radius:12px;min-height:0}
-.left{display:flex;flex-direction:column;padding:10px;gap:10px}.left h3,.right h3{margin:2px 0 4px;font-size:12px;letter-spacing:.08em;color:#9fa7d9}
-.agent-list{flex:1;overflow:auto;display:flex;flex-direction:column;gap:8px}
-.agent-card{background:#22223b;border:1px solid #2d2d44;border-radius:10px;padding:10px;cursor:pointer;display:flex;flex-direction:column;gap:6px}
-.agent-card.sel{border-color:#0d6efd;box-shadow:0 0 0 1px #0d6efd inset,0 0 16px rgba(13,110,253,.2)}
-.agent-top{display:flex;justify-content:space-between;align-items:center}.agent-name{font-weight:700}
-.dot{width:10px;height:10px;border-radius:50%;display:inline-block}.ok{background:#2bd576;box-shadow:0 0 8px #2bd576}.bad{background:#ff5f6d;box-shadow:0 0 8px #ff5f6d}.warn{background:#ffc107;box-shadow:0 0 8px #ffc107}
-.muted{font-size:12px;color:#b8bfde}.tiny{font-size:11px;color:#a3acd9}
-.pills{display:flex;flex-wrap:wrap;gap:4px}.pill{font-size:11px;padding:2px 6px;border-radius:999px;background:#101a35;border:1px solid #1d3d7a;color:#cde0ff}
-.refresh{border:0;background:#0d6efd;color:#fff;border-radius:10px;padding:9px 10px;font-weight:600;cursor:pointer}
-.center{display:grid;grid-template-rows:38px 1fr 56px;min-height:0}
-.chat-head{display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid #2d2d44}
-.chat-head-main{display:flex;align-items:center;gap:8px;flex:1}
-.export-btn{border:1px solid #2d2d44;background:#22223b;color:#dbe4ff;border-radius:8px;padding:5px 8px;font-size:12px;cursor:pointer}
-.messages{overflow:auto;padding:12px;display:flex;flex-direction:column;gap:10px}
-.msg{max-width:85%;padding:10px 12px;border-radius:12px;white-space:pre-wrap;line-height:1.35}
-.msg.user{align-self:flex-end;background:#0d6efd;color:#fff;border-bottom-right-radius:6px}
-.msg.assistant{align-self:flex-start;background:#22223b;border:1px solid #2d2d44;border-bottom-left-radius:6px}
-.msg-text{white-space:pre-wrap}
-.msg-timestamp{font-size:.7rem;color:#888;margin-top:4px;user-select:none}
-.tools{display:flex;flex-direction:column;gap:8px;margin-top:8px}
-details.toolbox{background:#151529;border:1px solid #2d2d44;border-radius:10px;padding:6px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
-details.toolbox summary{cursor:pointer;color:#cdd7ff}details.toolbox pre{margin:8px 0 0;background:#0d0f1f;border:1px solid #242744;border-radius:8px;padding:10px;overflow:auto;color:#d3d8ef}
-.inputbar{display:flex;gap:10px;padding:10px;border-top:1px solid #2d2d44}#input{flex:1;border:1px solid #474a70;border-radius:10px;background:#141526;color:#e0e0e0;padding:11px 12px}
-#send{border:0;background:#0d6efd;color:#fff;border-radius:10px;padding:0 16px;font-weight:700;cursor:pointer}
-#send:disabled,.refresh:disabled{opacity:.55;cursor:not-allowed}
-.right{display:grid;grid-template-rows:auto auto auto auto auto;gap:10px;padding:10px;overflow-y:auto}
-.cluster-box{background:#151528;border:1px solid #2d2d44;border-radius:10px;padding:8px;display:flex;flex-direction:column;min-height:0}
-.rows{overflow:auto;display:flex;flex-direction:column;gap:6px}.node,.pod,.file,.k8sev,.repoitem{display:grid;align-items:center;gap:6px;background:#20223a;border:1px solid #2d2d44;border-radius:8px;padding:6px 8px;font-size:12px}
-.node{grid-template-columns:1fr auto}.pod{grid-template-columns:1fr auto auto}.role{font-size:10px;border-radius:999px;padding:2px 6px;background:#2b2f4f;color:#d8ddff}.cp{background:#12385f}.wk{background:#3a2b1a}
-.file{grid-template-columns:1fr auto}
-.pod-res{font-size:.7rem;color:#888}
-.k8sev{grid-template-columns:auto 1fr}
-.repohead{font-size:12px;color:#b8bfde;margin-bottom:6px}
-.eventbar{border-top:1px solid #2d2d44;background:#1a1a2e;padding:8px 10px;overflow-x:auto;overflow-y:hidden;white-space:nowrap}
-.events{display:flex;gap:8px;min-width:max-content}.ev{display:inline-flex;align-items:center;gap:6px;padding:8px 10px;border-radius:10px;border:1px solid #2d2d44;background:#22223b;font-size:12px}
-.ev.message{border-color:#1d3d7a;background:#122140}.ev.tool_call{border-color:#6d39b6;background:#2a1b45}.ev.health_change{border-color:#1d7a53;background:#153428}.ev.agent_start{border-color:#6c757d;background:#2b2f36}.ev.k8s_event{border-color:#856404;background:#3b3212}
-.disabled{pointer-events:none;opacity:.6}
-@media (max-width:1100px){.main{grid-template-columns:260px 1fr}.right{display:none}}
-</style>
-</head>
-<body>
-<div class="app">
-  <div class="header"><div class="title">⚔️ Valhalla Command</div><div id="badge" class="badge">0/0 healthy</div></div>
-  <div class="main">
-    <aside id="left" class="panel left">
-      <h3>AGENTS</h3>
-      <div id="agentList" class="agent-list"></div>
-      <button id="refreshAgents" class="refresh">Refresh Agents</button>
-    </aside>
-    <section class="panel center">
-      <div class="chat-head"><div id="chatHead" class="chat-head-main"><span class="dot bad"></span><span>Talking to: none</span></div><button id="exportBtn" class="export-btn">⬇ Export</button></div>
-      <div id="messages" class="messages"></div>
-      <div class="inputbar"><input id="input" type="text" placeholder="Send to selected agent..."/><button id="send">Send</button></div>
-    </section>
-    <aside class="panel right">
-      <div class="cluster-box"><h3>PODS</h3><div id="pods" class="rows"></div></div>
-      <div class="cluster-box"><h3>📁 FILES</h3><div id="files" class="rows"></div></div>
-      <div class="cluster-box"><h3>⚡ K8S EVENTS</h3><div id="k8sEvents" class="rows"></div></div>
-      <div class="cluster-box"><h3>📦 REPO</h3><div id="repoHead" class="repohead">Repository unavailable</div><div id="repoCommits" class="rows"></div></div>
-      <div class="cluster-box"><h3>NODES</h3><div id="nodes" class="rows"></div></div>
-    </aside>
-  </div>
-  <div class="eventbar"><div id="events" class="events"></div></div>
-</div>
-<script>
-const agentListEl=document.getElementById("agentList"),messagesEl=document.getElementById("messages"),inputEl=document.getElementById("input"),sendEl=document.getElementById("send"),badgeEl=document.getElementById("badge"),chatHeadEl=document.getElementById("chatHead"),leftEl=document.getElementById("left"),eventsEl=document.getElementById("events"),nodesEl=document.getElementById("nodes"),podsEl=document.getElementById("pods"),filesEl=document.getElementById("files"),k8sEventsEl=document.getElementById("k8sEvents"),repoHeadEl=document.getElementById("repoHead"),repoCommitsEl=document.getElementById("repoCommits"),exportBtn=document.getElementById("exportBtn");
-let agents=[],selectedAgent="",streaming=false,currentAssistant=null;
-const sessionsByAgent={},agentMessages={},pendingByAgent={};
-let ws=null,wsConnected=false,eventPollTimer=null;
-function rndHex(){return Math.floor(Math.random()*Number.MAX_SAFE_INTEGER).toString(16)}
-function fmtUptime(sec){sec=Number(sec)||0;const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;if(h>0)return h+"h "+m+"m";if(m>0)return m+"m";return s+"s"}
-function esc(s){return String(s==null?"":s)}
-function scrollBottom(){messagesEl.scrollTop=messagesEl.scrollHeight}
-function setStreaming(v){streaming=v;sendEl.disabled=v;inputEl.disabled=v;leftEl.classList.toggle("disabled",v)}
-function clearChildren(el){while(el.firstChild)el.removeChild(el.firstChild)}
-function saveAgentView(name){if(!name)return;agentMessages[name]=Array.from(messagesEl.children).map(n=>n.cloneNode(true))}
-function restoreAgentView(name){clearChildren(messagesEl);const arr=agentMessages[name]||[];for(const n of arr)messagesEl.appendChild(n.cloneNode(true));scrollBottom()}
-function ensureSession(agent){if(!sessionsByAgent[agent])sessionsByAgent[agent]=rndHex();return sessionsByAgent[agent]}
-function pendingMap(agent){if(!pendingByAgent[agent])pendingByAgent[agent]={};return pendingByAgent[agent]}
-function nowTs(){return new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
-function bubble(text,role){const el=document.createElement("div");el.className="msg "+role;const txt=document.createElement("div");txt.className="msg-text";txt.textContent=text||"";const ts=document.createElement('div');ts.className='msg-timestamp';ts.textContent=nowTs();el.append(txt,ts);messagesEl.appendChild(el);scrollBottom();return el}
-function appendToBubble(el,text){const txt=el.querySelector('.msg-text');if(txt)txt.textContent+=(text||"")}
-function toolHeader(tool,args){let preview="";if(args&&typeof args==="object"&&"command" in args)preview=String(args.command);else if(args!==undefined)preview=JSON.stringify(args);return "🔨 "+tool+(preview?": "+preview:"")}
-function addToolCall(agent,tool,args){if(!currentAssistant)currentAssistant=bubble("","assistant");let wrap=currentAssistant.querySelector(".tools");if(!wrap){wrap=document.createElement("div");wrap.className="tools";currentAssistant.appendChild(wrap)}const d=document.createElement("details");d.className="toolbox";d.open=true;const s=document.createElement("summary");s.textContent=toolHeader(tool,args);const p=document.createElement("pre");p.textContent="running...";d.append(s,p);wrap.appendChild(d);const pm=pendingMap(agent);if(!pm[tool])pm[tool]=[];pm[tool].push(p);scrollBottom()}
-function setToolResult(agent,tool,result){const pm=pendingMap(agent);const q=pm[tool]||[];const pre=q.shift();if(!pre)return;const out=result&&result.output?String(result.output):"";const err=result&&result.error?String(result.error):"";pre.textContent=err?(out?err+"\n"+out:err):out;scrollBottom()}
-function parseSSE(block){let data="";for(const l of block.split("\n")){if(l.startsWith("data:"))data+=l.slice(5).trimStart()}if(!data)return null;try{return JSON.parse(data)}catch{return null}}
-
-function selectedMeta(){return agents.find(a=>a.name===selectedAgent)||null}
-function renderAgents(){
-  let healthy=0;clearChildren(agentListEl);
-  for(const a of agents){if(a.healthy)healthy++;const card=document.createElement("div");card.className="agent-card"+(a.name===selectedAgent?" sel":"");card.onclick=()=>selectAgent(a.name);
-    const top=document.createElement("div");top.className="agent-top";
-    const nm=document.createElement("div");nm.className="agent-name";nm.textContent=a.name;
-    const dot=document.createElement("span");dot.className="dot "+(a.healthy?"ok":"bad");top.append(nm,dot);
-    const model=document.createElement("div");model.className="muted";model.textContent=a.model||"model: unknown";
-    const pills=document.createElement("div");pills.className="pills";(a.tools||[]).forEach(t=>{const p=document.createElement("span");p.className="pill";p.textContent=t;pills.appendChild(p)});
-    const up=document.createElement("div");up.className="tiny";up.textContent="uptime: "+fmtUptime(a.uptime_seconds||0);
-    const stats=document.createElement("div");stats.className="tiny";stats.textContent=(a.requests_served||0)+" requests • "+(a.tool_calls_made||0)+" tool calls";
-    card.append(top,model,pills,up,stats);agentListEl.appendChild(card);
-  }
-  badgeEl.textContent=healthy+"/"+agents.length+" healthy";
-}
-function updateChatHead(){const m=selectedMeta();if(!m){chatHeadEl.innerHTML='<span class="dot bad"></span><span>Talking to: none</span>';return}chatHeadEl.innerHTML='<span class="dot '+(m.healthy?'ok':'bad')+'"></span><span>Talking to: '+esc(m.name)+'</span>'}
-function selectAgent(name){if(streaming)return;saveAgentView(selectedAgent);selectedAgent=name;ensureSession(name);currentAssistant=null;restoreAgentView(name);renderAgents();updateChatHead();loadFiles();inputEl.focus()}
-
-async function loadAgents(){
-  try{const r=await fetch('/api/v1/agents');if(!r.ok)throw new Error('agents request failed');agents=await r.json();
-    if(!selectedAgent&&agents.length)selectedAgent=agents[0].name;
-    if(selectedAgent&&!agents.find(a=>a.name===selectedAgent)){saveAgentView(selectedAgent);selectedAgent=agents.length?agents[0].name:""}
-    renderAgents();updateChatHead();
-  }catch(e){console.error(e)}
-}
-async function loadNodes(){
-  try{const r=await fetch('/api/v1/cluster/nodes');if(!r.ok)throw new Error('nodes failed');const nodes=await r.json();clearChildren(nodesEl);nodes.forEach(n=>{const row=document.createElement('div');row.className='node';const left=document.createElement('div');left.innerHTML='<div>'+esc(n.name)+'</div><div class="tiny">'+esc(n.kubelet_version||'')+'</div>';const right=document.createElement('div');const dot=document.createElement('span');dot.className='dot '+((n.status||'')==='Ready'?'ok':'bad');const role=document.createElement('span');const rs=n.roles||[];role.className='role '+((rs.join(',').toLowerCase().includes('control-plane')||rs.join(',').toLowerCase().includes('master'))?'cp':'wk');role.textContent=(role.className.includes('cp')?'CP':'Worker');right.append(dot,document.createTextNode(' '),role);row.append(left,right);nodesEl.appendChild(row)})
-  }catch(e){console.error(e)}
-}
-function podDot(status){status=String(status||'');if(status==='Running')return 'ok';if(status==='Pending')return 'warn';return 'bad'}
-function fmtBytes(n){n=Number(n)||0;if(n<1024)return n+" B";if(n<1024*1024)return (n/1024).toFixed(1)+" KB";return (n/(1024*1024)).toFixed(1)+" MB"}
-async function loadPods(){
-  try{
-    const [podsResp,resResp]=await Promise.all([fetch('/api/v1/cluster/pods'),fetch('/api/v1/k8s/resources')]);
-    if(!podsResp.ok)throw new Error('pods failed');
-    const pods=await podsResp.json();
-    const resList=resResp.ok?await resResp.json():[];
-    const resMap={};(resList||[]).forEach(r=>{resMap[r.pod]=r});
-    clearChildren(podsEl);
-    pods.forEach(p=>{const row=document.createElement('div');row.className='pod';
-      const n=document.createElement('div');
-      const rr=resMap[p.name]||{};
-      const resLine='CPU: '+esc(rr.cpu_request||'-')+'/'+esc(rr.cpu_limit||'-')+' | Mem: '+esc(rr.mem_request||'-')+'/'+esc(rr.mem_limit||'-');
-      n.innerHTML='<div>'+esc(p.name)+'</div><div class="tiny">'+esc(p.node)+'</div><div class="pod-res">'+resLine+'</div>';
-      const rs=document.createElement('div');rs.className='tiny';rs.textContent='r'+(p.restarts||0);
-      const st=document.createElement('div');const dot=document.createElement('span');dot.className='dot '+podDot(p.status);st.append(dot,document.createTextNode(' '+esc(p.status||'')));
-      row.append(n,rs,st);podsEl.appendChild(row)})
-  }catch(e){console.error(e)}
-}
-async function loadK8sEvents(){
-  try{const r=await fetch('/api/v1/k8s/events');if(!r.ok)throw new Error('k8s events failed');const events=await r.json();clearChildren(k8sEventsEl);if(!Array.isArray(events)||events.length===0){const row=document.createElement('div');row.className='k8sev';row.textContent='No events';k8sEventsEl.appendChild(row);return}events.forEach(ev=>{const row=document.createElement('div');row.className='k8sev';const dot=document.createElement('span');dot.className='dot '+((ev.type||'')==='Warning'?'warn':'ok');const t=(ev.time||'').slice(11,16);const msg=String(ev.message||'');const trunc=msg.length>80?msg.slice(0,80)+'...':msg;const txt=document.createElement('div');txt.innerHTML='<div>'+t+' '+esc(ev.reason||'')+' • '+esc(ev.object||'')+'</div><div class="tiny">'+esc(trunc)+'</div>';row.append(dot,txt);k8sEventsEl.appendChild(row)})}
-  catch(e){clearChildren(k8sEventsEl);const row=document.createElement('div');row.className='k8sev';row.textContent='No events';k8sEventsEl.appendChild(row)}
-}
-async function loadRepo(){
-  try{
-    const [repoResp,commitsResp]=await Promise.all([fetch('/api/v1/gitea/repo'),fetch('/api/v1/gitea/commits')]);
-    const repo=repoResp.ok?await repoResp.json():null;
-    const commits=commitsResp.ok?await commitsResp.json():[];
-    if(repo&&repo.name){repoHeadEl.textContent=repo.name+' • branch '+esc(repo.default_branch||'main')+' • issues '+(repo.open_issues||0)+' • size '+fmtBytes((repo.size||0)*1024)}else{repoHeadEl.textContent='Repository unavailable'}
-    clearChildren(repoCommitsEl);
-    if(!Array.isArray(commits)||commits.length===0){const row=document.createElement('div');row.className='repoitem';row.textContent='No commits';repoCommitsEl.appendChild(row);return}
-    commits.forEach(c=>{const row=document.createElement('div');row.className='repoitem';const sha=String(c.sha||'').slice(0,7);const msg=String(c.message||'');const trunc=msg.length>60?msg.slice(0,60)+'...':msg;const tm=String(c.date||'').slice(11,16);row.innerHTML='<div><span class="tiny">'+sha+'</span> '+esc(trunc)+'</div><div class="tiny">'+esc(c.author||'')+' • '+tm+'</div>';repoCommitsEl.appendChild(row)})
-  }catch(e){repoHeadEl.textContent='Repository unavailable';clearChildren(repoCommitsEl);const row=document.createElement('div');row.className='repoitem';row.textContent='No commits';repoCommitsEl.appendChild(row)}
-}
-async function loadFiles(){
-  if(!selectedAgent){clearChildren(filesEl);const row=document.createElement('div');row.className='file';row.textContent='No files';filesEl.appendChild(row);return}
-  try{const r=await fetch('/api/v1/agents/'+encodeURIComponent(selectedAgent)+'/files');if(!r.ok)throw new Error('files failed');const files=await r.json();clearChildren(filesEl);if(!Array.isArray(files)||files.length===0){const row=document.createElement('div');row.className='file';row.textContent='No files';filesEl.appendChild(row);return}files.forEach(f=>{const row=document.createElement('div');row.className='file';const n=document.createElement('div');n.textContent=esc(f.name);const s=document.createElement('div');s.className='tiny';s.textContent=fmtBytes(f.size);row.append(n,s);filesEl.appendChild(row)})}
-  catch(e){clearChildren(filesEl);const row=document.createElement('div');row.className='file';row.textContent='No files';filesEl.appendChild(row)}
-}
-async function loadEvents(){
-  try{const r=await fetch('/api/v1/events');if(!r.ok)throw new Error('events failed');const ev=await r.json();clearChildren(eventsEl);ev.forEach(e=>{const c=document.createElement('div');c.className='ev '+(e.type||'');const tm=(e.time||'').slice(11,16);c.textContent=tm+' • '+(e.agent||'-')+' • '+(e.type||'')+': '+(e.summary||'');eventsEl.appendChild(c)})
-  }catch(e){console.error(e)}
-}
-function prependEvent(e){const c=document.createElement('div');c.className='ev '+(e.type||'');const tm=(e.time||'').slice(11,16);c.textContent=tm+' • '+(e.agent||'-')+' • '+(e.type||'')+': '+(e.summary||'');eventsEl.prepend(c);while(eventsEl.children.length>200)eventsEl.removeChild(eventsEl.lastChild)}
-function connectEventsWS(){
-  const proto=location.protocol==='https:'?'wss://':'ws://';
-  try{ws=new WebSocket(proto+location.host+'/ws/events')}catch(_){return}
-  ws.onopen=()=>{wsConnected=true;if(eventPollTimer){clearInterval(eventPollTimer);eventPollTimer=null}}
-  ws.onmessage=(m)=>{try{prependEvent(JSON.parse(m.data))}catch(_){ }}
-  ws.onclose=()=>{wsConnected=false;ws=null;if(!eventPollTimer){eventPollTimer=setInterval(loadEvents,10000)}setTimeout(connectEventsWS,5000)}
-}
-function exportChat(){
-  if(!selectedAgent)return;
-  const blocks=[];const msgs=Array.from(messagesEl.querySelectorAll('.msg'));
-  msgs.forEach(m=>{const role=m.classList.contains('user')?'User':selectedAgent;const ts=(m.querySelector('.msg-timestamp')||{}).textContent||'';const txt=(m.querySelector('.msg-text')||{}).textContent||'';blocks.push('**'+role+'** ('+ts+')\\n'+txt+'\\n')});
-  const md='# Chat with '+selectedAgent+'\\n\\n**Exported:** '+new Date().toLocaleString()+'\\n\\n---\\n\\n'+blocks.join('\\n---\\n\\n');
-  const blob=new Blob([md],{type:'text/markdown'});const a=document.createElement('a');const url=URL.createObjectURL(blob);a.href=url;a.download=selectedAgent+'-'+new Date().toISOString().slice(0,10)+'.md';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
-}
-
-async function sendMessage(){
-  const text=inputEl.value.trim();if(!text||streaming||!selectedAgent)return;
-  const meta=selectedMeta();if(!meta||!meta.healthy){bubble('Selected agent is unavailable','assistant');saveAgentView(selectedAgent);return}
-  setStreaming(true);bubble(text,'user');currentAssistant=bubble('', 'assistant');inputEl.value='';
-  try{
-    const resp=await fetch('/api/v1/message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:selectedAgent,content:text,session_id:ensureSession(selectedAgent)})});
-    if(!resp.ok||!resp.body)throw new Error('request failed');
-    const reader=resp.body.getReader(),dec=new TextDecoder();let buf='';
-    while(true){const part=await reader.read();if(part.done)break;buf+=dec.decode(part.value,{stream:true});for(;;){const i=buf.indexOf('\n\n');if(i<0)break;const evt=parseSSE(buf.slice(0,i));buf=buf.slice(i+2);if(!evt)continue;
-      if(evt.type==='content'&&evt.content!==undefined){appendToBubble(currentAssistant,evt.content)}
-      else if(evt.type==='tool_call'){addToolCall(selectedAgent,evt.tool||'tool',evt.args)}
-      else if(evt.type==='tool_result'){setToolResult(selectedAgent,evt.tool||'tool',evt.result||{})}
-      else if(evt.type==='done'){setStreaming(false)}
-      scrollBottom();saveAgentView(selectedAgent);
-    }}
-  }catch(err){bubble('Error: '+(err&&err.message?err.message:String(err)),'assistant')}
-  finally{setStreaming(false);saveAgentView(selectedAgent);inputEl.focus()}
-}
-
-document.getElementById('refreshAgents').onclick=loadAgents;
-sendEl.onclick=sendMessage;
-exportBtn.onclick=exportChat;
-inputEl.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendMessage()}});
-loadAgents();loadNodes();loadPods();loadFiles();loadK8sEvents();loadRepo();loadEvents();connectEventsWS();
-setInterval(loadAgents,30000);setInterval(()=>{loadNodes();loadPods();loadFiles();loadK8sEvents();loadRepo()},30000);eventPollTimer=setInterval(loadEvents,10000);
-inputEl.focus();
-</script>
-</body>
-</html>`
+//go:embed index.html
+var dashboardHTML string
 
 type Agent struct {
 	Name           string   `json:"name"`
@@ -342,7 +126,13 @@ type gateway struct {
 	eventCap int
 	k8s      *k8sState
 	wsMu     sync.Mutex
-	wsConns  []net.Conn
+	wsConns  []*wsClient
+}
+
+type wsClient struct {
+	conn net.Conn
+	r    io.Reader
+	mu   sync.Mutex
 }
 
 type k8sState struct {
@@ -396,8 +186,8 @@ func (g *gateway) addEvent(eventType, agent, summary string) {
 	g.broadcastEvent(e)
 }
 
-func writeWSFrame(conn net.Conn, payload []byte) error {
-	header := []byte{0x81}
+func writeWSFrame(conn net.Conn, opcode byte, payload []byte) error {
+	header := []byte{0x80 | (opcode & 0x0f)}
 	n := len(payload)
 	switch {
 	case n < 126:
@@ -414,7 +204,13 @@ func writeWSFrame(conn net.Conn, payload []byte) error {
 	return err
 }
 
-func (g *gateway) removeWSConn(target net.Conn) {
+func (c *wsClient) writeFrame(opcode byte, payload []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return writeWSFrame(c.conn, opcode, payload)
+}
+
+func (g *gateway) removeWSConn(target *wsClient) {
 	g.wsMu.Lock()
 	defer g.wsMu.Unlock()
 	out := g.wsConns[:0]
@@ -432,19 +228,65 @@ func (g *gateway) broadcastEvent(e Event) {
 		return
 	}
 	g.wsMu.Lock()
-	conns := append([]net.Conn(nil), g.wsConns...)
+	conns := append([]*wsClient(nil), g.wsConns...)
 	g.wsMu.Unlock()
 	for _, c := range conns {
-		if err := writeWSFrame(c, payload); err != nil {
-			_ = c.Close()
+		if err := c.writeFrame(0x1, payload); err != nil {
+			_ = c.conn.Close()
 			g.removeWSConn(c)
 		}
 	}
 }
 
+func readWSFrame(r io.Reader) (opcode byte, payload []byte, err error) {
+	var hdr [2]byte
+	if _, err = io.ReadFull(r, hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	opcode = hdr[0] & 0x0f
+	masked := (hdr[1] & 0x80) != 0
+	payloadLen := int64(hdr[1] & 0x7f)
+	switch payloadLen {
+	case 126:
+		var ext [2]byte
+		if _, err = io.ReadFull(r, ext[:]); err != nil {
+			return 0, nil, err
+		}
+		payloadLen = int64(ext[0])<<8 | int64(ext[1])
+	case 127:
+		var ext [8]byte
+		if _, err = io.ReadFull(r, ext[:]); err != nil {
+			return 0, nil, err
+		}
+		payloadLen = int64(ext[0])<<56 | int64(ext[1])<<48 | int64(ext[2])<<40 | int64(ext[3])<<32 |
+			int64(ext[4])<<24 | int64(ext[5])<<16 | int64(ext[6])<<8 | int64(ext[7])
+	}
+	if payloadLen < 0 || payloadLen > 1<<20 {
+		return 0, nil, fmt.Errorf("websocket payload too large: %d", payloadLen)
+	}
+	var maskKey [4]byte
+	if masked {
+		if _, err = io.ReadFull(r, maskKey[:]); err != nil {
+			return 0, nil, err
+		}
+	}
+	payload = make([]byte, payloadLen)
+	if payloadLen > 0 {
+		if _, err = io.ReadFull(r, payload); err != nil {
+			return 0, nil, err
+		}
+	}
+	if masked {
+		for i := range payload {
+			payload[i] ^= maskKey[i%4]
+		}
+	}
+	return opcode, payload, nil
+}
+
 func wsAccept(key string) string {
 	h := sha1.New()
-	_, _ = h.Write([]byte(key + "258EAFA5-E914-47DA-95CA-5AB9DC65C4DA"))
+	_, _ = h.Write([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
@@ -949,6 +791,7 @@ func main() {
 			return
 		}
 		key := r.Header.Get("Sec-WebSocket-Key")
+		log.Printf("ws: key=%q accept=%q", key, wsAccept(key))
 		if key == "" {
 			http.Error(w, "missing websocket key", http.StatusBadRequest)
 			return
@@ -974,16 +817,60 @@ func main() {
 			_ = conn.Close()
 			return
 		}
+		log.Printf("ws: client connected from %s", conn.RemoteAddr())
+		client := &wsClient{conn: conn, r: rw.Reader}
 		gw.wsMu.Lock()
-		gw.wsConns = append(gw.wsConns, conn)
+		gw.wsConns = append(gw.wsConns, client)
 		gw.wsMu.Unlock()
-		go func(c net.Conn) {
-			defer func() {
-				_ = c.Close()
-				gw.removeWSConn(c)
-			}()
-			_, _ = io.Copy(io.Discard, c)
-		}(conn)
+		defer func() {
+			log.Printf("ws: client disconnected: %s", client.conn.RemoteAddr())
+			_ = client.conn.Close()
+			gw.removeWSConn(client)
+		}()
+		const (
+			pingInterval = 30 * time.Second
+			pongWait     = 60 * time.Second
+		)
+		_ = client.conn.SetReadDeadline(time.Now().Add(pongWait))
+		log.Printf("ws: entering read loop")
+		stopPing := make(chan struct{})
+		go func() {
+			t := time.NewTicker(pingInterval)
+			defer t.Stop()
+			for {
+				select {
+				case <-t.C:
+					if err := client.writeFrame(0x9, nil); err != nil {
+						log.Printf("ws: ping write error: %v", err)
+						_ = client.conn.Close()
+						return
+					}
+				case <-stopPing:
+					return
+				}
+			}
+		}()
+		defer close(stopPing)
+		for {
+			opcode, payload, err := readWSFrame(client.r)
+			if err != nil {
+				log.Printf("ws: read error: %v", err)
+				return
+			}
+			switch opcode {
+			case 0x8: // close
+				log.Printf("ws: client sent close frame")
+				return
+			case 0x9: // ping
+				if err := client.writeFrame(0xA, payload); err != nil {
+					return
+				}
+			case 0xA: // pong
+				_ = client.conn.SetReadDeadline(time.Now().Add(pongWait))
+			default:
+				// Ignore non-control frames from client.
+			}
+		}
 	})
 	mux.HandleFunc("/api/v1/agents", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

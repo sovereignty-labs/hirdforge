@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hirdforge — Valhalla Command</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(ellipse at 20% 0%, rgba(99,102,241,0.04) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 100%, rgba(192,132,252,0.03) 0%, transparent 50%),
+                linear-gradient(180deg, #0a0a14 0%, #060610 50%, #04040c 100%);
+    color: #e2e8f0;
+    font-family: 'IBM Plex Mono', 'SF Mono', monospace;
+    font-size: 12px;
+  }
+  ::selection { background: rgba(99,102,241,0.3); color: #e2e8f0; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 2px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
+  input::placeholder { color: rgba(255,255,255,0.12); }
+  button { font-family: inherit; }
+  button:hover { filter: brightness(1.2); }
+
+  @keyframes glow-pulse { 0%,100%{opacity:0.15;transform:scale(1)} 50%{opacity:0.3;transform:scale(1.3)} }
+  @keyframes avatar-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+  @keyframes typing-bounce { 0%,60%,100%{transform:translateY(0);opacity:0.3} 30%{transform:translateY(-4px);opacity:0.8} }
+  @keyframes spin { to{transform:rotate(360deg)} }
+  @keyframes rec-pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  @keyframes msg-slide-in { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes event-fade-in { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:translateX(0)} }
+
+  /* Grain overlay */
+  .grain { position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:0.025;mix-blend-mode:overlay; }
+  .scanlines { position:fixed;inset:0;pointer-events:none;z-index:9998;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.025) 2px,rgba(0,0,0,0.025) 4px); }
+</style>
+</head>
+<body>
+<!-- Atmosphere layers -->
+<div class="grain"><svg width="100%" height="100%"><filter id="g"><feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="4" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(#g)"/></svg></div>
+<div class="scanlines"></div>
+
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ═══════════════════════════════════════════════════════════
+//  CONFIG — Change these to match your gateway
+// ═══════════════════════════════════════════════════════════
+const CONFIG = {
+  // Gateway API base URL (empty = same origin)
+  API_BASE: '',
+  // WebSocket URL for events (empty = auto-detect from window.location)
+  WS_URL: '',
+  // Polling interval for agent/cluster data (ms)
+  POLL_INTERVAL: 5000,
+  // Set to true to use mock data instead of live API
+  USE_MOCK: false,
+};
+
+// ═══════════════════════════════════════════════════════════
+//  COLORS & CONSTANTS
+// ═══════════════════════════════════════════════════════════
+const AGENT_COLORS = {
+  ragnar:"#818cf8", chuck:"#f472b6", knut:"#34d399", ivar:"#fbbf24",
+  orm:"#22d3ee", val:"#c084fc", system:"#6b7280", kit:"#10b981",
+};
+
+const statusColor = s => s==="online"?"#34d399":s==="degraded"?"#fbbf24":"#ef4444";
+
+// ═══════════════════════════════════════════════════════════
+//  MOCK DATA (used when CONFIG.USE_MOCK = true or API fails)
+// ═══════════════════════════════════════════════════════════
+const MOCK_AGENTS = [
+  {id:"ragnar",name:"Ragnar Codebrok",role:"Architect / PM",model:"M2.5-hs",backend:"MiniMax Cloud",status:"online",tools:["read","write","gitea","http","delegate","broadcast"],uptime_seconds:15120,tasks_completed:23,last_action:"Delegated SOUL v3 to Knut",ping_ms:42,cpu_percent:12,memory_percent:48,initial:"R"},
+  {id:"chuck",name:"Chuck Norse",role:"Primary Builder",model:"qwen3:30b",backend:"workstation RTX 3090",status:"online",tools:["exec","read","write","git-clone","git-commit","git-diff","gitea","http"],uptime_seconds:23460,tasks_completed:47,last_action:"Built inference router",ping_ms:8,cpu_percent:34,memory_percent:71,initial:"C"},
+  {id:"knut",name:"Knut the Swift",role:"Secondary Builder",model:"M2.5-hs",backend:"MiniMax Cloud",status:"online",tools:["exec","read","write","git-clone","git-commit","git-diff","gitea","http"],uptime_seconds:15120,tasks_completed:31,last_action:"Executed SOUL v3 sed edits",ping_ms:38,cpu_percent:8,memory_percent:32,initial:"K"},
+  {id:"ivar",name:"Ivar the Branchless",role:"Code Reviewer",model:"qwen3:14b",backend:"inference-host gpu0",status:"degraded",tools:["exec","read","write","git-clone","git-commit","git-diff","gitea","http"],uptime_seconds:0,tasks_completed:12,last_action:"Reviewed PR #4",ping_ms:null,cpu_percent:5,memory_percent:24,initial:"I"},
+  {id:"orm",name:"Orm the Scribe",role:"Documentation",model:"qwen2.5:7b",backend:"inference-host gpu1",status:"degraded",tools:["read","write","git-clone","git-commit","git-diff","gitea","http"],uptime_seconds:0,tasks_completed:8,last_action:"Updated architecture docs",ping_ms:null,cpu_percent:3,memory_percent:18,initial:"O"},
+  {id:"val",name:"Val Kyrie",role:"Operations",model:"M2.5-hs",backend:"MiniMax Cloud",status:"online",tools:["exec","read","write","git-clone","git-commit","git-diff","gitea","http"],uptime_seconds:15120,tasks_completed:15,last_action:"Warband check — 4/6 responding",ping_ms:41,cpu_percent:6,memory_percent:28,initial:"V"},
+];
+
+const MOCK_EVENTS = [
+  {timestamp:"2026-02-21T06:31:04Z",source:"ragnar",type:"delegate",message:"→ KNT: SOUL v3 surgical sed inserts (5 agents)"},
+  {timestamp:"2026-02-21T06:28:11Z",source:"knut",type:"git",message:"Pushed branch ragnar/soul-updates-v3 (5 files changed)"},
+  {timestamp:"2026-02-21T06:27:44Z",source:"knut",type:"exec",message:"sed -i completed: Val SOUL updated (2 insertions)"},
+  {timestamp:"2026-02-21T06:26:58Z",source:"knut",type:"exec",message:"sed -i completed: Orm SOUL updated (2 insertions)"},
+  {timestamp:"2026-02-21T06:25:30Z",source:"knut",type:"exec",message:"sed -i completed: Ivar SOUL updated (2 insertions)"},
+  {timestamp:"2026-02-21T06:24:12Z",source:"knut",type:"exec",message:"sed -i completed: Knut SOUL updated (2 insertions)"},
+  {timestamp:"2026-02-21T06:23:00Z",source:"knut",type:"exec",message:"sed -i completed: Chuck SOUL updated (2 insertions)"},
+  {timestamp:"2026-02-21T06:15:00Z",source:"val",type:"alert",message:"inference-host timeout — Ivar & Orm degraded, cloud agents unaffected"},
+  {timestamp:"2026-02-21T06:10:33Z",source:"system",type:"sync",message:"ArgoCD sync: asgard-infra → Synced Healthy"},
+  {timestamp:"2026-02-21T05:45:00Z",source:"system",type:"infra",message:"inference-host rebooted — maintenance mode, Ollama recovering"},
+];
+
+const MOCK_NODES = [
+  {name:"node-cp-1",ip:"203.0.113.26",role:"Control+Worker",status:"Ready",pods:8,cpu_percent:42,memory_percent:61},
+  {name:"node-worker-1",ip:"203.0.113.27",role:"Worker",status:"Ready",pods:1,cpu_percent:18,memory_percent:34},
+  {name:"node-worker-2",ip:"203.0.113.28",role:"Worker",status:"Ready",pods:0,cpu_percent:5,memory_percent:12},
+];
+
+const MOCK_GPUS = [
+  {name:"workstation",gpu:"RTX 3090 24GB",model:"chuck-norse:latest",status:"online",vram_percent:78,temp_celsius:67},
+  {name:"inference-host:0",gpu:"RTX 5060Ti 16GB",model:"ivar-branchless:latest",status:"degraded",vram_percent:62,temp_celsius:54},
+  {name:"inference-host:1",gpu:"RTX 3060 12GB",model:"qwen2.5-coder:7b",status:"degraded",vram_percent:45,temp_celsius:48},
+  {name:"agent-host",gpu:"—",model:"UEFI NVRAM empty",status:"offline",vram_percent:0,temp_celsius:0},
+];
+
+// ═══════════════════════════════════════════════════════════
+//  API LAYER — fetch with mock fallback
+// ═══════════════════════════════════════════════════════════
+async function apiFetch(path, fallback) {
+  if (CONFIG.USE_MOCK) return fallback;
+  try {
+    const res = await fetch(CONFIG.API_BASE + path);
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    // Normalize K8s node list
+    if (path.includes('cluster/nodes') && data.items) {
+      return data.items.map(n => ({
+        name: n.metadata?.name || "unknown",
+        ip: (n.status?.addresses?.find(a => a.type === "InternalIP") || {}).address || "—",
+        role: Object.keys(n.metadata?.labels || {}).filter(l => l.startsWith("node-role")).map(l => l.split("/")[1]).join("+") || "worker",
+        status: n.status?.conditions?.find(c => c.type === "Ready")?.status === "True" ? "Ready" : "NotReady",
+        pods: 0, cpu_percent: 0, memory_percent: 0,
+      }));
+    }
+    return data;
+  } catch (e) {
+    console.warn(`API ${path} failed, using fallback:`, e.message);
+    return fallback;
+  }
+}
+
+function usePolledData(path, fallback, interval) {
+  const [data, setData] = useState(fallback);
+  useEffect(() => {
+    let mounted = true;
+    const poll = async () => {
+      const d = await apiFetch(path, fallback);
+      if (mounted) {
+        // Normalize agent data from gateway format
+        if (path === '/api/v1/agents' && Array.isArray(d)) {
+          const normalized = d.map(a => ({
+            id: a.name || a.id,
+            name: a.display_name || a.name || a.id,
+            role: a.role || "Agent",
+            model: a.model || "unknown",
+            backend: a.backend || "unknown",
+            status: a.healthy === false ? "offline" : (a.healthy ? "online" : (a.status || "offline")),
+            tools: a.tools || [],
+            uptime_seconds: a.uptime_seconds || 0,
+            tasks_completed: a.tasks_completed || 0,
+            last_action: a.last_action || "—",
+            ping_ms: a.ping_ms || a.latency_ms || null,
+            cpu_percent: a.cpu_percent || 0,
+            memory_percent: a.memory_percent || 0,
+            initial: (a.display_name || a.name || a.id || "?")[0].toUpperCase(),
+          }));
+          setData(normalized.length > 0 ? normalized : fallback);
+        } else {
+          setData(d);
+        }
+      }
+    };
+    poll();
+    const id = setInterval(poll, interval || CONFIG.POLL_INTERVAL);
+    return () => { mounted = false; clearInterval(id); };
+  }, [path]);
+  return data;
+}
+
+function useEventStream() {
+  const [events, setEvents] = useState(MOCK_EVENTS);
+  const [connected, setConnected] = useState(CONFIG.USE_MOCK);
+
+  useEffect(() => {
+    if (CONFIG.USE_MOCK) return;
+    const wsUrl = CONFIG.WS_URL || `${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;
+    let ws;
+    let retryDelay = 3000;
+    const connect = () => {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => { setConnected(true); retryDelay = 3000; };
+      ws.onclose = () => { setConnected(false); retryDelay = Math.min(retryDelay * 2, 30000); setTimeout(connect, retryDelay); };
+      ws.onmessage = (e) => {
+        try {
+          const evt = JSON.parse(e.data);
+          setEvents(prev => [evt, ...prev].slice(0, 100));
+        } catch {}
+      };
+    };
+    connect();
+    return () => ws?.close();
+  }, []);
+
+  return { events, connected };
+}
+
+// ═══════════════════════════════════════════════════════════
+//  CHAT API
+// ═══════════════════════════════════════════════════════════
+async function streamChat(agentId, message, onChunk, onDone, onError) {
+  if (CONFIG.USE_MOCK) {
+    onChunk(`[MOCK] ${agentId} received: "${message}".`);
+    onDone();
+    return;
+  }
+  try {
+    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent: agentId, content: message, session_id: "hirdforge-" + Date.now() }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({error: res.statusText}));
+      onError(`Error: ${err.error || res.statusText}`);
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const chunk = JSON.parse(line.slice(6));
+          if (chunk.type === 'content' && chunk.content) onChunk(chunk.content);
+          if (chunk.done) { onDone(); return; }
+        } catch {}
+      }
+    }
+    onDone();
+  } catch (e) {
+    onError(`Failed to reach ${agentId}: ${e.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  PRIMITIVES — identical to v4 prototype
+// ═══════════════════════════════════════════════════════════
+const GlowPip = ({status, size=7}) => {
+  const c = statusColor(status);
+  return React.createElement('span', {style:{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",width:size,height:size,flexShrink:0}},
+    status==="online" && React.createElement('span', {style:{position:"absolute",width:size*2.5,height:size*2.5,borderRadius:"50%",background:c,opacity:0.15,animation:"glow-pulse 2s ease-in-out infinite"}}),
+    React.createElement('span', {style:{position:"relative",width:size,height:size,borderRadius:"50%",background:c,boxShadow:`0 0 ${size}px ${c}60`}})
+  );
+};
+
+const Glass = ({children, style={}, glow}) => (
+  <div style={{background:"linear-gradient(135deg,rgba(255,255,255,0.025) 0%,rgba(255,255,255,0.005) 100%)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",border:"1px solid rgba(255,255,255,0.04)",position:"relative",overflow:"hidden",...style}}>
+    {glow && <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${glow}35,transparent)`}} />}
+    {children}
+  </div>
+);
+
+const Sparkline = ({data, color="#818cf8", w=64, h=20}) => {
+  const max=Math.max(...data), min=Math.min(...data), r=max-min||1;
+  const pts = data.map((v,i)=>`${(i/(data.length-1))*w},${h-((v-min)/r)*h}`).join(" ");
+  return <svg width={w} height={h} style={{display:"block"}}><polyline points={`${pts} ${w},${h} 0,${h}`} fill={`${color}08`} stroke="none"/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.2" opacity="0.6"/></svg>;
+};
+
+const Bar = ({value, max=100, color="#818cf8", h=3}) => (
+  <div style={{height:h,background:"rgba(255,255,255,0.04)",position:"relative",overflow:"hidden"}}>
+    <div style={{position:"absolute",left:0,top:0,height:"100%",width:`${(value/max)*100}%`,background:`linear-gradient(90deg,${color}60,${color})`,boxShadow:`0 0 8px ${color}20`,transition:"width 1s cubic-bezier(0.16,1,0.3,1)"}} />
+  </div>
+);
+
+const Badge = ({text, color="rgba(255,255,255,0.4)"}) => (
+  <span style={{display:"inline-block",padding:"2px 6px",fontSize:8,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color,background:`${color}12`,border:`1px solid ${color}20`}}>{text}</span>
+);
+
+const MetricCard = ({label,value,sub,color="#e2e8f0",spark}) => (
+  <Glass glow={color!=="#e2e8f0"?color:null} style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:4}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+      <span style={{fontSize:9,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.25)"}}>{label}</span>
+      {spark && <Sparkline data={spark} color={color} w={48} h={16}/>}
+    </div>
+    <div style={{fontSize:24,fontWeight:800,color,fontFamily:"'Space Grotesk',sans-serif",lineHeight:1,letterSpacing:"-0.02em"}}>{value}</div>
+    {sub && <span style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{sub}</span>}
+  </Glass>
+);
+
+const makeSparkline = (n=16, base=30, v=25) => Array.from({length:n}, () => base + Math.random()*v);
+const fmtUptime = s => s<=0?"—":`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+const fmtTime = ts => { try { const d = new Date(ts); return d.toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } };
+
+// ═══════════════════════════════════════════════════════════
+//  AGENT AVATAR — the spinning rings you love
+// ═══════════════════════════════════════════════════════════
+const AgentAvatar = ({agent, size=32, showStatus=true}) => {
+  const c = AGENT_COLORS[agent.id] || "#818cf8";
+  const sc = statusColor(agent.status);
+  const initial = agent.initial || agent.name?.[0] || "?";
+  return (
+    <div style={{position:"relative",width:size,height:size,flexShrink:0}}>
+      <div style={{
+        position:"absolute",inset:-2,borderRadius:"50%",
+        background:`conic-gradient(from 0deg, ${c}00, ${c}40, ${c}00, ${c}30, ${c}00)`,
+        animation: agent.status==="online" ? "avatar-spin 8s linear infinite" : "none",
+        opacity: agent.status==="online" ? 1 : 0.3,
+      }} />
+      <div style={{
+        position:"absolute",inset:0,borderRadius:"50%",
+        background:`linear-gradient(135deg, ${c}25, ${c}08)`,
+        border:`1px solid ${c}30`,
+        display:"flex",alignItems:"center",justifyContent:"center",
+      }}>
+        <span style={{fontSize:size*0.4,fontWeight:800,color:c,fontFamily:"'Space Grotesk',sans-serif",textShadow:`0 0 12px ${c}40`,lineHeight:1}}>{initial}</span>
+      </div>
+      {showStatus && <div style={{position:"absolute",bottom:-1,right:-1,width:size*0.32,height:size*0.32,borderRadius:"50%",background:sc,border:"2px solid #0a0a14",boxShadow:`0 0 6px ${sc}60`}} />}
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+//  COMMS VIEW — the jaw-dropper
+// ═══════════════════════════════════════════════════════════
+const TypingIndicator = ({color="#818cf8"}) => (
+  <div style={{display:"flex",gap:3,alignItems:"center",padding:"6px 0"}}>
+    {[0,1,2].map(i => <div key={i} style={{width:5,height:5,borderRadius:"50%",background:color,opacity:0.4,animation:`typing-bounce 1.2s ease-in-out ${i*0.15}s infinite`}} />)}
+  </div>
+);
+
+const ToolCallChip = ({call}) => (
+  <div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:6,background:"rgba(34,211,238,0.06)",border:"1px solid rgba(34,211,238,0.12)",fontSize:10,fontFamily:"'IBM Plex Mono',monospace"}}>
+    <span style={{color:"#22d3ee",fontWeight:700,fontSize:8,letterSpacing:"0.1em"}}>TOOL</span>
+    <span style={{color:"rgba(255,255,255,0.4)"}}>{call.tool}</span>
+    <span style={{color:"rgba(255,255,255,0.15)"}}>→</span>
+    <span style={{color:"rgba(255,255,255,0.3)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{call.result}</span>
+  </div>
+);
+
+const DelegationChip = ({del}) => {
+  const colors = {completed:"#34d399",in_progress:"#818cf8",failed:"#ef4444"};
+  const c = colors[del.status] || "#6b7280";
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",marginTop:8,background:`linear-gradient(135deg, ${c}08, ${c}04)`,border:`1px solid ${c}18`,position:"relative",overflow:"hidden"}}>
+      <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:c}} />
+      <div style={{display:"flex",flexDirection:"column",gap:2,flex:1,paddingLeft:4}}>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{fontSize:8,fontWeight:800,letterSpacing:"0.12em",color:c,textTransform:"uppercase"}}>
+            {del.status==="in_progress"?"⟳ DELEGATING":del.status==="completed"?"✓ DELEGATED":"✗ FAILED"}
+          </span>
+          <span style={{fontSize:9,color:"rgba(255,255,255,0.25)"}}>→ {del.to}</span>
+        </div>
+        <span style={{fontSize:10,color:"rgba(255,255,255,0.4)"}}>{del.task}</span>
+      </div>
+      {del.status==="in_progress" && <div style={{width:14,height:14,border:`2px solid ${c}40`,borderTopColor:c,borderRadius:"50%",animation:"spin 1s linear infinite"}} />}
+    </div>
+  );
+};
+
+const ChatBubble = ({msg, isLast}) => {
+  const isSelf = msg.from === "kit";
+  const c = AGENT_COLORS[msg.from] || "#818cf8";
+  return (
+    <div style={{display:"flex",gap:12,maxWidth:"80%",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:isLast?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1)":"none"}}>
+      <AgentAvatar agent={msg.agent} size={28} />
+      <div style={{display:"flex",flexDirection:"column",gap:3,maxWidth:"calc(100% - 44px)"}}>
+        <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:isSelf?"flex-end":"flex-start"}}>
+          <span style={{fontSize:10,fontWeight:700,color:c}}>{msg.agent.name}</span>
+          <span style={{fontSize:9,color:"rgba(255,255,255,0.12)"}}>{msg.time}</span>
+        </div>
+        <div style={{padding:"12px 14px",background:isSelf?"linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.03))":"linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01))",border:`1px solid ${isSelf?"rgba(16,185,129,0.12)":"rgba(255,255,255,0.04)"}`,position:"relative"}}>
+          <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${c}15,transparent)`}} />
+          <span style={{fontSize:12,color:"rgba(255,255,255,0.7)",lineHeight:1.65,display:"block"}}>{msg.text}</span>
+          {msg.toolCalls && msg.toolCalls.map((tc,i) => <ToolCallChip key={i} call={tc} />)}
+          {msg.delegation && <DelegationChip del={msg.delegation} />}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const EventEntry = ({event, idx}) => {
+  const typeColors = {delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24",sync:"#34d399",pulse:"#c084fc",infra:"#6b7280"};
+  const accent = typeColors[event.type] || "#6b7280";
+  const src = (event.source||"SYS").slice(0,3).toUpperCase();
+  return (
+    <div style={{display:"flex",gap:8,padding:"7px 14px",borderBottom:"1px solid rgba(255,255,255,0.02)",animation:`event-fade-in 0.3s ease ${Math.min(idx,10)*0.03}s both`,position:"relative"}}>
+      <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:`${accent}20`}} />
+      <span style={{fontSize:9,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace",minWidth:52,flexShrink:0,paddingTop:1}}>{fmtTime(event.timestamp)}</span>
+      <div style={{width:4,height:4,borderRadius:"50%",background:accent,marginTop:5,flexShrink:0,boxShadow:`0 0 6px ${accent}40`}} />
+      <div style={{flex:1,minWidth:0}}>
+        <span style={{fontSize:8,fontWeight:800,color:accent,letterSpacing:"0.08em",marginRight:6}}>{src}</span>
+        <span style={{fontSize:10,color:"rgba(255,255,255,0.4)",lineHeight:1.5}}>{event.message}</span>
+      </div>
+    </div>
+  );
+};
+
+const CommsView = ({agents, events, wsConnected}) => {
+  const [msg, setMsg] = useState("");
+  const [target, setTarget] = useState("ragnar");
+  const [chatHistory, setChatHistory] = useState([]);
+  const [sending, setSending] = useState(false);
+  const chatEnd = useRef(null);
+  const ta = agents.find(a => a.id === target) || MOCK_AGENTS[0];
+  const tc = AGENT_COLORS[target] || "#818cf8";
+
+  useEffect(() => { chatEnd.current?.scrollIntoView({behavior:'smooth'}); }, [chatHistory]);
+
+  const handleSend = async () => {
+    if (!msg.trim() || sending) return;
+    const userMsg = {from:"kit",agent:{id:"kit",name:"Kit (Sovereign)",initial:"K",status:"online"},text:msg,time:new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'})};
+    const sentMsg = msg;
+    setChatHistory(prev => [...prev, userMsg]);
+    setMsg("");
+    setSending(true);
+    const timeStr = new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
+    setChatHistory(prev => [...prev, {from:target,agent:ta,text:"",time:timeStr,streaming:true}]);
+    await streamChat(target, sentMsg,
+      (chunk) => {
+        setChatHistory(prev => {
+          const u = [...prev]; const last = {...u[u.length-1]};
+          last.text = (last.text||"") + chunk;
+          u[u.length-1] = last; return u;
+        });
+      },
+      () => {
+        setChatHistory(prev => {
+          const u = [...prev]; const last = {...u[u.length-1]};
+          last.streaming = false;
+          if (!last.text) last.text = "(empty response)";
+          u[u.length-1] = last; return u;
+        });
+        setSending(false);
+      },
+      (err) => {
+        setChatHistory(prev => {
+          const u = [...prev]; const last = {...u[u.length-1]};
+          last.text = err; last.streaming = false;
+          u[u.length-1] = last; return u;
+        });
+        setSending(false);
+      }
+    );
+  };
+
+  return (
+    <div style={{display:"grid",gridTemplateColumns:"1fr 340px",height:"100%"}}>
+      {/* CHAT PANE */}
+      <div style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)"}}>
+        {/* Agent selector */}
+        <div style={{display:"flex",alignItems:"center",gap:0,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.15)"}}>
+          {agents.map(a => {
+            const ac = AGENT_COLORS[a.id]; const sel = target===a.id;
+            return (
+              <button key={a.id} onClick={()=>setTarget(a.id)} style={{display:"flex",alignItems:"center",gap:6,padding:"10px 14px",background:sel?`${ac}08`:"transparent",border:"none",borderBottom:sel?`2px solid ${ac}`:"2px solid transparent",cursor:"pointer",transition:"all 0.15s"}}>
+                <AgentAvatar agent={a} size={20} showStatus={false} />
+                <span style={{fontSize:10,fontWeight:sel?700:400,color:sel?ac:"rgba(255,255,255,0.25)",fontFamily:"'IBM Plex Mono',monospace"}}>{a.id.slice(0,3).toUpperCase()}</span>
+              </button>
+            );
+          })}
+          <div style={{marginLeft:"auto",padding:"0 14px"}}>
+            <button style={{padding:"5px 12px",fontSize:8,fontWeight:700,letterSpacing:"0.12em",background:"linear-gradient(135deg,rgba(251,191,36,0.12),rgba(251,191,36,0.04))",border:"1px solid rgba(251,191,36,0.2)",color:"#fbbf24",cursor:"pointer",textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ Broadcast</button>
+          </div>
+        </div>
+
+        {/* Context strip */}
+        <div style={{display:"flex",alignItems:"center",gap:12,padding:"8px 18px",background:`linear-gradient(90deg, ${tc}06, transparent)`,borderBottom:"1px solid rgba(255,255,255,0.03)"}}>
+          <AgentAvatar agent={ta} size={24} />
+          <div style={{flex:1}}><span style={{fontSize:11,fontWeight:700,color:tc}}>{ta.name}</span><span style={{fontSize:9,color:"rgba(255,255,255,0.2)",marginLeft:8}}>{ta.role}</span></div>
+          <Badge text={ta.model} color={tc} />
+          <span style={{fontSize:9,color:"rgba(255,255,255,0.2)",fontFamily:"'IBM Plex Mono',monospace"}}>{ta.ping_ms?`${ta.ping_ms}ms`:"offline"}</span>
+        </div>
+
+        {/* Messages */}
+        <div style={{flex:1,overflow:"auto",padding:"20px",display:"flex",flexDirection:"column",gap:20}}>
+          {chatHistory.map((m,i) => <ChatBubble key={i} msg={m} isLast={i===chatHistory.length-1} />)}
+          {sending && chatHistory.length > 0 && chatHistory[chatHistory.length-1].text === "" && (
+            <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}>
+              <AgentAvatar agent={ta} size={20} showStatus={false} />
+              <Glass style={{padding:"8px 14px",display:"flex",alignItems:"center",gap:6}}>
+                <span style={{fontSize:9,color:tc,fontWeight:600}}>{ta.name.split(' ')[0]}</span>
+                <TypingIndicator color={tc} />
+              </Glass>
+            </div>
+          )}
+          <div ref={chatEnd} />
+        </div>
+
+        {/* Input */}
+        <div style={{padding:"14px 18px",borderTop:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(180deg, rgba(0,0,0,0.1), rgba(0,0,0,0.2))",display:"flex",gap:6}}>
+          <input value={msg} onChange={e=>setMsg(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handleSend()} placeholder={`Command ${ta.name}...`}
+            style={{flex:1,background:"rgba(255,255,255,0.02)",border:`1px solid ${tc}15`,padding:"14px 18px",color:"#e2e8f0",fontSize:12,fontFamily:"'IBM Plex Mono',monospace",outline:"none"}} />
+          <button onClick={handleSend} style={{padding:"14px 28px",background:`linear-gradient(135deg, ${tc}30, ${tc}15)`,border:`1px solid ${tc}40`,color:tc,fontSize:10,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,cursor:"pointer",letterSpacing:"0.14em",textTransform:"uppercase",boxShadow:`0 0 24px ${tc}15`}}>SEND</button>
+        </div>
+      </div>
+
+      {/* EVENT STREAM */}
+      <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.2)"}}>
+        <div style={{padding:"10px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:6,height:6,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}} />
+            <span style={{fontSize:9,fontWeight:700,color:"rgba(255,255,255,0.3)",letterSpacing:"0.16em",textTransform:"uppercase"}}>{wsConnected?"Live Feed":"Disconnected"}</span>
+          </div>
+          <span style={{fontSize:9,color:"rgba(255,255,255,0.12)",fontFamily:"'IBM Plex Mono',monospace"}}>{events.length} events</span>
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:1,padding:"1px",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
+          {[{l:"DELEGATES",val:events.filter(e=>e.type==="delegate").length,c:"#818cf8"},{l:"GIT OPS",val:events.filter(e=>e.type==="git").length,c:"#34d399"},{l:"ALERTS",val:events.filter(e=>e.type==="alert").length,c:"#fbbf24"}].map(s=>(
+            <div key={s.l} style={{padding:"8px 10px",background:"rgba(0,0,0,0.15)",textAlign:"center"}}>
+              <div style={{fontSize:16,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.val}</div>
+              <div style={{fontSize:7,color:"rgba(255,255,255,0.2)",letterSpacing:"0.14em",marginTop:2}}>{s.l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{flex:1,overflow:"auto"}}>{events.map((e,i)=><EventEntry key={i} event={e} idx={i} />)}</div>
+        <div style={{padding:"6px 14px",borderTop:"1px solid rgba(255,255,255,0.03)",display:"flex",justifyContent:"space-between",fontSize:8,color:"rgba(255,255,255,0.12)"}}>
+          <span>WebSocket: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span>
+          <span>Gateway</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ═══════════════════════════════════════════════════════════
+//  FLEET VIEW
+// ═══════════════════════════════════════════════════════════
+const AgentRow = ({agent, selected, onClick}) => {
+  const c = AGENT_COLORS[agent.id];
+  const sparkData = useMemo(() => makeSparkline(16, agent.cpu_percent||10, 15), [agent.id]);
+  return (
+    <div onClick={onClick} style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",alignItems:"center",gap:8,padding:"10px 14px",background:selected?`${c}06`:"transparent",borderLeft:selected?`2px solid ${c}`:"2px solid transparent",borderBottom:"1px solid rgba(255,255,255,0.02)",cursor:"pointer",transition:"all 0.15s"}}>
+      <AgentAvatar agent={agent} size={28} />
+      <div>
+        <div style={{fontSize:11,fontWeight:600,color:"#e2e8f0",lineHeight:1.1}}>{agent.name}</div>
+        <div style={{fontSize:9,color:"rgba(255,255,255,0.25)",marginTop:2,display:"flex",gap:6}}>
+          <span>{agent.role}</span><span style={{color:c}}>{agent.model}</span>
+        </div>
+      </div>
+      <Sparkline data={sparkData} color={c} w={72} h={20} />
+      <div>
+        <Bar value={agent.cpu_percent||0} color={agent.cpu_percent>60?"#fbbf24":"#34d399"} />
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:2,fontSize:8,color:"rgba(255,255,255,0.25)"}}>
+          <span>CPU {agent.cpu_percent||0}%</span><span>MEM {agent.memory_percent||0}%</span>
+        </div>
+      </div>
+      <div style={{textAlign:"right"}}>
+        <div style={{fontSize:14,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.tasks_completed||0}</div>
+        <div style={{fontSize:7,color:"rgba(255,255,255,0.2)",letterSpacing:"0.08em"}}>tasks</div>
+      </div>
+    </div>
+  );
+};
+
+const AgentDetail = ({agent}) => {
+  const c = AGENT_COLORS[agent.id];
+  return (
+    <div style={{padding:"18px 20px",display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <AgentAvatar agent={agent} size={40} />
+        <div style={{flex:1}}>
+          <div style={{fontSize:16,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.name}</div>
+          <div style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{agent.role}</div>
+        </div>
+        <Badge text={agent.status} color={statusColor(agent.status)} />
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6}}>
+        {[{l:"CPU",v:`${agent.cpu_percent||0}%`,c:agent.cpu_percent>60?"#fbbf24":"#34d399"},{l:"Memory",v:`${agent.memory_percent||0}%`,c:"#818cf8"},{l:"Latency",v:agent.ping_ms?`${agent.ping_ms}ms`:"—",c:"#22d3ee"},{l:"Uptime",v:fmtUptime(agent.uptime_seconds||0),c:"#e2e8f0"}].map(m=>(
+          <Glass key={m.l} style={{padding:"10px 12px"}}>
+            <div style={{fontSize:8,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.12em"}}>{m.l}</div>
+            <div style={{fontSize:18,fontWeight:800,color:m.c,fontFamily:"'Space Grotesk',sans-serif",marginTop:2}}>{m.v}</div>
+          </Glass>
+        ))}
+      </div>
+      <div>
+        <div style={{fontSize:8,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Pipeline</div>
+        <Glass style={{padding:"10px 12px",display:"flex",alignItems:"center",gap:8}}>
+          <span style={{fontSize:11,fontWeight:600,color:c}}>{agent.model}</span>
+          <span style={{color:`${c}30`,fontSize:14}}>→</span>
+          <span style={{fontSize:11,color:"rgba(255,255,255,0.4)"}}>{agent.backend}</span>
+        </Glass>
+      </div>
+      <div>
+        <div style={{fontSize:8,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Tools ({(agent.tools||[]).length})</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(agent.tools||[]).map(t=><Badge key={t} text={t} color="rgba(255,255,255,0.35)" />)}</div>
+      </div>
+      <div>
+        <div style={{fontSize:8,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Last Action</div>
+        <Glass style={{padding:"10px 12px"}}><span style={{fontSize:11,color:"rgba(255,255,255,0.45)",lineHeight:1.5}}>{agent.last_action||"—"}</span></Glass>
+      </div>
+    </div>
+  );
+};
+
+const FleetView = ({agents, selected, setSelected}) => (
+  <div style={{display:"grid",gridTemplateColumns:"1fr 300px",height:"100%"}}>
+    <div style={{borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto"}}>
+      <div style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",gap:8,padding:"8px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:8,color:"rgba(255,255,255,0.15)",textTransform:"uppercase",letterSpacing:"0.16em"}}>
+        <span></span><span>Agent</span><span>Activity</span><span>Load</span><span style={{textAlign:"right"}}>Tasks</span>
+      </div>
+      {agents.map((a,i)=><AgentRow key={a.id} agent={a} selected={selected===i} onClick={()=>setSelected(i)} />)}
+    </div>
+    <div style={{overflow:"auto",background:"rgba(0,0,0,0.2)"}}><AgentDetail agent={agents[selected]||agents[0]} /></div>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════
+//  OPS VIEW
+// ═══════════════════════════════════════════════════════════
+const OpsView = ({agents, nodes, gpus, pods, commits}) => (
+  <div style={{display:"flex",flexDirection:"column",gap:1,overflow:"auto",padding:16}}>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6,marginBottom:16}}>
+      <MetricCard label="Pods" value={`${(pods.items||pods||[]).length || agents.length+3}`} sub={`${((pods.items||pods||[]).filter(p=>(p.status?.phase||p.phase)==="Running")||[]).length} Running`} color="#34d399" />
+      <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
+      <MetricCard label="Commits" value={`${(commits||[]).length||"—"}`} sub={(commits||[])[0]?.message?.slice(0,28)||"Fetching..."} color="#818cf8" />
+      <MetricCard label="Nodes" value={`${nodes.length}`} sub={`${nodes.filter(n=>n.status==="Ready").length} Ready`} color="#fbbf24" />
+      <MetricCard label="Agents" value={`${agents.filter(a=>a.status==="online").length}/${agents.length}`} sub="Online" color="#c084fc" />
+    </div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,flex:1}}>
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div>
+          <div style={{fontSize:9,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Cluster · {nodes.length} Nodes</div>
+          {nodes.map(n=>(
+            <Glass key={n.name} glow="#34d399" style={{padding:"10px 14px",marginBottom:4}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <GlowPip status="online" size={5} />
+                  <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{n.name}</span>
+                  <span style={{fontSize:9,color:"rgba(255,255,255,0.15)"}}>{n.ip}</span>
+                </div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <Badge text={n.role} color="rgba(255,255,255,0.3)" />
+                  <span style={{fontSize:10,fontWeight:700,color:"#818cf8",fontFamily:"'Space Grotesk',sans-serif"}}>{n.pods}p</span>
+                </div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                {[{l:"CPU",v:n.cpu_percent,c:n.cpu_percent>60?"#fbbf24":"#34d399"},{l:"MEM",v:n.memory_percent,c:n.memory_percent>75?"#fbbf24":"#818cf8"}].map(x=>(
+                  <div key={x.l}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:8,color:"rgba(255,255,255,0.2)"}}>{x.l}</span><span style={{fontSize:9,fontWeight:700,color:x.c,fontFamily:"'Space Grotesk',sans-serif"}}>{x.v}%</span></div><Bar value={x.v} color={x.c} h={2}/></div>
+                ))}
+              </div>
+            </Glass>
+          ))}
+        </div>
+        <div>
+          <div style={{fontSize:9,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>GPU Inference</div>
+          {gpus.map(g=>(
+            <Glass key={g.name} glow={statusColor(g.status)} style={{padding:"10px 14px",marginBottom:4}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <GlowPip status={g.status} size={5} />
+                  <span style={{fontSize:12,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{g.name}</span>
+                  <span style={{fontSize:10,color:"#818cf8"}}>{g.gpu}</span>
+                </div>
+                {g.temp_celsius>0 && <span style={{fontSize:9,color:g.temp_celsius>70?"#fbbf24":"rgba(255,255,255,0.25)"}}>{g.temp_celsius}°C</span>}
+              </div>
+              {g.vram_percent>0 && <div style={{marginTop:6}}><Bar value={g.vram_percent} color={g.vram_percent>80?"#ef4444":"#34d399"} h={2}/><div style={{fontSize:8,color:"rgba(255,255,255,0.2)",marginTop:2}}>{g.model} · {g.vram_percent}% VRAM</div></div>}
+              {g.vram_percent===0 && <div style={{fontSize:9,color:"#ef4444",marginTop:4,paddingLeft:23}}>{g.model}</div>}
+            </Glass>
+          ))}
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:16}}>
+        <div>
+          <div style={{fontSize:9,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Recent Commits · {(commits||[]).length}</div>
+          <div style={{maxHeight:140,overflow:"auto",marginBottom:12}}>
+            {(commits||[]).slice(0,8).map((c,i)=>(
+              <Glass key={i} style={{padding:"6px 10px",marginBottom:2,display:"flex",gap:8,alignItems:"center"}}>
+                <span style={{fontSize:8,color:"#34d399",fontWeight:700,fontFamily:"'IBM Plex Mono',monospace",minWidth:52}}>{(c.sha||c.id||"").slice(0,7)}</span>
+                <span style={{fontSize:9,color:"rgba(255,255,255,0.4)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.message||c.commit?.message||"—"}</span>
+                <span style={{fontSize:8,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>{(c.author||c.commit?.author?.name||"").slice(0,8)}</span>
+              </Glass>
+            ))}
+            {(commits||[]).length===0 && <div style={{fontSize:9,color:"rgba(255,255,255,0.15)",padding:8}}>No commits loaded</div>}
+          </div>
+        </div>
+        <div>
+          <div style={{fontSize:9,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>GitOps Pipeline</div>
+          <Glass glow="#34d399" style={{padding:"14px 16px"}}>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              {["PUSH","PR","REVIEW","MERGE","SYNC"].map((s,i)=>(
+                <div key={s} style={{display:"flex",alignItems:"center"}}>
+                  <div style={{padding:"5px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.08em",color:s==="REVIEW"?"#fbbf24":"#34d399",background:s==="REVIEW"?"rgba(251,191,36,0.08)":"rgba(52,211,153,0.06)",border:`1px solid ${s==="REVIEW"?"rgba(251,191,36,0.15)":"rgba(52,211,153,0.1)"}`}}>{s}</div>
+                  {i<4 && <div style={{width:14,height:1,background:"rgba(255,255,255,0.06)"}} />}
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:9,color:"rgba(255,255,255,0.2)",marginTop:10}}>Agent → Gitea → PR → Kit approves → ArgoCD sync</div>
+          </Glass>
+        </div>
+        <div>
+          <div style={{fontSize:9,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Services</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
+            {[{n:"Gateway",p:"8080"},{n:"Seidr",p:"8082"},{n:"ChromaDB",p:"8000"},{n:"Bifrost",p:"3000"},{n:"Gitea",p:"30637"},{n:"ArgoCD"},{n:"cert-manager"},{n:"ingress-nginx",p:"30447"}].map(s=>(
+              <Glass key={s.n} style={{padding:"7px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{display:"flex",alignItems:"center",gap:6}}><GlowPip status="online" size={4} /><span style={{fontSize:10,color:"#e2e8f0"}}>{s.n}</span></div>
+                {s.p && <span style={{fontSize:9,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>:{s.p}</span>}
+              </Glass>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
+// ═══════════════════════════════════════════════════════════
+//  MAIN APP
+// ═══════════════════════════════════════════════════════════
+const Tab = ({active,label,count,onClick}) => (
+  <button onClick={onClick} style={{background:"none",border:"none",position:"relative",color:active?"#e2e8f0":"rgba(255,255,255,0.2)",padding:"12px 0",marginRight:28,cursor:"pointer",fontSize:10,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:"0.14em",textTransform:"uppercase",transition:"all 0.15s"}}>
+    <span>{label}</span>
+    {count && <span style={{marginLeft:6,fontSize:9,fontWeight:700,color:active?"#818cf8":"rgba(255,255,255,0.12)"}}>{count}</span>}
+    {active && <div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:"linear-gradient(90deg,#818cf8,#818cf800)",boxShadow:"0 0 8px rgba(129,140,248,0.3)"}} />}
+  </button>
+);
+
+function App() {
+  const [tab, setTab] = useState("comms");
+  const [selected, setSelected] = useState(0);
+
+  // Live data hooks
+  const agents = usePolledData('/api/v1/agents', MOCK_AGENTS, CONFIG.POLL_INTERVAL);
+  const nodes = usePolledData('/api/v1/cluster/nodes', MOCK_NODES, CONFIG.POLL_INTERVAL * 2);
+  const pods = usePolledData('/api/v1/cluster/pods', [], CONFIG.POLL_INTERVAL * 2);
+  const commits = usePolledData('/api/v1/gitea/commits', [], CONFIG.POLL_INTERVAL * 3);
+  const gpus = MOCK_GPUS; // GPU endpoint not yet implemented
+  const { events, connected: wsConnected } = useEventStream();
+
+  const online = agents.filter(a => a.status === "online").length;
+
+  return (
+    <div style={{height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+      {/* TOP BAR */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 18px",height:44,minHeight:44,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(90deg,rgba(10,10,20,0.95),rgba(6,6,16,0.95))",position:"relative"}}>
+        <div style={{position:"absolute",bottom:0,left:0,right:0,height:1,background:"linear-gradient(90deg,transparent,rgba(99,102,241,0.12),transparent)"}} />
+        <div style={{display:"flex",alignItems:"center",gap:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <div style={{width:8,height:8,background:"#818cf8",boxShadow:"0 0 14px rgba(129,140,248,0.5)",borderRadius:1}} />
+            <span style={{fontSize:12,fontWeight:800,letterSpacing:"0.22em",color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>HIRDFORGE</span>
+          </div>
+          <div style={{width:1,height:18,background:"rgba(255,255,255,0.05)"}} />
+          <span style={{fontSize:9,color:"rgba(255,255,255,0.15)",letterSpacing:"0.12em"}}>VALHALLA CLUSTER</span>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:18}}>
+          {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=>(
+            <div key={x.l} style={{display:"flex",alignItems:"center",gap:5,fontSize:9,color:"rgba(255,255,255,0.2)"}}>
+              <GlowPip status={x.s} size={4} /><span>{x.l}</span>
+            </div>
+          ))}
+          <div style={{width:1,height:18,background:"rgba(255,255,255,0.05)"}} />
+          <span style={{fontSize:10,fontFamily:"'Space Grotesk',sans-serif"}}>
+            <span style={{color:"#34d399",fontWeight:700}}>{online}</span>
+            <span style={{color:"rgba(255,255,255,0.12)"}}> / {agents.length}</span>
+          </span>
+        </div>
+      </div>
+
+      {/* TABS */}
+      <div style={{display:"flex",padding:"0 18px",borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.12)"}}>
+        <Tab active={tab==="comms"} label="Comms" count={String(events.length)} onClick={()=>setTab("comms")} />
+        <Tab active={tab==="fleet"} label="Warriors" count={String(agents.length)} onClick={()=>setTab("fleet")} />
+        <Tab active={tab==="ops"} label="Realm" onClick={()=>setTab("ops")} />
+      </div>
+
+      {/* CONTENT */}
+      <div style={{flex:1,overflow:"hidden"}}>
+        {tab==="fleet" && <FleetView agents={agents} selected={selected} setSelected={setSelected} />}
+        {tab==="ops" && <OpsView agents={agents} nodes={nodes} gpus={gpus} pods={pods} commits={commits} />}
+        {tab==="comms" && <CommsView agents={agents} events={events} wsConnected={wsConnected} />}
+      </div>
+
+      {/* STATUS BAR */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 18px",height:24,minHeight:24,borderTop:"1px solid rgba(255,255,255,0.03)",background:"rgba(0,0,0,0.3)",fontSize:8,color:"rgba(255,255,255,0.15)"}}>
+        <div style={{display:"flex",gap:16}}><span>{agents.length+3} pods</span><span>3 nodes</span><span>4 GPUs</span><span>{agents.length} agents</span></div>
+        <div style={{display:"flex",gap:16}}>
+          <span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"✓":"✗"}</span></span>
+          <span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span>
+          <span style={{color:"rgba(255,255,255,0.08)"}}>v0.6.0-s6</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
