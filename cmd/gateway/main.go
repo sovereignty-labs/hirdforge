@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -67,6 +68,8 @@ type NodeInfo struct {
 	Architecture      string   `json:"architecture"`
 	AllocatableCPU    string   `json:"allocatable_cpu"`
 	AllocatableMemory string   `json:"allocatable_memory"`
+	CPUPercent        float64  `json:"cpu_percent"`
+	MemoryPercent     float64  `json:"memory_percent"`
 }
 
 type K8sEventInfo struct {
@@ -609,6 +612,98 @@ func parseNodes(body map[string]interface{}) []NodeInfo {
 	return nodes
 }
 
+type nodeUsage struct {
+	cpuMilli float64
+	memBytes float64
+}
+
+func parseCPUToMilli(q string) (float64, bool) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return 0, false
+	}
+	if strings.HasSuffix(q, "m") {
+		v, err := strconv.ParseFloat(strings.TrimSuffix(q, "m"), 64)
+		if err != nil {
+			return 0, false
+		}
+		return v, true
+	}
+	v, err := strconv.ParseFloat(q, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v * 1000, true
+}
+
+func parseBytesQuantity(q string) (float64, bool) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return 0, false
+	}
+	units := map[string]float64{
+		"Ki": 1024,
+		"Mi": 1024 * 1024,
+		"Gi": 1024 * 1024 * 1024,
+		"Ti": 1024 * 1024 * 1024 * 1024,
+		"Pi": 1024 * 1024 * 1024 * 1024 * 1024,
+		"Ei": 1024 * 1024 * 1024 * 1024 * 1024 * 1024,
+		"K":  1000,
+		"M":  1000 * 1000,
+		"G":  1000 * 1000 * 1000,
+		"T":  1000 * 1000 * 1000 * 1000,
+		"P":  1000 * 1000 * 1000 * 1000 * 1000,
+		"E":  1000 * 1000 * 1000 * 1000 * 1000 * 1000,
+	}
+	for suffix, scale := range units {
+		if strings.HasSuffix(q, suffix) {
+			v, err := strconv.ParseFloat(strings.TrimSuffix(q, suffix), 64)
+			if err != nil {
+				return 0, false
+			}
+			return v * scale, true
+		}
+	}
+	v, err := strconv.ParseFloat(q, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+func parseNodeUsage(body map[string]interface{}) map[string]nodeUsage {
+	items := asSlice(body["items"])
+	out := make(map[string]nodeUsage, len(items))
+	for _, item := range items {
+		im := asMap(item)
+		name := asString(asMap(im["metadata"])["name"])
+		usage := asMap(im["usage"])
+		cpuMilli, okCPU := parseCPUToMilli(asString(usage["cpu"]))
+		memBytes, okMem := parseBytesQuantity(asString(usage["memory"]))
+		if name == "" || !okCPU || !okMem {
+			continue
+		}
+		out[name] = nodeUsage{cpuMilli: cpuMilli, memBytes: memBytes}
+	}
+	return out
+}
+
+func enrichNodesWithUsage(nodes []NodeInfo, usage map[string]nodeUsage) []NodeInfo {
+	for i := range nodes {
+		u, ok := usage[nodes[i].Name]
+		if !ok {
+			continue
+		}
+		if allocMilli, ok := parseCPUToMilli(nodes[i].AllocatableCPU); ok && allocMilli > 0 {
+			nodes[i].CPUPercent = math.Round((u.cpuMilli/allocMilli)*1000) / 10
+		}
+		if allocMem, ok := parseBytesQuantity(nodes[i].AllocatableMemory); ok && allocMem > 0 {
+			nodes[i].MemoryPercent = math.Round((u.memBytes/allocMem)*1000) / 10
+		}
+	}
+	return nodes
+}
+
 func parseK8sEvents(body map[string]interface{}) []K8sEventInfo {
 	items := asSlice(body["items"])
 	events := make([]K8sEventInfo, 0, len(items))
@@ -707,7 +802,12 @@ func (k *k8sState) refreshNodes() error {
 		k.setNodes(nil)
 		return err
 	}
-	k.setNodes(parseNodes(body))
+	nodes := parseNodes(body)
+	metricsBody, err := k.get("/apis/metrics.k8s.io/v1beta1/nodes")
+	if err == nil {
+		nodes = enrichNodesWithUsage(nodes, parseNodeUsage(metricsBody))
+	}
+	k.setNodes(nodes)
 	return nil
 }
 
@@ -1082,6 +1182,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
