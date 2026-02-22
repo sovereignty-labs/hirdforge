@@ -319,11 +319,14 @@ const ToolResultChip = ({tool, result}) => (
   </div>
 );
 
-const ChatBubble = ({msg, isLast}) => {
+const ChatBubble = ({msg}) => {
   const isSelf = msg.from === "kit";
   const c = AGENT_COLORS[msg.from] || "#818cf8";
+  const elRef = useRef(null);
+  const [animated, setAnimated] = useState(false);
+  useEffect(() => { if (!animated && elRef.current) { setAnimated(true); } }, []);
   return (
-    <div style={{display:"flex",gap:12,maxWidth:"85%",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:isLast?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1)":"none"}}>
+    <div ref={elRef} style={{display:"flex",gap:12,maxWidth:"85%",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:!animated?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1)":"none"}}>
       <AgentAvatar agent={msg.agent} size={28} />
       <div style={{display:"flex",flexDirection:"column",gap:3,maxWidth:"calc(100% - 44px)"}}>
         <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:isSelf?"flex-end":"flex-start"}}>
@@ -492,7 +495,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
               <span style={{fontSize:12,color:"rgba(255,255,255,0.3)"}}>Command the warband</span>
             </div>
           )}
-          {chatHistory.map((m,i) => <ChatBubble key={i} msg={m} isLast={i===chatHistory.length-1} />)}
+          {chatHistory.map((m,i) => <ChatBubble key={i} msg={m} />)}
           {sending && chatHistory.length > 0 && chatHistory[chatHistory.length-1].text === "" && !(chatHistory[chatHistory.length-1].toolCalls||[]).length && (
             <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}>
               <AgentAvatar agent={ta} size={22} showStatus={false} />
