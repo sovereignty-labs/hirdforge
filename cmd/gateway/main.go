@@ -1193,10 +1193,11 @@ func main() {
 			flusher.Flush()
 			return true
 		}
-		flushContent := func() bool {
-			clean := thinkTagRE.ReplaceAllString(contentBuf.String(), "")
-			if clean != "" {
-				if !forward(map[string]interface{}{"type": "content", "content": clean, "done": false}) {
+		forwardReplaceIfNeeded := func() bool {
+			raw := contentBuf.String()
+			cleaned := thinkTagRE.ReplaceAllString(raw, "")
+			if cleaned != raw && cleaned != "" {
+				if !forward(map[string]interface{}{"type": "replace", "content": cleaned, "done": false}) {
 					return false
 				}
 			}
@@ -1215,6 +1216,9 @@ func main() {
 							if content, _ := evt["content"].(string); content != "" {
 								contentBuf.WriteString(content)
 							}
+							if !forward(evt) {
+								return
+							}
 							goto lineDone
 						}
 						if typ, _ := evt["type"].(string); typ == "tool_call" {
@@ -1222,7 +1226,7 @@ func main() {
 						}
 						if typ == "done" {
 							doneEvt = evt
-							if !flushContent() {
+							if !forwardReplaceIfNeeded() {
 								return
 							}
 							if !forward(doneEvt) {
@@ -1238,7 +1242,7 @@ func main() {
 			lineDone:
 			}
 			if err == io.EOF {
-				if !flushContent() {
+				if !forwardReplaceIfNeeded() {
 					return
 				}
 				if doneEvt != nil {

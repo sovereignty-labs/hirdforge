@@ -291,12 +291,13 @@ type (
 var sessionsMu sync.Mutex
 var sessions = map[string][]message{}
 var (
-	startTime    = time.Now()
-	requestCount int64
-	toolCalls    int64
-	modelName    string
-	enabledTools []string
-	thinkTagRE   = regexp.MustCompile(`(?s)<think>.*?</think>`)
+	startTime         = time.Now()
+	requestCount      int64
+	toolCalls         int64
+	modelName         string
+	enabledTools      []string
+	thinkTagRE        = regexp.MustCompile(`(?s)<think>.*?</think>`)
+	minimaxToolCallRE = regexp.MustCompile(`(?s)<minimax:tool_call>(.*?)</minimax:tool_call>`)
 
 	metricsRequestsTotal      int64
 	metricsToolCallsTotal     int64
@@ -594,6 +595,55 @@ func incError(msg string, err error, fields map[string]interface{}) {
 
 func stripThinkTags(s string) string {
 	return thinkTagRE.ReplaceAllString(s, "")
+}
+
+func parseMiniMaxToolCalls(content string) ([]toolCall, string) {
+	matches := minimaxToolCallRE.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return nil, content
+	}
+	invokeRE := regexp.MustCompile(`(?s)<invoke\s+name="([^"]+)">`)
+	paramRE := regexp.MustCompile(`(?s)<parameter\s+name="([^"]+)">(.*?)</parameter>`)
+	calls := make([]toolCall, 0, len(matches))
+	for i, m := range matches {
+		block := m[1]
+		invoke := invokeRE.FindStringSubmatch(block)
+		if len(invoke) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(invoke[1])
+		if name == "" {
+			continue
+		}
+		args := map[string]string{}
+		for _, pm := range paramRE.FindAllStringSubmatch(block, -1) {
+			if len(pm) < 3 {
+				continue
+			}
+			k := strings.TrimSpace(pm[1])
+			if k == "" {
+				continue
+			}
+			args[k] = strings.TrimSpace(pm[2])
+		}
+		b, err := json.Marshal(args)
+		if err != nil {
+			continue
+		}
+		calls = append(calls, toolCall{
+			ID:   fmt.Sprintf("mm_%d", i),
+			Type: "function",
+			Function: toolCallFunction{
+				Name:      name,
+				Arguments: string(b),
+			},
+		})
+	}
+	if len(calls) == 0 {
+		return nil, content
+	}
+	cleaned := minimaxToolCallRE.ReplaceAllString(content, "")
+	return calls, cleaned
 }
 
 func setLastDuration(d time.Duration) {
@@ -1112,21 +1162,8 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		for i := 0; i < 10; i++ {
-			resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
-			if err != nil {
-				incError("inference non-streaming failed", err, nil)
-				writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
-				writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
-				flusher.Flush()
-				return
-			}
-			if len(resp.Choices) == 0 || len(resp.Choices[0].Message.ToolCalls) == 0 {
-				break
-			}
-			assistant := resp.Choices[0].Message
-			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
-			for _, tc := range assistant.ToolCalls {
+		executeToolCalls := func(calls []toolCall) {
+			for _, tc := range calls {
 				atomic.AddInt64(&toolCalls, 1)
 				atomic.AddInt64(&metricsToolCallsTotal, 1)
 				incToolMetric(tc.Function.Name)
@@ -1165,6 +1202,33 @@ func main() {
 				}
 				messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
 			}
+		}
+
+		for i := 0; i < 10; i++ {
+			resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
+			if err != nil {
+				incError("inference non-streaming failed", err, nil)
+				writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
+				writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
+				flusher.Flush()
+				return
+			}
+			if len(resp.Choices) == 0 {
+				break
+			}
+			assistant := resp.Choices[0].Message
+			if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<minimax:tool_call>") {
+				mmCalls, cleaned := parseMiniMaxToolCalls(assistant.Content)
+				if len(mmCalls) > 0 {
+					assistant.ToolCalls = mmCalls
+					assistant.Content = cleaned
+				}
+			}
+			if len(assistant.ToolCalls) == 0 {
+				break
+			}
+			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
+			executeToolCalls(assistant.ToolCalls)
 			if i == 19 {
 				writeSSE(w, sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
 			}
@@ -1177,6 +1241,14 @@ func main() {
 			flusher.Flush()
 		}
 		cleaned := stripThinkTags(full.String())
+		if strings.Contains(cleaned, "<minimax:tool_call>") {
+			mmCalls, mmCleaned := parseMiniMaxToolCalls(cleaned)
+			if len(mmCalls) > 0 {
+				messages = append(messages, message{Role: "assistant", Content: mmCleaned, ToolCalls: mmCalls})
+				executeToolCalls(mmCalls)
+				cleaned = mmCleaned
+			}
+		}
 		if cleaned != full.String() {
 			writeSSE(w, sseChunk{Type: "replace", Content: cleaned, Done: false})
 			flusher.Flush()

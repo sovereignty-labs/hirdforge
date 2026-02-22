@@ -6,7 +6,7 @@ COPY pkg/ pkg/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-gateway ./cmd/gateway/
 
 FROM alpine:3.20
-RUN adduser -D -u 1000 gateway
+RUN apk add --no-cache curl && adduser -D -u 1000 gateway
 COPY --from=build /valhalla-gateway /usr/local/bin/valhalla-gateway
 USER gateway
 EXPOSE 8080

@@ -21,6 +21,7 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.06); border-radius: 2px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.12); }
+  #messages { overflow-y: auto; scroll-behavior: smooth; }
   input::placeholder { color: rgba(255,255,255,0.12); }
   button { font-family: inherit; }
   button:hover { filter: brightness(1.2); }
@@ -405,11 +406,16 @@ const EventEntry = ({event, idx}) => {
 };
 
 const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending}) => {
+  const messagesEl = useRef(null);
   const chatEnd = useRef(null);
   const ta = agents.find(a => a.id === target) || MOCK_AGENTS[0];
   const tc = AGENT_COLORS[target] || "#818cf8";
+  const scrollBottom = () => {
+    if (!messagesEl.current) return;
+    messagesEl.current.scrollTop = messagesEl.current.scrollHeight;
+  };
 
-  useEffect(() => { chatEnd.current?.scrollIntoView({behavior:'smooth'}); }, [chatHistory]);
+  useEffect(() => { scrollBottom(); chatEnd.current?.scrollIntoView({behavior:'smooth'}); }, [chatHistory]);
 
   const handleSend = async () => {
     if (!msg.trim() || sending) return;
@@ -427,6 +433,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
           last.text = (last.text||"") + chunk;
           u[u.length-1] = last; return u;
         });
+        requestAnimationFrame(scrollBottom);
       },
       () => {
         setChatHistory(prev => {
@@ -477,7 +484,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
         </div>
 
         {/* Messages */}
-        <div style={{flex:1,overflow:"auto",padding:"20px",display:"flex",flexDirection:"column",gap:20}}>
+        <div id="messages" ref={messagesEl} style={{flex:1,overflow:"auto",scrollBehavior:"smooth",padding:"20px",display:"flex",flexDirection:"column",gap:20}}>
           {chatHistory.map((m,i) => <ChatBubble key={i} msg={m} isLast={i===chatHistory.length-1} />)}
           {sending && chatHistory.length > 0 && chatHistory[chatHistory.length-1].text === "" && (
             <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}>
