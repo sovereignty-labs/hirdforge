@@ -404,11 +404,7 @@ const EventEntry = ({event, idx}) => {
   );
 };
 
-const CommsView = ({agents, events, wsConnected}) => {
-  const [msg, setMsg] = useState("");
-  const [target, setTarget] = useState("ragnar");
-  const [chatHistory, setChatHistory] = useState([]);
-  const [sending, setSending] = useState(false);
+const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending}) => {
   const chatEnd = useRef(null);
   const ta = agents.find(a => a.id === target) || MOCK_AGENTS[0];
   const tc = AGENT_COLORS[target] || "#818cf8";
@@ -618,7 +614,7 @@ const FleetView = ({agents, selected, setSelected}) => (
 const OpsView = ({agents, nodes, gpus, pods, commits}) => (
   <div style={{display:"flex",flexDirection:"column",gap:1,overflow:"auto",padding:16}}>
     <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6,marginBottom:16}}>
-      <MetricCard label="Pods" value={`${(pods.items||pods||[]).length || agents.length+3}`} sub={`${((pods.items||pods||[]).filter(p=>(p.status?.phase||p.phase)==="Running")||[]).length} Running`} color="#34d399" />
+      <MetricCard label="Pods" value={`${(pods||[]).length || agents.length+3}`} sub={`${((pods||[]).filter(p=>(p.status?.phase||p.phase)==="Running")||[]).length} Running`} color="#34d399" />
       <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
       <MetricCard label="Commits" value={`${(commits||[]).length||"—"}`} sub={(commits||[])[0]?.message?.slice(0,28)||"Fetching..."} color="#818cf8" />
       <MetricCard label="Nodes" value={`${nodes.length}`} sub={`${nodes.filter(n=>n.status==="Ready").length} Ready`} color="#fbbf24" />
@@ -726,6 +722,12 @@ function App() {
   const [tab, setTab] = useState("comms");
   const [selected, setSelected] = useState(0);
 
+  // Chat state - moved to App level to persist across tab switches
+  const [chatHistory, setChatHistory] = useState([]);
+  const [msg, setMsg] = useState("");
+  const [target, setTarget] = useState("ragnar");
+  const [sending, setSending] = useState(false);
+
   // Live data hooks
   const agents = usePolledData('/api/v1/agents', MOCK_AGENTS, CONFIG.POLL_INTERVAL);
   const nodes = usePolledData('/api/v1/cluster/nodes', MOCK_NODES, CONFIG.POLL_INTERVAL * 2);
@@ -774,7 +776,7 @@ function App() {
       <div style={{flex:1,overflow:"hidden"}}>
         {tab==="fleet" && <FleetView agents={agents} selected={selected} setSelected={setSelected} />}
         {tab==="ops" && <OpsView agents={agents} nodes={nodes} gpus={gpus} pods={pods} commits={commits} />}
-        {tab==="comms" && <CommsView agents={agents} events={events} wsConnected={wsConnected} />}
+        {tab==="comms" && <CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} />}
       </div>
 
       {/* STATUS BAR */}
