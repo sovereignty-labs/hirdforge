@@ -2,18 +2,17 @@ package main
 
 import (
 	"bufio"
-	_ "embed"
 	"bytes"
 	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -613,58 +612,51 @@ func parseNodes(body map[string]interface{}) []NodeInfo {
 }
 
 type nodeUsage struct {
-	cpuMilli float64
-	memBytes float64
+	cpuMilli int64
+	memKi    int64
 }
 
-func parseCPUToMilli(q string) (float64, bool) {
+func parseCPUUsageNanoToMilli(q string) (int64, bool) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return 0, false
+	}
+	if !strings.HasSuffix(q, "n") {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(strings.TrimSuffix(q, "n"), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v / 1_000_000, true
+}
+
+func parseCPUAllocMilli(q string) (int64, bool) {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return 0, false
 	}
 	if strings.HasSuffix(q, "m") {
-		v, err := strconv.ParseFloat(strings.TrimSuffix(q, "m"), 64)
+		v, err := strconv.ParseInt(strings.TrimSuffix(q, "m"), 10, 64)
 		if err != nil {
 			return 0, false
 		}
 		return v, true
 	}
-	v, err := strconv.ParseFloat(q, 64)
+	// Fallback for plain core values (e.g., "4") if present.
+	v, err := strconv.ParseInt(q, 10, 64)
 	if err != nil {
 		return 0, false
 	}
 	return v * 1000, true
 }
 
-func parseBytesQuantity(q string) (float64, bool) {
+func parseMemoryKi(q string) (int64, bool) {
 	q = strings.TrimSpace(q)
-	if q == "" {
+	if q == "" || !strings.HasSuffix(q, "Ki") {
 		return 0, false
 	}
-	units := map[string]float64{
-		"Ki": 1024,
-		"Mi": 1024 * 1024,
-		"Gi": 1024 * 1024 * 1024,
-		"Ti": 1024 * 1024 * 1024 * 1024,
-		"Pi": 1024 * 1024 * 1024 * 1024 * 1024,
-		"Ei": 1024 * 1024 * 1024 * 1024 * 1024 * 1024,
-		"K":  1000,
-		"M":  1000 * 1000,
-		"G":  1000 * 1000 * 1000,
-		"T":  1000 * 1000 * 1000 * 1000,
-		"P":  1000 * 1000 * 1000 * 1000 * 1000,
-		"E":  1000 * 1000 * 1000 * 1000 * 1000 * 1000,
-	}
-	for suffix, scale := range units {
-		if strings.HasSuffix(q, suffix) {
-			v, err := strconv.ParseFloat(strings.TrimSuffix(q, suffix), 64)
-			if err != nil {
-				return 0, false
-			}
-			return v * scale, true
-		}
-	}
-	v, err := strconv.ParseFloat(q, 64)
+	v, err := strconv.ParseInt(strings.TrimSuffix(q, "Ki"), 10, 64)
 	if err != nil {
 		return 0, false
 	}
@@ -678,12 +670,12 @@ func parseNodeUsage(body map[string]interface{}) map[string]nodeUsage {
 		im := asMap(item)
 		name := asString(asMap(im["metadata"])["name"])
 		usage := asMap(im["usage"])
-		cpuMilli, okCPU := parseCPUToMilli(asString(usage["cpu"]))
-		memBytes, okMem := parseBytesQuantity(asString(usage["memory"]))
+		cpuMilli, okCPU := parseCPUUsageNanoToMilli(asString(usage["cpu"]))
+		memKi, okMem := parseMemoryKi(asString(usage["memory"]))
 		if name == "" || !okCPU || !okMem {
 			continue
 		}
-		out[name] = nodeUsage{cpuMilli: cpuMilli, memBytes: memBytes}
+		out[name] = nodeUsage{cpuMilli: cpuMilli, memKi: memKi}
 	}
 	return out
 }
@@ -694,11 +686,11 @@ func enrichNodesWithUsage(nodes []NodeInfo, usage map[string]nodeUsage) []NodeIn
 		if !ok {
 			continue
 		}
-		if allocMilli, ok := parseCPUToMilli(nodes[i].AllocatableCPU); ok && allocMilli > 0 {
-			nodes[i].CPUPercent = math.Round((u.cpuMilli/allocMilli)*1000) / 10
+		if allocMilli, ok := parseCPUAllocMilli(nodes[i].AllocatableCPU); ok && allocMilli > 0 {
+			nodes[i].CPUPercent = float64((u.cpuMilli * 100) / allocMilli)
 		}
-		if allocMem, ok := parseBytesQuantity(nodes[i].AllocatableMemory); ok && allocMem > 0 {
-			nodes[i].MemoryPercent = math.Round((u.memBytes/allocMem)*1000) / 10
+		if allocMemKi, ok := parseMemoryKi(nodes[i].AllocatableMemory); ok && allocMemKi > 0 {
+			nodes[i].MemoryPercent = float64((u.memKi * 100) / allocMemKi)
 		}
 	}
 	return nodes

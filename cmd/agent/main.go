@@ -775,7 +775,7 @@ func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKe
 				return
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				chunks <- stripThinkTags(chunk.Choices[0].Delta.Content)
+				chunks <- chunk.Choices[0].Delta.Content
 			}
 		}
 	}()
@@ -1173,10 +1173,12 @@ func main() {
 		var full strings.Builder
 		for chunk := range streamOllama(messages, nil, *inferenceURL, *model, *apiKey) {
 			full.WriteString(chunk)
+			writeSSE(w, sseChunk{Type: "content", Content: chunk, Done: false})
+			flusher.Flush()
 		}
 		cleaned := stripThinkTags(full.String())
-		if cleaned != "" {
-			writeSSE(w, sseChunk{Type: "content", Content: cleaned, Done: false})
+		if cleaned != full.String() {
+			writeSSE(w, sseChunk{Type: "replace", Content: cleaned, Done: false})
 			flusher.Flush()
 		}
 		sessionsMu.Lock()
