@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -447,13 +448,17 @@ func (k *k8sState) snapshotNodes() []NodeInfo {
 	return out
 }
 
-func (k *k8sState) get(path string) (map[string]interface{}, error) {
-	req, err := http.NewRequest(http.MethodGet, "https://kubernetes.default.svc"+path, nil)
+func (k *k8sState) do(method, path string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, "https://kubernetes.default.svc"+path, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+k.token)
-	resp, err := k.client.Do(req)
+	return k.client.Do(req)
+}
+
+func (k *k8sState) get(path string) (map[string]interface{}, error) {
+	resp, err := k.do(http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -809,6 +814,20 @@ func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
+func podNameFromPath(path, action string) (string, bool) {
+	const prefix = "/api/v1/cluster/pods/"
+	suffix := "/" + action
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return "", false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	name = strings.Trim(name, "/")
+	if name == "" || strings.Contains(name, "/") {
+		return "", false
+	}
+	return name, true
+}
+
 func main() {
 	port := flag.String("port", "8080", "HTTP port")
 	agentsFlag := flag.String("agents", "", "comma-separated name=url agent list")
@@ -1024,6 +1043,102 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, gw.k8s.snapshotPods())
+	})
+	mux.HandleFunc("/api/v1/cluster/pods/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/logs") && strings.HasPrefix(r.URL.Path, "/api/v1/cluster/pods/"):
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if gw.k8s == nil || !gw.k8s.enabled {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes integration disabled"})
+				return
+			}
+			podName, ok := podNameFromPath(r.URL.Path, "logs")
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			lines := 100
+			if raw := strings.TrimSpace(r.URL.Query().Get("lines")); raw != "" {
+				v, err := strconv.Atoi(raw)
+				if err != nil || v <= 0 {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid lines parameter"})
+					return
+				}
+				lines = v
+			}
+			namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
+			if namespace == "" {
+				namespace = "valhalla"
+			}
+			path := fmt.Sprintf(
+				"/api/v1/namespaces/%s/pods/%s/log?tailLines=%d&timestamps=true",
+				url.PathEscape(namespace),
+				url.PathEscape(podName),
+				lines,
+			)
+			resp, err := gw.k8s.do(http.MethodGet, path, nil)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes request failed"})
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "pod not found"})
+				return
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(b))})
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.Copy(w, resp.Body)
+			return
+
+		case strings.HasSuffix(r.URL.Path, "/restart") && strings.HasPrefix(r.URL.Path, "/api/v1/cluster/pods/"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if gw.k8s == nil || !gw.k8s.enabled {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes integration disabled"})
+				return
+			}
+			podName, ok := podNameFromPath(r.URL.Path, "restart")
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			path := fmt.Sprintf("/api/v1/namespaces/valhalla/pods/%s", url.PathEscape(podName))
+			resp, err := gw.k8s.do(http.MethodDelete, path, nil)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes request failed"})
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "pod not found"})
+				return
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(b))})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{
+				"status":  "ok",
+				"message": fmt.Sprintf("Pod %s deleted, deployment will recreate", podName),
+			})
+			return
+		default:
+			http.NotFound(w, r)
+			return
+		}
 	})
 	mux.HandleFunc("/api/v1/cluster/nodes", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
