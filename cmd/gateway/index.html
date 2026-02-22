@@ -143,9 +143,9 @@ function useEventStream() {
 // ═══════════════════════════════════════════════════════════
 //  CHAT API
 // ═══════════════════════════════════════════════════════════
-async function streamChat(agentId, message, onChunk, onReplace, onToolCall, onToolResult, onDone, onError) {
+async function streamChat(agentId, message, sessionId, onChunk, onReplace, onToolCall, onToolResult, onDone, onError) {
   try {
-    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent:agentId,content:message,session_id:"hirdforge-"+Date.now()}) });
+    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent:agentId,content:message,session_id:sessionId}) });
     if (!res.ok) { const err=await res.json().catch(()=>({error:res.statusText})); onError(`Error: ${err.error||res.statusText}`); return; }
     const reader=res.body.getReader(); const decoder=new TextDecoder(); let buffer='';
     while (true) {
@@ -312,7 +312,7 @@ const EventEntry = ({event, idx}) => {
   );
 };
 
-const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending}) => {
+const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending, sessions}) => {
   const messagesEl=useRef(null); const textareaEl=useRef(null);
   const ta=agents.find(a=>a.id===target)||FALLBACK_AGENTS[0]; const tc=AGENT_COLORS[target]||"#818cf8";
   const scrollBottom=useCallback(()=>{if(messagesEl.current) messagesEl.current.scrollTop=messagesEl.current.scrollHeight;},[]);
@@ -325,7 +325,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
     if(textareaEl.current) textareaEl.current.style.height='56px';
     const timeStr=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
     setChatHistory(prev=>[...prev,{from:target,agent:ta,text:"",time:timeStr,streaming:true,toolCalls:[],toolResults:[]}]);
-    await streamChat(target,sentMsg,
+    await streamChat(target,sentMsg,sessions[target]||("hirdforge-"+target),
       (chunk)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=(l.text||"")+chunk;u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
       (cleaned)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=cleaned;u[u.length-1]=l;return u;});},
       (tool,args)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.toolCalls=[...(l.toolCalls||[]),{tool,args}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
@@ -556,6 +556,7 @@ const Tab = ({active,label,count,onClick}) => (<button onClick={onClick} style={
 function App() {
   const [tab,setTab]=useState("comms"); const [selected,setSelected]=useState(0);
   const [chatHistory,setChatHistory]=useState([]); const [msg,setMsg]=useState(""); const [target,setTarget]=useState("ragnar"); const [sending,setSending]=useState(false);
+  const [sessions]=useState(()=>{const s={}; ['ragnar','chuck','knut','ivar','orm','val'].forEach(a=>{s[a]="hirdforge-"+a+"-"+Date.now();}); return s;});
   const agents=usePolledData('/api/v1/agents',FALLBACK_AGENTS,CONFIG.POLL_INTERVAL);
   const nodes=usePolledData('/api/v1/cluster/nodes',FALLBACK_NODES,CONFIG.POLL_INTERVAL*2);
   const pods=usePolledData('/api/v1/cluster/pods',[],CONFIG.POLL_INTERVAL*2);
@@ -586,11 +587,11 @@ function App() {
       <div style={{flex:1,overflow:"hidden",minHeight:0}}>
         {tab==="fleet"&&<FleetView agents={agents} selected={selected} setSelected={setSelected} />}
         {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} />}
-        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} />}
+        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} sessions={sessions} />}
       </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:28,minHeight:28,borderTop:"1px solid rgba(255,255,255,0.03)",background:"rgba(0,0,0,0.3)",fontSize:10,color:"rgba(255,255,255,0.2)",flexShrink:0}}>
         <div style={{display:"flex",gap:18}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
-        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.4-s7</span></div>
+        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.5-s7</span></div>
       </div>
     </div>
   );
