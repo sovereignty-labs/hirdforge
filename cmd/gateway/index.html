@@ -274,10 +274,11 @@ const ToolResultChip = ({tool,result}) => (<div style={{display:"flex",alignItem
 
 const ChatBubble = ({msg}) => {
   const isSelf=msg.from==="kit"; const c=AGENT_COLORS[msg.from]||"#818cf8";
-  const elRef=useRef(null); const [animated,setAnimated]=useState(false);
-  useEffect(()=>{if(!animated&&elRef.current)setAnimated(true);},[]);
+  const shouldAnimate = !msg.streaming;
+  const elRef=useRef(null); const [animated,setAnimated]=useState(!shouldAnimate);
+  useEffect(()=>{if(!animated&&elRef.current){const t=setTimeout(()=>setAnimated(true),400);return()=>clearTimeout(t);}},[]);
   return (
-    <div ref={elRef} style={{display:"flex",gap:12,maxWidth:"85%",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:!animated?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1)":"none"}}>
+    <div ref={elRef} style={{display:"flex",gap:12,maxWidth:"85%",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:!animated?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1) forwards":"none"}}>
       <AgentAvatar agent={msg.agent} size={28} />
       <div style={{display:"flex",flexDirection:"column",gap:3,maxWidth:"calc(100% - 44px)"}}>
         <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:isSelf?"flex-end":"flex-start"}}>
@@ -589,7 +590,7 @@ function App() {
       </div>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:28,minHeight:28,borderTop:"1px solid rgba(255,255,255,0.03)",background:"rgba(0,0,0,0.3)",fontSize:10,color:"rgba(255,255,255,0.2)",flexShrink:0}}>
         <div style={{display:"flex",gap:18}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
-        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.3-s7</span></div>
+        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.4-s7</span></div>
       </div>
     </div>
   );
