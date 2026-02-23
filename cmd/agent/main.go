@@ -3,13 +3,16 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html"
 	"io"
 	"math"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -515,8 +518,9 @@ func (t *recallTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 }
 
 type rememberTool struct {
-	memoryURL string
-	agentName string
+	memoryURL  string
+	agentName  string
+	collection string
 }
 
 func (t *rememberTool) Name() string { return "remember" }
@@ -542,11 +546,20 @@ func (t *rememberTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 			tags = append(tags, tag)
 		}
 	}
-	body, _ := json.Marshal(map[string]interface{}{
+	payload := map[string]interface{}{
 		"agent":   t.agentName,
 		"content": content,
 		"tags":    tags,
-	})
+	}
+	if strings.TrimSpace(t.collection) != "" {
+		payload["collection"] = t.collection
+		payload["metadata"] = map[string]interface{}{
+			"source":     "hunter",
+			"quarantine": true,
+			"hunter_id":  t.collection,
+		}
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(t.memoryURL, "/")+"/remember", bytes.NewReader(body))
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
@@ -739,12 +752,16 @@ func buildToolDefs(reg *toolpkg.Registry) []toolDef {
 }
 
 func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
+	return callOllamaNonStreamingWithContext(context.Background(), messages, defs, inferenceURL, model, apiKey)
+}
+
+func callOllamaNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/chat/completions"
 	body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Stream: false, Tools: defs})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -772,6 +789,10 @@ func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, mo
 }
 
 func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan string {
+	return streamOllamaWithContext(context.Background(), messages, defs, inferenceURL, model, apiKey)
+}
+
+func streamOllamaWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan string {
 	chunks := make(chan string)
 	go func() {
 		defer close(chunks)
@@ -781,7 +802,7 @@ func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKe
 			chunks <- "failed to marshal request: " + err.Error()
 			return
 		}
-		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
 			chunks <- "failed to create request: " + err.Error()
 			return
@@ -830,6 +851,142 @@ func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKe
 		}
 	}()
 	return chunks
+}
+
+type hunterTaskRequest struct {
+	ID   string `json:"id"`
+	URLs []struct {
+		URL   string `json:"url"`
+		Label string `json:"label"`
+	} `json:"urls"`
+	MaxBytesPerURL int   `json:"max_bytes_per_url"`
+	TimeoutSeconds int   `json:"timeout_seconds"`
+	StripHTML      *bool `json:"strip_html"`
+}
+
+func stripHTML(rawBytes []byte) string {
+	s := string(rawBytes)
+	scriptStyleRE := regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</\1>`)
+	tagRE := regexp.MustCompile(`(?s)<[^>]+>`)
+	spaceRE := regexp.MustCompile(`\s+`)
+	s = scriptStyleRE.ReplaceAllString(s, " ")
+	s = tagRE.ReplaceAllString(s, " ")
+	s = html.UnescapeString(s)
+	s = spaceRE.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
+
+func runHunterMode(taskJSON, memoryURL, quarantinePrefix string) error {
+	if strings.TrimSpace(taskJSON) == "" {
+		return fmt.Errorf("--hunter-task is required when --hunter-mode is set")
+	}
+	if strings.TrimSpace(memoryURL) == "" {
+		return fmt.Errorf("--memory-url is required when --hunter-mode is set")
+	}
+	if strings.TrimSpace(quarantinePrefix) == "" {
+		return fmt.Errorf("--hunter-quarantine-prefix is required when --hunter-mode is set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	var task hunterTaskRequest
+	if err := json.Unmarshal([]byte(taskJSON), &task); err != nil {
+		return fmt.Errorf("invalid --hunter-task JSON: %w", err)
+	}
+	if len(task.URLs) == 0 {
+		return fmt.Errorf("hunter task requires at least one URL")
+	}
+	if strings.TrimSpace(task.ID) == "" {
+		task.ID = fmt.Sprintf("hunt-%d", time.Now().Unix())
+	}
+	if task.MaxBytesPerURL <= 0 {
+		task.MaxBytesPerURL = 50000
+	}
+	if task.TimeoutSeconds <= 0 {
+		task.TimeoutSeconds = 30
+	}
+	strip := true
+	if task.StripHTML != nil {
+		strip = *task.StripHTML
+	}
+	perURLTimeout := time.Duration(task.TimeoutSeconds) * time.Second
+
+	var report strings.Builder
+	report.WriteString(fmt.Sprintf("HUNTER REPORT — %s\n", task.ID))
+	client := &http.Client{}
+	for i, u := range task.URLs {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		rawURL := strings.TrimSpace(u.URL)
+		label := strings.TrimSpace(u.Label)
+		if label == "" {
+			label = fmt.Sprintf("url-%d", i+1)
+		}
+		if rawURL == "" {
+			report.WriteString(fmt.Sprintf("--- %s (%s) [ERROR] ---\n%s\n", label, rawURL, "missing url"))
+			continue
+		}
+		parsed, err := url.ParseRequestURI(rawURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			report.WriteString(fmt.Sprintf("--- %s (%s) [ERROR] ---\n%s\n", label, rawURL, "invalid URL"))
+			continue
+		}
+		reqCtx, reqCancel := context.WithTimeout(ctx, perURLTimeout)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			reqCancel()
+			report.WriteString(fmt.Sprintf("--- %s (%s) [ERROR] ---\n%s\n", label, rawURL, err.Error()))
+			continue
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			reqCancel()
+			report.WriteString(fmt.Sprintf("--- %s (%s) [ERROR] ---\n%s\n", label, rawURL, err.Error()))
+			continue
+		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, int64(task.MaxBytesPerURL)+1))
+		_ = resp.Body.Close()
+		reqCancel()
+		statusPart := fmt.Sprintf("HTTP %d", resp.StatusCode)
+		if readErr != nil {
+			report.WriteString(fmt.Sprintf("--- %s (%s) [%s] ---\n%s\n", label, rawURL, statusPart, readErr.Error()))
+			continue
+		}
+		body := string(data)
+		if len(data) > task.MaxBytesPerURL {
+			body = string(data[:task.MaxBytesPerURL]) + "\n[truncated]"
+		}
+		if strip {
+			body = stripHTML([]byte(body))
+		}
+		report.WriteString(fmt.Sprintf("--- %s (%s) [%s] ---\n%s\n", label, rawURL, statusPart, body))
+	}
+	report.WriteString("END REPORT")
+
+	rememberExec := &rememberTool{
+		memoryURL:  memoryURL,
+		agentName:  "hunter",
+		collection: quarantinePrefix,
+	}
+	res := rememberExec.Execute(map[string]interface{}{
+		"content": report.String(),
+		"tags":    "hunter,quarantine,fetch",
+	})
+	if res.Error != "" {
+		return fmt.Errorf("remember failed: %s", res.Error)
+	}
+	logJSON("info", "hunter completed", map[string]interface{}{
+		"task_id":    task.ID,
+		"collection": quarantinePrefix,
+		"url_count":  len(task.URLs),
+		"remembered": res.Error == "",
+	})
+	fmt.Printf("hunter success: fetched %d urls and wrote report to quarantine collection %q\n", len(task.URLs), quarantinePrefix)
+	return nil
 }
 
 func writeSSE(w http.ResponseWriter, payload sseChunk) {
@@ -953,6 +1110,9 @@ func main() {
 	model := flag.String("model", "qwen3:30b", "model name")
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
+	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
+	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
+	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
 	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
@@ -960,11 +1120,21 @@ func main() {
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
 	flag.Parse()
 
+	if *hunterMode {
+		if err := runHunterMode(*hunterTask, *memoryURL, *hunterQuarantine); err != nil {
+			logJSON("error", "hunter failed", map[string]interface{}{"error": err.Error()})
+			fmt.Printf("hunter failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	soulBytes, err := os.ReadFile(*soulPath)
 	if err != nil {
 		die("failed to read soul file", err)
 	}
 	soul := string(soulBytes)
+
 	if err := os.MkdirAll(*workspace, 0755); err != nil {
 		die("failed to create workspace", err)
 	}
