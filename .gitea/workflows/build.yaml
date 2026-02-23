@@ -16,7 +16,7 @@ jobs:
       - name: Registry login
         run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-agent
+        run: rm -rf /src-agent && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-agent
       - name: Build and push agent
         run: |
           cd /src-agent
@@ -31,7 +31,7 @@ jobs:
       - name: Registry login
         run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-gateway
+        run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-gateway
       - name: Build and push gateway
         run: |
           cd /src-gateway
@@ -46,7 +46,7 @@ jobs:
       - name: Registry login
         run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-lockbox
+        run: rm -rf /src-lockbox && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-lockbox
       - name: Build and push lockbox
         run: |
           cd /src-lockbox
