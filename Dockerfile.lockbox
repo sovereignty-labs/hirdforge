@@ -1,0 +1,14 @@
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY cmd/ cmd/
+COPY pkg/ pkg/
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-lockbox ./cmd/lockbox/
+
+FROM alpine:3.20
+RUN adduser -D -u 1000 warrior
+COPY --from=build /valhalla-lockbox /usr/local/bin/valhalla-lockbox
+USER warrior
+WORKDIR /workspace
+EXPOSE 8083
+ENTRYPOINT ["/usr/local/bin/valhalla-lockbox"]
