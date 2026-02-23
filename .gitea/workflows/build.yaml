@@ -72,8 +72,8 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           cd /src-infra
           # Use regex to match any existing tag (e.g., :latest, :sha-xxx)
-          sed -i "s|valhalla-agent:[a-zA-Z0-9-]+|valhalla-agent:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/job-hunter-template.yaml
-          sed -i "s|valhalla-gateway:[a-zA-Z0-9-]+|valhalla-gateway:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-gateway.yaml
+          sed -i "s|valhalla-agent:[^"]*|valhalla-agent:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/job-hunter-template.yaml
+          sed -i "s|valhalla-gateway:[^"]*|valhalla-gateway:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-gateway.yaml
           git config user.name "CI Bot" && git config user.email "ci@valhalla.local"
           BRANCH_NAME="ci/update-images-$SHA_SHORT"
           git checkout -b $BRANCH_NAME
