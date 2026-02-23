@@ -143,9 +143,9 @@ function useEventStream() {
 // ═══════════════════════════════════════════════════════════
 //  CHAT API
 // ═══════════════════════════════════════════════════════════
-async function streamChat(agentId, message, sessionId, onChunk, onReplace, onToolCall, onToolResult, onDone, onError) {
+async function streamChat(agentId, message, sessionId, signal, onChunk, onReplace, onToolCall, onToolResult, onDone, onError) {
   try {
-    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent:agentId,content:message,session_id:sessionId}) });
+    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, { method:'POST', signal, headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent:agentId,content:message,session_id:sessionId}) });
     if (!res.ok) { const err=await res.json().catch(()=>({error:res.statusText})); onError(`Error: ${err.error||res.statusText}`); return; }
     const reader=res.body.getReader(); const decoder=new TextDecoder(); let buffer='';
     while (true) {
@@ -159,12 +159,18 @@ async function streamChat(agentId, message, sessionId, onChunk, onReplace, onToo
           else if(chunk.type==='replace'&&chunk.content) onReplace(chunk.content);
           else if(chunk.type==='tool_call') onToolCall(chunk.tool||'tool',chunk.args);
           else if(chunk.type==='tool_result') onToolResult(chunk.tool||'tool',chunk.result);
-          if(chunk.done){onDone();return;}
+          if(chunk.done){onDone(chunk.session_id||sessionId);return;}
         } catch{}
       }
     }
-    onDone();
-  } catch(e) { onError(`Failed to reach ${agentId}: ${e.message}`); }
+    onDone(sessionId);
+  } catch(e) {
+    if (e && e.name === 'AbortError') {
+      onError('[Stopped by Sovereign]');
+      return;
+    }
+    onError(`Failed to reach ${agentId}: ${e.message}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -312,11 +318,35 @@ const EventEntry = ({event, idx}) => {
   );
 };
 
-const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending, sessions}) => {
-  const messagesEl=useRef(null); const textareaEl=useRef(null);
+const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending, sessionId, setSessionId, sessionItems, onLoadSession, onNewConversation, onClearHistory, onEmergencyStop}) => {
+  const messagesEl=useRef(null); const textareaEl=useRef(null); const streamControllerRef=useRef(null);
   const ta=agents.find(a=>a.id===target)||FALLBACK_AGENTS[0]; const tc=AGENT_COLORS[target]||"#818cf8";
   const scrollBottom=useCallback(()=>{if(messagesEl.current) messagesEl.current.scrollTop=messagesEl.current.scrollHeight;},[]);
   useEffect(()=>{requestAnimationFrame(scrollBottom);},[chatHistory]);
+
+  const markStopped = () => {
+    setChatHistory(prev=>{
+      if (!prev.length) return prev;
+      const u=[...prev];
+      const last={...u[u.length-1]};
+      if (last.from===target && last.streaming) {
+        last.streaming=false;
+        last.text = (last.text ? `${last.text}\n` : "") + "[Stopped by Sovereign]";
+        u[u.length-1]=last;
+      }
+      return u;
+    });
+  };
+
+  const stopCurrent = async () => {
+    if (streamControllerRef.current) {
+      streamControllerRef.current.abort();
+      streamControllerRef.current = null;
+    }
+    markStopped();
+    setSending(false);
+    await apiPost(`/api/v1/agents/${target}/stop`);
+  };
 
   const handleSend = async () => {
     if(!msg.trim()||sending) return;
@@ -325,13 +355,15 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
     if(textareaEl.current) textareaEl.current.style.height='56px';
     const timeStr=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
     setChatHistory(prev=>[...prev,{from:target,agent:ta,text:"",time:timeStr,streaming:true,toolCalls:[],toolResults:[]}]);
-    await streamChat(target,sentMsg,sessions[target]||("hirdforge-"+target),
+    const ctrl = new AbortController();
+    streamControllerRef.current = ctrl;
+    await streamChat(target,sentMsg,sessionId,ctrl.signal,
       (chunk)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=(l.text||"")+chunk;u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
       (cleaned)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=cleaned;u[u.length-1]=l;return u;});},
       (tool,args)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.toolCalls=[...(l.toolCalls||[]),{tool,args}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
       (tool,result)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.toolResults=[...(l.toolResults||[]),{tool,result}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
-      ()=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.streaming=false;if(!l.text&&!(l.toolCalls||[]).length)l.text="(empty response)";u[u.length-1]=l;return u;});setSending(false);},
-      (err)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=err;l.streaming=false;u[u.length-1]=l;return u;});setSending(false);}
+      (sid)=>{if(sid) setSessionId(sid);setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.streaming=false;if(!l.text&&!(l.toolCalls||[]).length)l.text="(empty response)";u[u.length-1]=l;return u;});setSending(false);streamControllerRef.current=null;},
+      (err)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};if(err&&err!=="[Stopped by Sovereign]") l.text=err;l.streaming=false;u[u.length-1]=l;return u;});setSending(false);streamControllerRef.current=null;}
     );
   };
 
@@ -350,6 +382,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
         <div style={{display:"flex",alignItems:"center",gap:12,padding:"8px 18px",background:`linear-gradient(90deg, ${tc}06, transparent)`,borderBottom:"1px solid rgba(255,255,255,0.03)",flexShrink:0}}>
           <AgentAvatar agent={ta} size={26} />
           <div style={{flex:1}}><span style={{fontSize:12,fontWeight:700,color:tc}}>{ta.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginLeft:8}}>{ta.role}</span></div>
+          <ActionBtn label="Clear" icon="⌫" color="#ef4444" small onClick={onClearHistory} />
           <Badge text={ta.model} color={tc} /><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",fontFamily:"'IBM Plex Mono',monospace"}}>{ta.ping_ms?`${ta.ping_ms}ms`:"—"}</span>
         </div>
         <div ref={messagesEl} style={{flex:1,overflowY:"auto",scrollBehavior:"smooth",padding:"20px",display:"flex",flexDirection:"column",gap:20,minHeight:0}}>
@@ -362,11 +395,36 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
         <div style={{padding:"12px 18px",borderTop:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(180deg, rgba(0,0,0,0.1), rgba(0,0,0,0.25))",display:"flex",gap:8,flexShrink:0,alignItems:"flex-end"}}>
           <textarea ref={textareaEl} value={msg} onChange={e=>{setMsg(e.target.value);const el=e.target;el.style.height='56px';el.style.height=Math.min(el.scrollHeight,140)+'px';}} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();}}} placeholder={`Command ${ta.name}...`} rows={2}
             style={{flex:1,background:"rgba(255,255,255,0.02)",border:`1px solid ${tc}15`,padding:"14px 18px",color:"#e2e8f0",fontSize:13,fontFamily:"'IBM Plex Mono',monospace",outline:"none",lineHeight:1.5,minHeight:56,maxHeight:140,overflowY:"auto"}} />
-          <button onClick={handleSend} disabled={sending} style={{padding:"14px 28px",background:`linear-gradient(135deg, ${tc}30, ${tc}15)`,border:`1px solid ${tc}40`,color:tc,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,cursor:sending?"wait":"pointer",letterSpacing:"0.14em",textTransform:"uppercase",boxShadow:`0 0 24px ${tc}15`,alignSelf:"stretch",minHeight:56,opacity:sending?0.5:1}}>SEND</button>
+          {sending ? (
+            <button onClick={stopCurrent} style={{padding:"14px 22px",background:"linear-gradient(135deg, rgba(239,68,68,0.35), rgba(239,68,68,0.2))",border:"1px solid rgba(239,68,68,0.7)",color:"#ef4444",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:800,cursor:"pointer",letterSpacing:"0.14em",textTransform:"uppercase",boxShadow:"0 0 24px rgba(239,68,68,0.35)",alignSelf:"stretch",minHeight:56}}>STOP</button>
+          ) : (
+            <button onClick={handleSend} disabled={sending} style={{padding:"14px 28px",background:`linear-gradient(135deg, ${tc}30, ${tc}15)`,border:`1px solid ${tc}40`,color:tc,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,cursor:sending?"wait":"pointer",letterSpacing:"0.14em",textTransform:"uppercase",boxShadow:`0 0 24px ${tc}15`,alignSelf:"stretch",minHeight:56,opacity:sending?0.5:1}}>SEND</button>
+          )}
         </div>
       </div>
       {/* EVENT STREAM */}
       <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.2)",height:"100%",minHeight:0}}>
+        <div style={{padding:"10px 12px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <span style={{fontSize:10,fontWeight:700,letterSpacing:"0.14em",color:"rgba(255,255,255,0.25)",textTransform:"uppercase"}}>Sessions</span>
+            <div style={{display:"flex",gap:6}}>
+              <ActionBtn label="New" icon="＋" color={tc} small onClick={onNewConversation} />
+              <ActionBtn label="Stop All" icon="■" color="#ef4444" small onClick={onEmergencyStop} />
+            </div>
+          </div>
+          <div style={{maxHeight:170,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+            {sessionItems.map((s)=>(
+              <div key={s.id} onClick={()=>onLoadSession(s.id)} style={{padding:"7px 8px",border:`1px solid ${sessionId===s.id?`${tc}50`:"rgba(255,255,255,0.06)"}`,background:sessionId===s.id?`${tc}10`:"rgba(255,255,255,0.01)",cursor:"pointer"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                  <span style={{fontSize:10,color:sessionId===s.id?tc:"rgba(255,255,255,0.35)",fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.id}</span>
+                  <span style={{fontSize:9,color:"rgba(255,255,255,0.18)"}}>{fmtTimeAgo((s.updated_at||0)*1000)}</span>
+                </div>
+                <div style={{fontSize:10,color:"rgba(255,255,255,0.28)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.last_preview||"(empty)"}</div>
+              </div>
+            ))}
+            {sessionItems.length===0 && <div style={{fontSize:10,color:"rgba(255,255,255,0.2)",padding:"8px"}}>No sessions yet</div>}
+          </div>
+        </div>
         <div style={{padding:"12px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
           <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:6,height:6,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}} /><span style={{fontSize:10,fontWeight:700,color:"rgba(255,255,255,0.35)",letterSpacing:"0.16em",textTransform:"uppercase"}}>{wsConnected?"Live Feed":"Disconnected"}</span></div>
           <span style={{fontSize:10,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>{events.length} events</span>
@@ -553,10 +611,23 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
 // ═══════════════════════════════════════════════════════════
 const Tab = ({active,label,count,onClick}) => (<button onClick={onClick} style={{background:"none",border:"none",position:"relative",color:active?"#e2e8f0":"rgba(255,255,255,0.25)",padding:"14px 0",marginRight:28,cursor:"pointer",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:"0.14em",textTransform:"uppercase",transition:"all 0.15s"}}><span>{label}</span>{count&&<span style={{marginLeft:6,fontSize:10,fontWeight:700,color:active?"#818cf8":"rgba(255,255,255,0.12)"}}>{count}</span>}{active&&<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:"linear-gradient(90deg,#818cf8,#818cf800)",boxShadow:"0 0 8px rgba(129,140,248,0.3)"}} />}</button>);
 
+const localChatKey = (agent) => `hirdforge-chat-${agent}`;
+const localSessionKey = (agent) => `hirdforge-session-${agent}`;
+const uiToStored = (m) => ({ role: m.from==="kit"?"user":"assistant", content: m.text||"", timestamp: Date.now() });
+const storedToUI = (agentId, m) => {
+  const isUser = m.role === "user";
+  const from = isUser ? "kit" : agentId;
+  const agent = isUser ? {id:"kit",name:"Kit (Sovereign)",initial:"K",status:"online"} : {id:agentId,name:agentId,initial:(agentId||"?")[0]?.toUpperCase()||"?",status:"online"};
+  return { from, agent, text: m.content||"", time: new Date((m.timestamp||Date.now())).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}), streaming:false, toolCalls:[], toolResults:[] };
+};
+const serverSessionToUI = (session) => (session.messages||[]).map((m)=>storedToUI(session.agent||"unknown", m));
+
 function App() {
   const [tab,setTab]=useState("comms"); const [selected,setSelected]=useState(0);
   const [chatHistory,setChatHistory]=useState([]); const [msg,setMsg]=useState(""); const [target,setTarget]=useState("ragnar"); const [sending,setSending]=useState(false);
-  const [sessions]=useState(()=>{const s={}; ['ragnar','chuck','knut','ivar','orm','val'].forEach(a=>{s[a]="hirdforge-"+a+"-"+Date.now();}); return s;});
+  const [sessionIdByAgent,setSessionIdByAgent]=useState({});
+  const [sessionItems,setSessionItems]=useState([]);
+  const [toast,setToast]=useState("");
   const agents=usePolledData('/api/v1/agents',FALLBACK_AGENTS,CONFIG.POLL_INTERVAL);
   const nodes=usePolledData('/api/v1/cluster/nodes',FALLBACK_NODES,CONFIG.POLL_INTERVAL*2);
   const pods=usePolledData('/api/v1/cluster/pods',[],CONFIG.POLL_INTERVAL*2);
@@ -564,6 +635,93 @@ function App() {
   const k8sEvents=usePolledData('/api/v1/k8s/events',[],CONFIG.POLL_INTERVAL*2);
   const {events,connected:wsConnected}=useEventStream();
   const online=agents.filter(a=>a.status==="online").length;
+
+  const currentSessionId = sessionIdByAgent[target] || localStorage.getItem(localSessionKey(target)) || `hirdforge-${target}-${Date.now()}`;
+
+  useEffect(() => {
+    if (!target) return;
+    const raw = localStorage.getItem(localChatKey(target));
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setChatHistory(parsed.map(m => storedToUI(target, m)));
+        else setChatHistory([]);
+      } catch { setChatHistory([]); }
+    } else {
+      setChatHistory([]);
+    }
+    const sid = localStorage.getItem(localSessionKey(target));
+    if (sid) {
+      setSessionIdByAgent(prev => ({...prev, [target]: sid}));
+      apiFetch(`/api/v1/sessions/${sid}`, null).then((sess)=>{
+        if (sess && sess.messages) setChatHistory(serverSessionToUI(sess));
+      });
+    }
+  }, [target]);
+
+  useEffect(() => {
+    if (!target) return;
+    localStorage.setItem(localChatKey(target), JSON.stringify(chatHistory.map(uiToStored)));
+  }, [chatHistory, target]);
+
+  useEffect(() => {
+    if (!target) return;
+    if (sessionIdByAgent[target]) {
+      localStorage.setItem(localSessionKey(target), sessionIdByAgent[target]);
+    }
+  }, [sessionIdByAgent, target]);
+
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      const all = await apiFetch('/api/v1/sessions', []);
+      if (!mounted || !Array.isArray(all)) return;
+      setSessionItems(all.filter(s => s.agent === target));
+    };
+    load();
+    const id = setInterval(load, 5000);
+    return () => { mounted = false; clearInterval(id); };
+  }, [target, sending]);
+
+  const setCurrentSessionId = (sid) => {
+    setSessionIdByAgent(prev => ({...prev, [target]: sid}));
+  };
+
+  const loadSession = async (sid) => {
+    const sess = await apiFetch(`/api/v1/sessions/${sid}`, null);
+    if (!sess || !sess.messages) return;
+    setCurrentSessionId(sid);
+    setChatHistory(serverSessionToUI(sess));
+  };
+
+  const newConversation = () => {
+    const sid = `hirdforge-${target}-${Date.now()}`;
+    setCurrentSessionId(sid);
+    setChatHistory([]);
+  };
+
+  const clearHistory = () => {
+    setChatHistory([]);
+    localStorage.removeItem(localChatKey(target));
+  };
+
+  const emergencyStop = async () => {
+    await apiPost('/api/v1/agents/stop-all');
+    setSending(false);
+    setChatHistory(prev=>{
+      if (!prev.length) return prev;
+      const u=[...prev];
+      const last={...u[u.length-1]};
+      if (last.streaming) {
+        last.streaming=false;
+        last.text = (last.text ? `${last.text}\n` : "") + "[Stopped by Sovereign]";
+        u[u.length-1]=last;
+      }
+      return u;
+    });
+    setToast("All agents stopped");
+    setTimeout(()=>setToast(""), 1800);
+  };
 
   return (
     <div style={{height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -575,6 +733,7 @@ function App() {
         </div>
         <div style={{display:"flex",alignItems:"center",gap:18}}>
           {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=>(<div key={x.l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:"rgba(255,255,255,0.25)"}}><GlowPip status={x.s} size={5} /><span>{x.l}</span></div>))}
+          <button onClick={emergencyStop} title="Emergency Stop — Cancel all agent operations" style={{width:28,height:28,borderRadius:"50%",border:"1px solid rgba(239,68,68,0.6)",background:"rgba(239,68,68,0.15)",color:"#ef4444",cursor:"pointer",fontWeight:900,boxShadow:sending?"0 0 12px rgba(239,68,68,0.6)":"none",animation:sending?"rec-pulse 1.2s ease infinite":"none"}}>■</button>
           <div style={{width:1,height:20,background:"rgba(255,255,255,0.05)"}} />
           <span style={{fontSize:12,fontFamily:"'Space Grotesk',sans-serif"}}><span style={{color:"#34d399",fontWeight:700}}>{online}</span><span style={{color:"rgba(255,255,255,0.15)"}}> / {agents.length}</span></span>
         </div>
@@ -587,8 +746,9 @@ function App() {
       <div style={{flex:1,overflow:"hidden",minHeight:0}}>
         {tab==="fleet"&&<FleetView agents={agents} selected={selected} setSelected={setSelected} />}
         {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} />}
-        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} sessions={sessions} />}
+        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} sessionId={currentSessionId} setSessionId={setCurrentSessionId} sessionItems={sessionItems} onLoadSession={loadSession} onNewConversation={newConversation} onClearHistory={clearHistory} onEmergencyStop={emergencyStop} />}
       </div>
+      {toast && <div style={{position:"fixed",top:58,right:20,padding:"10px 14px",background:"rgba(239,68,68,0.16)",border:"1px solid rgba(239,68,68,0.45)",color:"#ef4444",fontSize:11,fontWeight:700,zIndex:20000}}>{toast}</div>}
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:28,minHeight:28,borderTop:"1px solid rgba(255,255,255,0.03)",background:"rgba(0,0,0,0.3)",fontSize:10,color:"rgba(255,255,255,0.2)",flexShrink:0}}>
         <div style={{display:"flex",gap:18}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
         <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.5-s7</span></div>
