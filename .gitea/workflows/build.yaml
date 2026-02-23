@@ -1,37 +1,77 @@
-name: Build and Deploy
-
+name: Build and Push
 on:
   push:
     branches:
       - main
-
+env:
+  DOCKER_HOST: tcp://localhost:2375
+  REGISTRY: 203.0.113.26:30637/gitea_admin
 jobs:
-  build:
+  build-agent:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            203.0.113.26:30637/gitea_admin/valhalla-agent:latest
-            203.0.113.26:30637/gitea_admin/valhalla-agent:sha-${{ github.sha }}
-
-      - name: Update infra manifests
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-agent && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-agent
+      - name: Build and push agent
         run: |
-          git clone http://kit:$GITEA_TOKEN@gitea-http.gitea.svc:3000/kit/valhalla-infra.git /tmp/valhalla-infra
-          cd /tmp/valhalla-infra
-          for f in infrastructure/valhalla/deployment-{chuck,ivar,knut,orm,ragnar,val}.yaml; do
-            sed -i 's|valhalla-agent:latest|valhalla-agent:sha-'${{ github.sha }}'|g' "$f"
-          done
-          git config user.name "github-actions[bot]" && git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A && git commit -m "chore: update agent image to sha-${{ github.sha }}" && git push
+          cd /src-agent
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          docker build --no-cache -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
+          docker push $REGISTRY/valhalla-agent:latest
+          docker push $REGISTRY/valhalla-agent:sha-$SHA_SHORT
+  build-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-gateway
+      - name: Build and push gateway
+        run: |
+          cd /src-gateway
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          docker build --no-cache -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
+          docker push $REGISTRY/valhalla-gateway:latest
+          docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+  build-lockbox:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-lockbox && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-lockbox
+      - name: Build and push lockbox
+        run: |
+          cd /src-lockbox
+          if [ -f Dockerfile.lockbox ]; then
+            SHA_SHORT=$(git rev-parse --short HEAD)
+            docker build --no-cache -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
+            docker push $REGISTRY/valhalla-lockbox:latest
+            docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
+          fi
+  update-infra:
+    runs-on: ubuntu-latest
+    needs: [build-agent, build-gateway, build-lockbox]
+    steps:
+      - name: Clone repos
+        run: |
+          rm -rf /src-code /src-infra
+          git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-code
+          git clone http://kit:$REGISTRY_PASSWORD@gitea-http.gitea.svc:3000/kit/valhalla-infra.git /src-infra
+      - name: Update manifests
+        run: |
+          cd /src-code
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          cd /src-infra
+          sed -i "s|valhalla-agent:latest|valhalla-agent:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/job-hunter-template.yaml
+          sed -i "s|valhalla-gateway:latest|valhalla-gateway:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-gateway.yaml
+          git config user.name "CI Bot" && git config user.email "ci@valhalla.local"
+          git add -A && git commit -m "ci: update images to sha-$SHA_SHORT" && git push
