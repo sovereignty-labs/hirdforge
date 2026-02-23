@@ -1,0 +1,42 @@
+name: Build and Push Images
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push agent
+        run: |
+          docker build --no-cache -f Dockerfile.agent -t 203.0.113.26:30637/gitea_admin/valhalla-agent:latest .
+          docker push 203.0.113.26:30637/gitea_admin/valhalla-agent:latest
+
+  build-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push gateway
+        run: |
+          docker build --no-cache -f Dockerfile.gateway -t 203.0.113.26:30637/gitea_admin/valhalla-gateway:latest .
+          docker push 203.0.113.26:30637/gitea_admin/valhalla-gateway:latest
+  
+  build-lockbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and push lockbox
+        run: |
+          if [ -f Dockerfile.lockbox ]; then
+            docker build --no-cache -f Dockerfile.lockbox -t 203.0.113.26:30637/gitea_admin/valhalla-lockbox:latest .
+            docker push 203.0.113.26:30637/gitea_admin/valhalla-lockbox:latest
+          fi
+
+  restart:
+    needs: [build-agent, build-gateway, build-lockbox]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger rollouts
+        run: |
+          echo "Images pushed. Run on Modi: kubectl rollout restart deploy/chuck deploy/knut deploy/ivar deploy/orm deploy/ragnar deploy/val deploy/gateway -n valhalla"
