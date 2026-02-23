@@ -82,6 +82,6 @@ jobs:
           git add -A && git commit -m "ci: update images to sha-$SHA_SHORT"
           git push origin $BRANCH_NAME
           # Create PR via Gitea API
-          curl -s -X POST -H "Authorization: token $GITEA_TOKEN" -H "Content-Type: application/json" \
+          curl -s -X POST -H "Authorization: token $REGISTRY_PASSWORD" -H "Content-Type: application/json" \
             -d "{\"title\":\"ci: update container images to sha-$SHA_SHORT\",\"body\":\"Automated PR to update container image tags to latest builds\",\"head\":\"$BRANCH_NAME\",\"base\":\"main\"}" \
             http://gitea-http.gitea.svc:3000/api/v1/repos/kit/valhalla-infra/pulls
