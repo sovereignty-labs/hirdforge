@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
@@ -121,15 +122,18 @@ type agentHealthResponse struct {
 }
 
 type gateway struct {
-	mu       sync.RWMutex
-	agents   map[string]*Agent
-	order    []string
-	eventMu  sync.Mutex
-	events   []Event
-	eventCap int
-	k8s      *k8sState
-	wsMu     sync.Mutex
-	wsConns  []*wsClient
+	mu             sync.RWMutex
+	agents         map[string]*Agent
+	order          []string
+	eventMu        sync.Mutex
+	events         []Event
+	eventCap       int
+	k8s            *k8sState
+	wsMu           sync.Mutex
+	wsConns        []*wsClient
+	sessionStore   *sessionStore
+	arMu           sync.RWMutex
+	activeRequests map[string]*ActiveRequest
 }
 
 type wsClient struct {
@@ -843,7 +847,15 @@ func main() {
 	if err != nil {
 		die("failed to parse --agents", err)
 	}
-	gw := &gateway{agents: agents, order: order, events: make([]Event, 0, 200), eventCap: 200, k8s: initK8s()}
+	gw := &gateway{
+		agents:         agents,
+		order:          order,
+		events:         make([]Event, 0, 200),
+		eventCap:       200,
+		k8s:            initK8s(),
+		sessionStore:   newSessionStore(),
+		activeRequests: map[string]*ActiveRequest{},
+	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
 	gw.refreshAgentHealth()
 
@@ -991,40 +1003,123 @@ func main() {
 		writeJSON(w, http.StatusOK, gw.snapshotAgents())
 	})
 	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
+		switch {
+		case strings.HasSuffix(path, "/files"):
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/files")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			agent, ok := gw.getAgent(name)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			uReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, strings.TrimRight(agent.URL, "/")+"/api/v1/files", nil)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
+				return
+			}
+			uResp, err := proxyClient.Do(uReq)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
+				return
+			}
+			defer uResp.Body.Close()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(uResp.StatusCode)
+			_, _ = io.Copy(w, io.LimitReader(uResp.Body, 4<<20))
+		case strings.HasSuffix(path, "/stop"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/stop")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			stopped := gw.stopAgent(name)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "stopped", "agent": name, "active": stopped})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	mux.HandleFunc("/api/v1/agents/stop-all", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		n := gw.stopAllAgents()
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "stopped", "count": n})
+	})
+	mux.HandleFunc("/api/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
-		if !strings.HasSuffix(path, "/files") {
+		agent := strings.TrimSpace(r.URL.Query().Get("agent"))
+		writeJSON(w, http.StatusOK, gw.sessionStore.list(agent))
+	})
+	mux.HandleFunc("/api/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
+		if path == "" || strings.Contains(path, "//") {
 			http.NotFound(w, r)
 			return
 		}
-		name := strings.TrimSuffix(path, "/files")
-		name = strings.Trim(name, "/")
-		if name == "" || strings.Contains(name, "/") {
+		if strings.HasSuffix(path, "/messages") {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			sessionID := strings.TrimSuffix(path, "/messages")
+			sessionID = strings.Trim(sessionID, "/")
+			if sessionID == "" || strings.Contains(sessionID, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			var in ChatMessage
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+				return
+			}
+			if strings.TrimSpace(in.Role) == "" || strings.TrimSpace(in.Agent) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "role and agent are required"})
+				return
+			}
+			id := gw.sessionStore.appendMessage(sessionID, in.Agent, in)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+			return
+		}
+		sessionID := strings.Trim(path, "/")
+		if sessionID == "" || strings.Contains(sessionID, "/") {
 			http.NotFound(w, r)
 			return
 		}
-		agent, ok := gw.getAgent(name)
-		if !ok {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
-			return
+		switch r.Method {
+		case http.MethodGet:
+			sess, ok := gw.sessionStore.get(sessionID)
+			if !ok {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+				return
+			}
+			writeJSON(w, http.StatusOK, sess)
+		case http.MethodDelete:
+			if !gw.sessionStore.delete(sessionID) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "deleted", "id": sessionID})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-		uReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, strings.TrimRight(agent.URL, "/")+"/api/v1/files", nil)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
-			return
-		}
-		uResp, err := proxyClient.Do(uReq)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
-			return
-		}
-		defer uResp.Body.Close()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(uResp.StatusCode)
-		_, _ = io.Copy(w, io.LimitReader(uResp.Body, 4<<20))
 	})
 	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1263,10 +1358,19 @@ func main() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent is unhealthy"})
 			return
 		}
+		sessionID := strings.TrimSpace(in.SessionID)
+		if sessionID == "" {
+			sessionID = fmt.Sprintf("hirdforge-%s-%d", in.Agent, time.Now().UnixNano())
+		}
 		gw.addEvent("message", in.Agent, fmt.Sprintf("Message sent to %s", in.Agent))
 
-		body, _ := json.Marshal(map[string]string{"content": in.Content, "session_id": in.SessionID})
-		uReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+		gw.setActiveRequest(in.Agent, sessionID, cancel)
+		defer gw.clearActiveRequest(in.Agent, cancel)
+
+		body, _ := json.Marshal(map[string]string{"content": in.Content, "session_id": sessionID})
+		uReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
 			return
@@ -1297,6 +1401,14 @@ func main() {
 		reader := bufio.NewReader(uResp.Body)
 		var contentBuf strings.Builder
 		var doneEvt map[string]interface{}
+		var saveOnce sync.Once
+		saveConversation := func() {
+			saveOnce.Do(func() {
+				raw := contentBuf.String()
+				cleaned := thinkTagRE.ReplaceAllString(raw, "")
+				gw.sessionStore.appendConversation(sessionID, in.Agent, in.Content, cleaned)
+			})
+		}
 		forward := func(evt map[string]interface{}) bool {
 			b, err := json.Marshal(evt)
 			if err != nil {
@@ -1341,9 +1453,13 @@ func main() {
 						}
 						if typ == "done" {
 							doneEvt = evt
+							if _, ok := doneEvt["session_id"]; !ok {
+								doneEvt["session_id"] = sessionID
+							}
 							if !forwardReplaceIfNeeded() {
 								return
 							}
+							saveConversation()
 							if !forward(doneEvt) {
 								return
 							}
@@ -1360,10 +1476,11 @@ func main() {
 				if !forwardReplaceIfNeeded() {
 					return
 				}
+				saveConversation()
 				if doneEvt != nil {
 					_ = forward(doneEvt)
 				} else {
-					_ = forward(map[string]interface{}{"type": "done", "done": true})
+					_ = forward(map[string]interface{}{"type": "done", "done": true, "session_id": sessionID})
 				}
 				return
 			}
