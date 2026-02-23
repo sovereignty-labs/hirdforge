@@ -6,6 +6,7 @@ on:
 env:
   DOCKER_HOST: tcp://localhost:2375
   REGISTRY: 203.0.113.26:30637/gitea_admin
+
 jobs:
   build-agent:
     runs-on: ubuntu-latest
@@ -15,12 +16,13 @@ jobs:
       - name: Registry login
         run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
+        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-agent
       - name: Build and push agent
         run: |
-          cd /src
+          cd /src-agent
           docker build --no-cache -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest .
           docker push $REGISTRY/valhalla-agent:latest
+
   build-gateway:
     runs-on: ubuntu-latest
     steps:
@@ -29,12 +31,13 @@ jobs:
       - name: Registry login
         run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
+        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-gateway
       - name: Build and push gateway
         run: |
-          cd /src
+          cd /src-gateway
           docker build --no-cache -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest .
           docker push $REGISTRY/valhalla-gateway:latest
+
   build-lockbox:
     runs-on: ubuntu-latest
     steps:
@@ -43,10 +46,10 @@ jobs:
       - name: Registry login
         run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
+        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-lockbox
       - name: Build and push lockbox
         run: |
-          cd /src
+          cd /src-lockbox
           if [ -f Dockerfile.lockbox ]; then
             docker build --no-cache -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest .
             docker push $REGISTRY/valhalla-lockbox:latest
