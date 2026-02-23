@@ -71,7 +71,27 @@ jobs:
           cd /src-code
           SHA_SHORT=$(git rev-parse --short HEAD)
           cd /src-infra
-          sed -i "s|valhalla-agent:latest|valhalla-agent:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/job-hunter-template.yaml
-          sed -i "s|valhalla-gateway:latest|valhalla-gateway:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-gateway.yaml
+          # Use regex to match any existing tag (e.g., :latest, :sha-xxx, etc.)
+          sed -i "s|valhalla-agent:[a-zA-Z0-9_-]+|valhalla-agent:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/job-hunter-template.yaml
+          sed -i "s|valhalla-gateway:[a-zA-Z0-9_-]+|valhalla-gateway:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-gateway.yaml
+      - name: Create branch and PR
+        run: |
+          cd /src-infra
           git config user.name "CI Bot" && git config user.email "ci@valhalla.local"
-          git add -A && git commit -m "ci: update images to sha-$SHA_SHORT" && git push
+          BRANCH_NAME="ci/update-images-$SHA_SHORT"
+          git checkout -b $BRANCH_NAME
+          git add -A
+          git commit -m "ci: update images to sha-$SHA_SHORT"
+          git push -u origin $BRANCH_NAME
+      - name: Create PR via Gitea API
+        run: |
+          SHA_SHORT=$(cd /src-code && git rev-parse --short HEAD)
+          curl -X POST "http://gitea-http.gitea.svc:3000/api/v1/repos/kit/valhalla-infra/pulls" \
+            -H "Content-Type: application/json" \
+            -u "kit:$REGISTRY_PASSWORD" \
+            -d '{
+              "title": "ci: update images to sha-'"$SHA_SHORT"'",
+              "body": "Automated PR to update container images to latest builds.\n\nUpdated images:\n- valhalla-agent:sha-'"$SHA_SHORT"'\n- valhalla-gateway:sha-'"$SHA_SHORT"'\n\nCreated by CI pipeline.",
+              "head": "ci/update-images-'"$SHA_SHORT"'",
+              "base": "main"
+            }'
