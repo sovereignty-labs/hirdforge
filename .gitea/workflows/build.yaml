@@ -1,36 +1,45 @@
-name: Build and Push Images
+name: Build and Push
+
 on:
-push:
-branches: [main]
+  push:
+    branches:
+      - main
+
 jobs:
-build-agent:
-runs-on: ubuntu-latest
-steps:
-- name: Clone and build agent
-run: |
-git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
-cd /src
-docker build --no-cache -f Dockerfile.agent -t 203.0.113.26:30637/gitea_admin/valhalla-agent:latest .
-docker push 203.0.113.26:30637/gitea_admin/valhalla-agent:latest
-build-gateway:
-runs-on: ubuntu-latest
-steps:
-- name: Clone and build gateway
-run: |
-git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
-cd /src
-docker build --no-cache -f Dockerfile.gateway -t 203.0.113.26:30637/gitea_admin/valhalla-gateway:latest .
-docker push 203.0.113.26:30637/gitea_admin/valhalla-gateway:latest
-build-lockbox:
-runs-on: ubuntu-latest
-steps:
-- name: Clone and build lockbox
-run: |
-git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
-cd /src
-if [ -f Dockerfile.lockbox ]; then
-docker build --no-cache -f Dockerfile.lockbox -t 203.0.113.26:30637/gitea_admin/valhalla-lockbox:latest .
-docker push 203.0.113.26:30637/gitea_admin/valhalla-lockbox:latest
-else
-echo "No Dockerfile.lockbox found, skipping"
-fi
+  build-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
+      
+      - name: Build and push agent
+        run: |
+          cd /src
+          docker build -f Dockerfile.agent -t 203.0.113.26:30637/gitea_admin/valhalla-agent:latest .
+          docker push 203.0.113.26:30637/gitea_admin/valhalla-agent:latest
+
+  build-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
+      
+      - name: Build and push gateway
+        run: |
+          cd /src
+          docker build -f Dockerfile.gateway -t 203.0.113.26:30637/gitea_admin/valhalla-gateway:latest .
+          docker push 203.0.113.26:30637/gitea_admin/valhalla-gateway:latest
+
+  build-lockbox:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        run: git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src
+      
+      - name: Build and push lockbox
+        run: |
+          cd /src
+          if [ -f Dockerfile.lockbox ]; then
+            docker build -f Dockerfile.lockbox -t 203.0.113.26:30637/gitea_admin/valhalla-lockbox:latest .
+            docker push 203.0.113.26:30637/gitea_admin/valhalla-lockbox:latest
+          fi
