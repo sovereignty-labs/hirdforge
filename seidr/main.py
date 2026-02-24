@@ -22,12 +22,14 @@ class QueryRequest(BaseModel):
     query: str
     agent: Optional[str] = None
     limit: int = 5
+    where: Optional[dict] = None
 
 class RememberRequest(BaseModel):
     agent: str
     content: str
     tags: list[str] = []
     source: str = "agent"
+    metadata: Optional[dict] = None
 
 class IngestRequest(BaseModel):
     path: str = "/docs"
@@ -66,20 +68,23 @@ def bm25_search(query: str, documents: list[dict], k: int = 10) -> list[int]:
     scores.sort(key=lambda x: x[1], reverse=True)
     return [i for i, s in scores[:k] if s > 0]
 
-def hybrid_search(query: str, limit: int = 5, agent: str = None):
+def hybrid_search(query: str, limit: int = 5, agent: str = None, where: dict = None):
     """Combine vector similarity + BM25 keyword search."""
     col = get_collection()
 
     # Build filter
-    where = None
+    search_where = where.copy() if where else None
     if agent:
-        where = {"agent": agent}
+        if search_where is None:
+            search_where = {"agent": agent}
+        else:
+            search_where["agent"] = agent
 
     # Vector search
     results = col.query(
         query_texts=[query],
         n_results=min(limit * 3, 20),  # overfetch for reranking
-        where=where,
+        where=search_where,
         include=["documents", "metadatas", "distances"]
     )
 
@@ -126,7 +131,7 @@ async def health():
 @app.post("/query")
 async def query(req: QueryRequest):
     """Search knowledge base. Called by agent recall tool."""
-    results = hybrid_search(req.query, limit=req.limit, agent=req.agent)
+    results = hybrid_search(req.query, limit=req.limit, agent=req.agent, where=req.where)
     return {"results": results, "count": len(results)}
 
 @app.post("/remember")
@@ -140,6 +145,8 @@ async def remember(req: RememberRequest):
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tags": ",".join(req.tags) if req.tags else "",
     }
+    if req.metadata:
+        metadata.update(req.metadata)
     col.add(
         documents=[req.content],
         metadatas=[metadata],
