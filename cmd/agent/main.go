@@ -2015,6 +2015,19 @@ func main() {
 			writeSSE(w, sseChunk{Type: "content", Content: cleanedChunk, Done: false})
 			flusher.Flush()
 		}
+		finalContent := full.String()
+		if strings.Contains(finalContent, "<minimax:tool_call>") {
+			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
+				return executeOneToolCall(tc)
+			})
+			if len(postResults) > 0 {
+				hadXMLToolCalls = true
+				full.Reset()
+				full.WriteString(cleanedFinal)
+				writeSSE(w, sseChunk{Type: "replace", Content: cleanedFinal, Done: false})
+				flusher.Flush()
+			}
+		}
 		cleaned := strings.TrimSpace(full.String())
 		if cleaned != "" {
 			messages = append(messages, message{Role: "assistant", Content: cleaned})
