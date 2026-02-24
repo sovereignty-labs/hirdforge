@@ -224,6 +224,7 @@ const dashboardHTML = `<!doctype html>
 </html>`
 
 type (
+	ToolResult       = toolpkg.ToolResult
 	toolCallFunction struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
@@ -304,6 +305,9 @@ var (
 	modelName         string
 	enabledTools      []string
 	thinkTagRE        = regexp.MustCompile(`(?s)<think>.*?</think>`)
+	orphanThinkRe     = regexp.MustCompile(`</?think>`)
+	xmlToolCallRe     = regexp.MustCompile(`(?s)<minimax:tool_call>\s*<invoke name="([^"]+)">(.*?)</invoke>\s*</minimax:tool_call>`)
+	xmlParamRe        = regexp.MustCompile(`<parameter name="([^"]+)">([^<]*)</parameter>`)
 	minimaxToolCallRE = regexp.MustCompile(`(?s)<minimax:tool_call>(.*?)</minimax:tool_call>`)
 
 	metricsRequestsTotal      int64
@@ -615,7 +619,9 @@ func incError(msg string, err error, fields map[string]interface{}) {
 }
 
 func stripThinkTags(s string) string {
-	return thinkTagRE.ReplaceAllString(s, "")
+	s = thinkTagRE.ReplaceAllString(s, "")
+	s = orphanThinkRe.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
 }
 
 func parseMiniMaxToolCalls(content string) ([]toolCall, string) {
@@ -665,6 +671,53 @@ func parseMiniMaxToolCalls(content string) ([]toolCall, string) {
 	}
 	cleaned := minimaxToolCallRE.ReplaceAllString(content, "")
 	return calls, cleaned
+}
+
+func extractAndExecuteXMLToolCalls(content string, execute func(toolCall) ToolResult) (cleanedContent string, toolResults []ToolResult) {
+	matches := xmlToolCallRe.FindAllStringSubmatch(content, -1)
+	if len(matches) == 0 {
+		return content, nil
+	}
+	calls := make([]toolCall, 0, len(matches))
+	for i, m := range matches {
+		if len(m) < 3 {
+			return content, nil
+		}
+		toolName := strings.TrimSpace(m[1])
+		if toolName == "" {
+			return content, nil
+		}
+		rawParams := m[2]
+		args := map[string]string{}
+		for _, pm := range xmlParamRe.FindAllStringSubmatch(rawParams, -1) {
+			if len(pm) < 3 {
+				continue
+			}
+			key := strings.TrimSpace(pm[1])
+			if key == "" {
+				continue
+			}
+			args[key] = strings.TrimSpace(pm[2])
+		}
+		argBytes, err := json.Marshal(args)
+		if err != nil {
+			return content, nil
+		}
+		calls = append(calls, toolCall{
+			ID:   fmt.Sprintf("xml_%d", i),
+			Type: "function",
+			Function: toolCallFunction{
+				Name:      toolName,
+				Arguments: string(argBytes),
+			},
+		})
+	}
+	cleaned := xmlToolCallRe.ReplaceAllString(content, "")
+	results := make([]ToolResult, 0, len(calls))
+	for _, tc := range calls {
+		results = append(results, execute(tc))
+	}
+	return cleaned, results
 }
 
 func setLastDuration(d time.Duration) {
@@ -1863,46 +1916,51 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
+		executeOneToolCall := func(tc toolCall) toolpkg.ToolResult {
+			atomic.AddInt64(&toolCalls, 1)
+			atomic.AddInt64(&metricsToolCallsTotal, 1)
+			incToolMetric(tc.Function.Name)
+			args := map[string]interface{}{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				args = map[string]interface{}{"_raw": tc.Function.Arguments}
+			}
+			logJSON("info", "tool called", map[string]interface{}{"tool": tc.Function.Name})
+			writeSSE(w, sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false})
+			flusher.Flush()
+			result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
+			switch tc.Function.Name {
+			case "delegate":
+				result = delegateExec.Execute(args)
+			case "broadcast":
+				result = broadcastExec.Execute(args)
+			default:
+				if t, ok := reg.Get(tc.Function.Name); ok {
+					result = t.Execute(args)
+				}
+			}
+			if result.Error != "" {
+				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error})
+			} else {
+				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
+			}
+			maybeRememberAction(*memoryURL, agentName, sessionID, tc.Function.Name, args, result)
+			writeSSE(w, sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false})
+			flusher.Flush()
+			toolContent := result.Output
+			if result.Error != "" {
+				if toolContent != "" {
+					toolContent = result.Error + "\n" + toolContent
+				} else {
+					toolContent = result.Error
+				}
+			}
+			messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
+			return result
+		}
+
 		executeToolCalls := func(calls []toolCall) {
 			for _, tc := range calls {
-				atomic.AddInt64(&toolCalls, 1)
-				atomic.AddInt64(&metricsToolCallsTotal, 1)
-				incToolMetric(tc.Function.Name)
-				args := map[string]interface{}{}
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-					args = map[string]interface{}{"_raw": tc.Function.Arguments}
-				}
-				logJSON("info", "tool called", map[string]interface{}{"tool": tc.Function.Name})
-				writeSSE(w, sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false})
-				flusher.Flush()
-				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
-				switch tc.Function.Name {
-				case "delegate":
-					result = delegateExec.Execute(args)
-				case "broadcast":
-					result = broadcastExec.Execute(args)
-				default:
-					if t, ok := reg.Get(tc.Function.Name); ok {
-						result = t.Execute(args)
-					}
-				}
-				if result.Error != "" {
-					logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error})
-				} else {
-					logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
-				}
-				maybeRememberAction(*memoryURL, agentName, sessionID, tc.Function.Name, args, result)
-				writeSSE(w, sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false})
-				flusher.Flush()
-				toolContent := result.Output
-				if result.Error != "" {
-					if toolContent != "" {
-						toolContent = result.Error + "\n" + toolContent
-					} else {
-						toolContent = result.Error
-					}
-				}
-				messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
+				_ = executeOneToolCall(tc)
 			}
 		}
 
@@ -1937,23 +1995,62 @@ func main() {
 		}
 
 		var full strings.Builder
+		hadXMLToolCalls := false
 		for chunk := range streamOllama(messages, nil, *inferenceURL, *model, *apiKey) {
-			full.WriteString(chunk)
-			writeSSE(w, sseChunk{Type: "content", Content: chunk, Done: false})
-			flusher.Flush()
-		}
-		cleaned := stripThinkTags(full.String())
-		if strings.Contains(cleaned, "<minimax:tool_call>") {
-			mmCalls, mmCleaned := parseMiniMaxToolCalls(cleaned)
-			if len(mmCalls) > 0 {
-				messages = append(messages, message{Role: "assistant", Content: mmCleaned, ToolCalls: mmCalls})
-				executeToolCalls(mmCalls)
-				cleaned = mmCleaned
+			sanitized := stripThinkTags(chunk)
+			if sanitized == "" {
+				continue
 			}
-		}
-		if cleaned != full.String() {
-			writeSSE(w, sseChunk{Type: "replace", Content: cleaned, Done: false})
+			cleanedChunk, xmlResults := extractAndExecuteXMLToolCalls(sanitized, func(tc toolCall) ToolResult {
+				return executeOneToolCall(tc)
+			})
+			if len(xmlResults) > 0 {
+				hadXMLToolCalls = true
+			}
+			cleanedChunk = strings.TrimSpace(cleanedChunk)
+			if cleanedChunk == "" {
+				continue
+			}
+			full.WriteString(cleanedChunk)
+			writeSSE(w, sseChunk{Type: "content", Content: cleanedChunk, Done: false})
 			flusher.Flush()
+		}
+		cleaned := strings.TrimSpace(full.String())
+		if cleaned != "" {
+			messages = append(messages, message{Role: "assistant", Content: cleaned})
+		}
+		if hadXMLToolCalls {
+			for i := 0; i < 3; i++ {
+				resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
+				if err != nil {
+					incError("inference continuation after xml tool calls failed", err, nil)
+					break
+				}
+				if len(resp.Choices) == 0 {
+					break
+				}
+				assistant := resp.Choices[0].Message
+				assistant.Content = stripThinkTags(assistant.Content)
+				if len(assistant.ToolCalls) > 0 {
+					messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
+					executeToolCalls(assistant.ToolCalls)
+					continue
+				}
+				chunkContent, xmlResults := extractAndExecuteXMLToolCalls(assistant.Content, func(tc toolCall) ToolResult {
+					return executeOneToolCall(tc)
+				})
+				chunkContent = strings.TrimSpace(chunkContent)
+				if chunkContent != "" {
+					full.WriteString(chunkContent)
+					writeSSE(w, sseChunk{Type: "content", Content: chunkContent, Done: false})
+					flusher.Flush()
+					messages = append(messages, message{Role: "assistant", Content: chunkContent})
+				}
+				if len(xmlResults) == 0 {
+					break
+				}
+			}
+			cleaned = strings.TrimSpace(full.String())
 		}
 		sessionsMu.Lock()
 		sessions[sessionID] = append(sessions[sessionID], message{Role: "user", Content: req.Content}, message{Role: "assistant", Content: cleaned})
