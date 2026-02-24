@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -293,6 +296,7 @@ type (
 
 var sessionsMu sync.Mutex
 var sessions = map[string][]message{}
+var seenSessions = map[string]bool{}
 var (
 	startTime         = time.Now()
 	requestCount      int64
@@ -310,6 +314,10 @@ var (
 	toolMetricMu              sync.Mutex
 	metricsToolCallsByTool    = map[string]*int64{}
 )
+
+const compactionSystemPrompt = `You are a context compactor. Summarize the provided conversation segment into concise, factual bullet points.
+Preserve decisions, concrete outputs, file names, commands, and unresolved follow-ups.
+Do not add new facts. Keep it short and useful for future continuation.`
 
 type delegateTool struct {
 	peers map[string]string
@@ -994,7 +1002,7 @@ func writeSSE(w http.ResponseWriter, payload sseChunk) {
 	fmt.Fprintf(w, "data: %s\n\n", b)
 }
 
-func trimMessages(msgs []message, maxPairs int) []message {
+func dropOldestPairs(msgs []message, maxPairs int) []message {
 	if maxPairs == 0 || len(msgs) <= 1 {
 		return msgs
 	}
@@ -1009,6 +1017,443 @@ func trimMessages(msgs []message, maxPairs int) []message {
 	trimmed = append(trimmed, msgs[start:]...)
 	logJSON("info", "context trimmed", map[string]interface{}{"kept": len(trimmed), "total": len(msgs)})
 	return trimmed
+}
+
+func dropOldestHistoryPairs(history []message, maxPairs int) []message {
+	if len(history) == 0 || maxPairs == 0 {
+		return history
+	}
+	msgs := append([]message{{Role: "system", Content: "_"}}, history...)
+	trimmed := dropOldestPairs(msgs, maxPairs)
+	if len(trimmed) <= 1 {
+		return nil
+	}
+	return append([]message(nil), trimmed[1:]...)
+}
+
+func buildSessionBootstrapContext(memoryURL, agentName, toolsFile, playbookFile string, persona *personaRepo) string {
+	var blocks []string
+	if b := fetchRecentMemoryBlocks(memoryURL, agentName); b != "" {
+		blocks = append(blocks, b)
+	}
+	if persona != nil {
+		if b := loadPersonaSessionContext(persona); b != "" {
+			blocks = append(blocks, b)
+		}
+	} else {
+		if b := readContextFileBlock("## Tools Reference", toolsFile); b != "" {
+			blocks = append(blocks, b)
+		}
+		if b := readContextFileBlock("## Playbook Reference", playbookFile); b != "" {
+			blocks = append(blocks, b)
+		}
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+	return "Use this reference context for this session.\n\n" + strings.Join(blocks, "\n\n")
+}
+
+func readContextFileBlock(title, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logJSON("warn", "failed reading context file", map[string]interface{}{"path": path, "error": err.Error()})
+		}
+		return ""
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return ""
+	}
+	return title + "\n" + content
+}
+
+func fetchMemoryCollectionBlock(memoryURL, collection, title string) string {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(collection) == "" {
+		return ""
+	}
+	payload := map[string]interface{}{
+		"collection": collection,
+		"query":      "recent task context summary",
+		"n_results":  5,
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var out struct {
+		Results []struct {
+			Content    string  `json:"content"`
+			Similarity float64 `json:"similarity"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ""
+	}
+	lines := make([]string, 0, len(out.Results))
+	for _, r := range out.Results {
+		if r.Similarity <= 0.5 {
+			continue
+		}
+		content := strings.TrimSpace(r.Content)
+		if content == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- [%.2f] %s", r.Similarity, content))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return title + "\n" + strings.Join(lines, "\n")
+}
+
+func fetchRecentMemoryBlocks(memoryURL, agentName string) string {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" {
+		return ""
+	}
+	blocks := make([]string, 0, 2)
+	if b := fetchMemoryCollectionBlock(memoryURL, fmt.Sprintf("%s-memory", agentName), "## Recent Memory"); b != "" {
+		blocks = append(blocks, b)
+	}
+	if b := fetchMemoryCollectionBlock(memoryURL, "warband-context", "## Warband Context"); b != "" {
+		blocks = append(blocks, b)
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func summarizeForCompaction(ctx context.Context, segment []message, inferenceURL, model, apiKey string) (string, error) {
+	var transcript strings.Builder
+	for _, m := range segment {
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
+		transcript.WriteString(strings.ToUpper(m.Role))
+		transcript.WriteString(": ")
+		transcript.WriteString(m.Content)
+		transcript.WriteString("\n\n")
+	}
+	resp, err := callOllamaNonStreamingWithContext(ctx, []message{
+		{Role: "system", Content: compactionSystemPrompt},
+		{Role: "user", Content: transcript.String()},
+	}, nil, inferenceURL, model, apiKey)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("empty compaction response")
+	}
+	summary := strings.TrimSpace(stripThinkTags(resp.Choices[0].Message.Content))
+	if summary == "" {
+		return "", fmt.Errorf("empty compaction summary")
+	}
+	return summary, nil
+}
+
+func compactHistory(sessionID string, history []message, maxContext, threshold, batch int, inferenceURL, model, apiKey, memoryURL, agentName string) []message {
+	if maxContext <= 0 {
+		return history
+	}
+	if threshold <= 0 {
+		threshold = maxContext - 4
+	}
+	if threshold < 1 {
+		threshold = 1
+	}
+	if batch <= 0 {
+		batch = maxContext / 2
+		if batch > 8 {
+			batch = 8
+		}
+		if batch < 1 {
+			batch = 1
+		}
+	}
+	pairs := len(history) / 2
+	if pairs < threshold {
+		return history
+	}
+	segmentSize := batch * 2
+	if len(history) < segmentSize {
+		return history
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	summary, err := summarizeForCompaction(ctx, history[:segmentSize], inferenceURL, model, apiKey)
+	if err != nil {
+		logJSON("warn", "context compaction failed; falling back to truncation", map[string]interface{}{"error": err.Error()})
+		return dropOldestHistoryPairs(history, maxContext)
+	}
+	marker := message{
+		Role:    "assistant",
+		Content: fmt.Sprintf("[Context compacted]\n%s", summary),
+	}
+	compacted := append([]message{marker}, history[segmentSize:]...)
+	storeCompactionSummary(memoryURL, agentName, sessionID, summary, batch)
+	logJSON("info", "context compacted", map[string]interface{}{"session_id": sessionID, "pairs_compacted": batch})
+	return compacted
+}
+
+func storeCompactionSummary(memoryURL, agentName, sessionID, summary string, batch int) {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || strings.TrimSpace(summary) == "" {
+		return
+	}
+	payload := map[string]interface{}{
+		"agent":      agentName,
+		"collection": fmt.Sprintf("%s-memory", agentName),
+		"content":    fmt.Sprintf("Compaction summary for session %s:\n%s", sessionID, summary),
+		"metadata": map[string]interface{}{
+			"agent":       agentName,
+			"type":        "compaction",
+			"session_id":  sessionID,
+			"batch_pairs": batch,
+			"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
+}
+
+func agentNameFromSoulPath(path string) string {
+	base := filepath.Base(strings.TrimSpace(path))
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	base = strings.TrimSuffix(base, "-soul")
+	base = strings.TrimSpace(base)
+	if base == "" || strings.EqualFold(base, "soul") {
+		return ""
+	}
+	return base
+}
+
+type personaRepo struct {
+	URL       string
+	Root      string
+	AgentName string
+}
+
+func syncPersonaRepo(repoURL, dst string) error {
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".git")); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", "-C", dst, "pull", "--ff-only")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git pull failed: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+	_ = os.RemoveAll(dst)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth=1", repoURL, dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git clone failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func initPersonaRepo(repoURL, agentName string) (*personaRepo, error) {
+	repoURL = strings.TrimSpace(repoURL)
+	if repoURL == "" {
+		return nil, nil
+	}
+	if strings.TrimSpace(agentName) == "" {
+		return nil, fmt.Errorf("--agent-name is required when --persona-repo is set")
+	}
+	dst := filepath.Join(os.TempDir(), "valhalla-personas", agentName)
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return nil, err
+	}
+	if err := syncPersonaRepo(repoURL, dst); err != nil {
+		return nil, err
+	}
+	return &personaRepo{URL: repoURL, Root: dst, AgentName: agentName}, nil
+}
+
+func loadPersonaSoul(repo *personaRepo) (string, error) {
+	if repo == nil {
+		return "", fmt.Errorf("persona repo not configured")
+	}
+	path := filepath.Join(repo.Root, repo.AgentName, "soul.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	content := strings.TrimSpace(string(data))
+	if content == "" {
+		return "", fmt.Errorf("empty soul at %s", path)
+	}
+	return content, nil
+}
+
+func collectSharedPersonaFiles(repo *personaRepo) []string {
+	if repo == nil {
+		return nil
+	}
+	candidates := []string{
+		filepath.Join(repo.Root, "shared"),
+		filepath.Join(repo.Root, repo.AgentName, "shared"),
+	}
+	var files []string
+	seen := map[string]bool{}
+	for _, root := range candidates {
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d == nil || d.IsDir() {
+				return nil
+			}
+			ext := strings.ToLower(filepath.Ext(d.Name()))
+			if ext != ".md" && ext != ".txt" {
+				return nil
+			}
+			if seen[path] {
+				return nil
+			}
+			seen[path] = true
+			files = append(files, path)
+			return nil
+		})
+	}
+	sort.Strings(files)
+	return files
+}
+
+func loadPersonaSessionContext(repo *personaRepo) string {
+	if repo == nil {
+		return ""
+	}
+	var blocks []string
+	agentDir := filepath.Join(repo.Root, repo.AgentName)
+	if b := readContextFileBlock("## Tools Reference", filepath.Join(agentDir, "tools.md")); b != "" {
+		blocks = append(blocks, b)
+	}
+	if b := readContextFileBlock("## Playbook Reference", filepath.Join(agentDir, "playbook.md")); b != "" {
+		blocks = append(blocks, b)
+	}
+	sharedFiles := collectSharedPersonaFiles(repo)
+	if len(sharedFiles) > 0 {
+		var sharedBlocks []string
+		for _, p := range sharedFiles {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			content := strings.TrimSpace(string(data))
+			if content == "" {
+				continue
+			}
+			rel := p
+			if r, err := filepath.Rel(repo.Root, p); err == nil {
+				rel = filepath.ToSlash(r)
+			}
+			sharedBlocks = append(sharedBlocks, "### "+rel+"\n"+content)
+		}
+		if len(sharedBlocks) > 0 {
+			blocks = append(blocks, "## Shared Context\n"+strings.Join(sharedBlocks, "\n\n"))
+		}
+	}
+	if len(blocks) == 0 {
+		return ""
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func maybeRememberAction(memoryURL, agentName, sessionID, toolName string, args map[string]interface{}, result toolpkg.ToolResult) {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || result.Error != "" {
+		return
+	}
+	if toolName != "git-commit" && toolName != "write" && toolName != "exec" {
+		return
+	}
+	outLower := strings.ToLower(result.Output)
+	keywords := []string{"pull request", "created", "pushed", "merged", "committed"}
+	matched := false
+	for _, kw := range keywords {
+		if strings.Contains(outLower, kw) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return
+	}
+	argsJSON, _ := json.Marshal(args)
+	argsStr := string(argsJSON)
+	if len(argsStr) > 180 {
+		argsStr = argsStr[:180] + "..."
+	}
+	snippet := strings.TrimSpace(result.Output)
+	if len(snippet) > 240 {
+		snippet = snippet[:240] + "..."
+	}
+	content := fmt.Sprintf("%s args=%s result=%s", toolName, argsStr, snippet)
+	go func() {
+		payload := map[string]interface{}{
+			"agent":      agentName,
+			"collection": fmt.Sprintf("%s-memory", agentName),
+			"content":    content,
+			"metadata": map[string]interface{}{
+				"agent":      agentName,
+				"type":       "action_log",
+				"tool":       toolName,
+				"session_id": sessionID,
+				"timestamp":  time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		body, _ := json.Marshal(payload)
+		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return
+		}
+		_ = resp.Body.Close()
+	}()
+}
+
+func validateGiteaHMAC(secret string, body []byte, provided string) bool {
+	secret = strings.TrimSpace(secret)
+	provided = strings.TrimSpace(provided)
+	if secret == "" || provided == "" {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	expected := fmt.Sprintf("%x", mac.Sum(nil))
+	return hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(provided)))
 }
 
 func statusPayload() map[string]interface{} {
@@ -1110,14 +1555,21 @@ func main() {
 	model := flag.String("model", "qwen3:30b", "model name")
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
+	compactionThreshold := flag.Int("compaction-threshold", 0, "pair threshold to trigger context compaction (default: max-context-4)")
+	compactionBatch := flag.Int("compaction-batch", 0, "number of oldest pairs to compact at once (default: min(8,max-context/2))")
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
 	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
 	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
 	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
+	agentNameFlag := flag.String("agent-name", "", "agent name override (defaults to soul filename)")
+	personaRepoFlag := flag.String("persona-repo", "", "git URL of persona repository")
+	toolsFile := flag.String("tools-file", "/etc/valhalla/tools.md", "path to tools context file")
+	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
+	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for /webhook/gitea")
 	flag.Parse()
 
 	if *hunterMode {
@@ -1128,12 +1580,6 @@ func main() {
 		}
 		os.Exit(0)
 	}
-
-	soulBytes, err := os.ReadFile(*soulPath)
-	if err != nil {
-		die("failed to read soul file", err)
-	}
-	soul := string(soulBytes)
 
 	if err := os.MkdirAll(*workspace, 0755); err != nil {
 		die("failed to create workspace", err)
@@ -1147,7 +1593,40 @@ func main() {
 		peerNames = append(peerNames, name)
 	}
 	sort.Strings(peerNames)
-	agentName := agentNameFromSoul(soul)
+	agentName := strings.TrimSpace(*agentNameFlag)
+	if agentName == "" {
+		agentName = agentNameFromSoulPath(*soulPath)
+	}
+	var persona *personaRepo
+	if strings.TrimSpace(*personaRepoFlag) != "" {
+		if strings.TrimSpace(agentName) == "" {
+			die("persona repo setup failed", fmt.Errorf("agent name could not be derived; set --agent-name"))
+		}
+		persona, err = initPersonaRepo(*personaRepoFlag, agentName)
+		if err != nil {
+			die("persona repo setup failed", err)
+		}
+	}
+
+	var soul string
+	if persona != nil {
+		soul, err = loadPersonaSoul(persona)
+		if err != nil {
+			die("failed to load persona soul", err)
+		}
+	} else {
+		soulBytes, readErr := os.ReadFile(*soulPath)
+		if readErr != nil {
+			die("failed to read soul file", readErr)
+		}
+		soul = string(soulBytes)
+		if agentName == "" {
+			agentName = agentNameFromSoul(soul)
+		}
+	}
+	if agentName == "" {
+		agentName = "valhalla-agent"
+	}
 
 	reg := toolpkg.NewRegistry()
 	delegateExec := &delegateTool{peers: peers}
@@ -1292,6 +1771,37 @@ func main() {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		_, _ = io.WriteString(w, metricsText())
 	})
+	mux.HandleFunc("/webhook/gitea", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+		if err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(*webhookSecret) == "" {
+			http.Error(w, "webhook secret not configured", http.StatusServiceUnavailable)
+			return
+		}
+		sig := r.Header.Get("X-Gitea-Signature")
+		if !validateGiteaHMAC(*webhookSecret, body, sig) {
+			incError("webhook signature validation failed", fmt.Errorf("invalid signature"), map[string]interface{}{
+				"event":    r.Header.Get("X-Gitea-Event"),
+				"delivery": r.Header.Get("X-Gitea-Delivery"),
+			})
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		logJSON("info", "gitea webhook received", map[string]interface{}{
+			"event":       r.Header.Get("X-Gitea-Event"),
+			"delivery":    r.Header.Get("X-Gitea-Delivery"),
+			"payload_len": len(body),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
 	mux.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1319,9 +1829,30 @@ func main() {
 
 		sessionsMu.Lock()
 		history := append([]message(nil), sessions[sessionID]...)
+		firstMessage := !seenSessions[sessionID]
+		if firstMessage {
+			seenSessions[sessionID] = true
+		}
 		sessionsMu.Unlock()
-		messages := append(append([]message{{Role: "system", Content: soul}}, history...), message{Role: "user", Content: req.Content})
-		messages = trimMessages(messages, *maxContext)
+		history = compactHistory(sessionID, history, *maxContext, *compactionThreshold, *compactionBatch, *inferenceURL, *model, *apiKey, *memoryURL, agentName)
+		sessionsMu.Lock()
+		sessions[sessionID] = append([]message(nil), history...)
+		sessionsMu.Unlock()
+		bootstrapContext := ""
+		if firstMessage {
+			if persona != nil {
+				if err := syncPersonaRepo(persona.URL, persona.Root); err != nil {
+					logJSON("warn", "persona repo refresh failed", map[string]interface{}{"error": err.Error()})
+				}
+			}
+			bootstrapContext = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, persona)
+		}
+		messages := []message{{Role: "system", Content: soul}}
+		if strings.TrimSpace(bootstrapContext) != "" {
+			messages = append(messages, message{Role: "system", Content: bootstrapContext})
+		}
+		messages = append(messages, history...)
+		messages = append(messages, message{Role: "user", Content: req.Content})
 
 		flusher, ok := w.(http.Flusher)
 		if !ok {
@@ -1360,6 +1891,7 @@ func main() {
 				} else {
 					logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
 				}
+				maybeRememberAction(*memoryURL, agentName, sessionID, tc.Function.Name, args, result)
 				writeSSE(w, sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false})
 				flusher.Flush()
 				toolContent := result.Output
