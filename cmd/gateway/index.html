@@ -294,8 +294,8 @@ const ChatBubble = ({msg}) => {
         <div style={{padding:"12px 16px",overflow:"hidden",background:isSelf?"linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.03))":"linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01))",border:`1px solid ${isSelf?"rgba(16,185,129,0.12)":"rgba(255,255,255,0.04)"}`,position:"relative"}}>
           <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${c}15,transparent)`}} />
           <span style={{fontSize:13,color:"rgba(255,255,255,0.75)",lineHeight:1.7,display:"block",whiteSpace:"pre-wrap",wordBreak:"break-word",overflowWrap:"anywhere"}}>{msg.text}</span>
-          {msg.toolCalls&&msg.toolCalls.map((tc,i)=><ToolCallChip key={`tc${i}`} tool={tc.tool} args={tc.args} />)}
-          {msg.toolResults&&msg.toolResults.map((tr,i)=><ToolResultChip key={`tr${i}`} tool={tr.tool} result={tr.result} />)}
+          
+          
         </div>
       </div>
     </div>
