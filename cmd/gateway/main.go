@@ -1397,6 +1397,24 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
+		// SSE keepalive - prevents browser/proxy from dropping idle connections
+		keepaliveDone := make(chan struct{})
+		defer close(keepaliveDone)
+		go func() {
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					fmt.Fprintf(w, ": keepalive\n\n")
+					flusher.Flush()
+				case <-keepaliveDone:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
 
 		reader := bufio.NewReader(uResp.Body)
 		var contentBuf strings.Builder
