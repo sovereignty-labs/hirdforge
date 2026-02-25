@@ -33,10 +33,58 @@
   @keyframes rec-pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
   @keyframes msg-slide-in { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
   @keyframes event-fade-in { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:translateX(0)} }
+  @keyframes forge-pulse { 0%,100%{box-shadow:0 0 8px rgba(34,211,238,0.4)} 50%{box-shadow:0 0 16px rgba(34,211,238,0.7)} }
 
   .grain { position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:0.025;mix-blend-mode:overlay; }
   .scanlines { position:fixed;inset:0;pointer-events:none;z-index:9998;
     background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.025) 2px,rgba(0,0,0,0.025) 4px); }
+
+  /* Scroll fix: min-height:0 for flex containers */
+  .messages-container { min-height: 0; display: flex; flex-direction: column; }
+  .messages-wrapper { min-height: 0; display: flex; flex-direction: column; flex: 1; overflow: hidden; }
+  .messages-scroll { min-height: 0; flex: 1; overflow-y: auto; scroll-behavior: smooth; }
+  
+  /* Message bubble word wrap */
+  .chat-bubble-text { overflow-wrap: break-word; word-wrap: break-word; word-break: break-word; }
+  
+  /* Forging indicator */
+  .forging-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: rgba(34,211,238,0.08);
+    border: 1px solid rgba(34,211,238,0.2);
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #22d3ee;
+    animation: forge-pulse 1.5s ease-in-out infinite;
+  }
+  
+  /* Collapsible activity stream */
+  .activity-stream details {
+    margin-top: 8px;
+  }
+  .activity-stream summary {
+    cursor: pointer;
+    padding: 6px 10px;
+    background: rgba(34,211,238,0.06);
+    border: 1px solid rgba(34,211,238,0.12);
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #22d3ee;
+    letter-spacing: 0.08em;
+    outline: none;
+    user-select: none;
+  }
+  .activity-stream summary::-webkit-details-marker { display: none; }
+  .activity-stream summary:hover { background: rgba(34,211,238,0.1); }
+  .activity-stream-content {
+    margin-top: 4px;
+    padding-left: 4px;
+  }
 </style>
 </head>
 <body>
@@ -278,11 +326,24 @@ const ToolCallChip = ({tool,args}) => (<div style={{display:"flex",alignItems:"c
 
 const ToolResultChip = ({tool,result}) => (<div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:2,background:"rgba(52,211,153,0.04)",border:"1px solid rgba(52,211,153,0.10)",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",maxWidth:"100%",overflow:"hidden",borderRadius:4}}><span style={{color:"#34d399",fontWeight:700,fontSize:9,letterSpacing:"0.1em"}}>RESULT</span><span style={{color:"rgba(255,255,255,0.4)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{typeof result==='string'?result:JSON.stringify(result)}</span></div>);
 
+// Forging Indicator Component
+const ForgingIndicator = ({count = 0}) => {
+  if (count === 0) return null;
+  return React.createElement('div', { className: 'forging-indicator' },
+    React.createElement('span', { style: { animation: 'spin 1s linear infinite' } }, '⚒'),
+    React.createElement('span', null, `Forging... ${count} tool call${count !== 1 ? 's' : ''}`)
+  );
+};
+
 const ChatBubble = ({msg}) => {
   const isSelf=msg.from==="kit"; const c=AGENT_COLORS[msg.from]||"#818cf8";
   const shouldAnimate = !msg.streaming;
   const elRef=useRef(null); const [animated,setAnimated]=useState(!shouldAnimate);
   useEffect(()=>{if(!animated&&elRef.current){const t=setTimeout(()=>setAnimated(true),400);return()=>clearTimeout(t);}},[]);
+  
+  const toolCallCount = (msg.toolCalls || []).length;
+  const hasToolActivity = toolCallCount > 0 || (msg.toolResults || []).length > 0;
+  
   return (
     <div ref={elRef} style={{display:"flex",gap:12,maxWidth:"85%",overflow:"hidden",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:!animated?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1) forwards":"none"}}>
       <AgentAvatar agent={msg.agent} size={28} />
@@ -293,9 +354,26 @@ const ChatBubble = ({msg}) => {
         </div>
         <div style={{padding:"12px 16px",overflow:"hidden",background:isSelf?"linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.03))":"linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01))",border:`1px solid ${isSelf?"rgba(16,185,129,0.12)":"rgba(255,255,255,0.04)"}`,position:"relative"}}>
           <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${c}15,transparent)`}} />
-          <span style={{fontSize:13,color:"rgba(255,255,255,0.75)",lineHeight:1.7,display:"block",whiteSpace:"pre-wrap",wordBreak:"break-word",overflowWrap:"anywhere"}}>{msg.text}</span>
           
+          {/* Forging indicator - show when streaming */}
+          {msg.streaming && React.createElement(ForgingIndicator, { count: toolCallCount })}
           
+          <span className="chat-bubble-text" style={{fontSize:13,color:"rgba(255,255,255,0.75)",lineHeight:1.7,display:"block",whiteSpace:"pre-wrap",wordBreak:"break-word",overflowWrap:"break-word"}}>{msg.text}</span>
+          
+          {/* Collapsible activity stream for tool calls/results */}
+          {hasToolActivity && React.createElement('div', { className: 'activity-stream' },
+            React.createElement('details', { open: false },
+              React.createElement('summary', null, `⚒ Forging — ${toolCallCount} tool call${toolCallCount !== 1 ? 's' : ''}`),
+              React.createElement('div', { className: 'activity-stream-content' },
+                (msg.toolCalls || []).map((tc, i) => 
+                  React.createElement(ToolCallChip, { key: `tc-${i}`, tool: tc.tool, args: tc.args })
+                ),
+                (msg.toolResults || []).map((tr, i) => 
+                  React.createElement(ToolResultChip, { key: `tr-${i}`, tool: tr.tool, result: tr.result })
+                )
+              )
+            )
+          )}
         </div>
       </div>
     </div>
@@ -369,7 +447,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
 
   return (
     <div style={{display:"grid",gridTemplateColumns:"1fr 420px",height:"100%"}}>
-      <div style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",height:"100%",minHeight:0}}>
+      <div className="messages-wrapper" style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",height:"100%"}}>
         <div style={{display:"flex",alignItems:"center",gap:0,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.15)",flexShrink:0,flexWrap:"wrap"}}>
           {agents.map(a=>{const ac=AGENT_COLORS[a.id];const sel=target===a.id;return(
             <button key={a.id} onClick={()=>setTarget(a.id)} style={{display:"flex",alignItems:"center",gap:6,padding:"10px 16px",background:sel?`${ac}08`:"transparent",border:"none",borderBottom:sel?`2px solid ${ac}`:"2px solid transparent",cursor:"pointer",transition:"all 0.15s"}}>
@@ -385,7 +463,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
           <ActionBtn label="Clear" icon="⌫" color="#ef4444" small onClick={onClearHistory} />
           <Badge text={ta.model} color={tc} /><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",fontFamily:"'IBM Plex Mono',monospace"}}>{ta.ping_ms?`${ta.ping_ms}ms`:"—"}</span>
         </div>
-        <div ref={messagesEl} style={{flex:1,overflowY:"auto",scrollBehavior:"smooth",padding:"20px",display:"flex",flexDirection:"column",gap:20,minHeight:0}}>
+        <div className="messages-scroll" ref={messagesEl} style={{flex:1,overflowY:"auto",scrollBehavior:"smooth",padding:"20px",display:"flex",flexDirection:"column",gap:20}}>
           {chatHistory.length===0&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",gap:12,opacity:0.3}}><span style={{fontSize:32,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc}}>⚔</span><span style={{fontSize:12,color:"rgba(255,255,255,0.3)"}}>Command the warband</span></div>}
           {chatHistory.map((m,i)=><ChatBubble key={i} msg={m} />)}
           {sending&&chatHistory.length>0&&chatHistory[chatHistory.length-1].text===""&&!(chatHistory[chatHistory.length-1].toolCalls||[]).length&&(
@@ -403,7 +481,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
         </div>
       </div>
       {/* EVENT STREAM */}
-      <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.2)",height:"100%",minHeight:0}}>
+      <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.2)",height:"100%"}}>
         <div style={{padding:"10px 12px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
             <span style={{fontSize:10,fontWeight:700,letterSpacing:"0.14em",color:"rgba(255,255,255,0.25)",textTransform:"uppercase"}}>Sessions</span>
@@ -434,7 +512,7 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
             <div key={s.l} style={{padding:"10px 12px",background:"rgba(0,0,0,0.15)",textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.val}</div><div style={{fontSize:8,color:"rgba(255,255,255,0.2)",letterSpacing:"0.14em",marginTop:2}}>{s.l}</div></div>
           ))}
         </div>
-        <div style={{flex:1,overflowY:"auto",minHeight:0}}>{events.length===0?<div style={{padding:20,textAlign:"center",color:"rgba(255,255,255,0.12)",fontSize:11}}>Waiting for events...</div>:events.map((e,i)=><EventEntry key={i} event={e} idx={i} />)}</div>
+        <div style={{flex:1,overflowY:"auto"}}>{events.length===0?<div style={{padding:20,textAlign:"center",color:"rgba(255,255,255,0.12)",fontSize:11}}>Waiting for events...</div>:events.map((e,i)=><EventEntry key={i} event={e} idx={i} />)}</div>
       </div>
     </div>
   );
@@ -501,7 +579,7 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
   }, [k8sEvents, commits]);
 
   return (
-    <div style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0}}>
+    <div style={{display:"flex",flexDirection:"column",height:"100%"}}>
       {logPod && <LogModal podName={logPod} onClose={()=>setLogPod(null)} />}
       {/* METRICS */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,padding:"16px 18px",flexShrink:0}}>
@@ -512,7 +590,7 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
         <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
       </div>
       {/* MAIN */}
-      <div style={{display:"grid",gridTemplateColumns:"1fr 380px",flex:1,minHeight:0}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 380px",flex:1}}>
         {/* LEFT */}
         <div style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto",padding:"0 18px 18px"}}>
           {/* NODES */}
@@ -561,13 +639,13 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
           </div>
         </div>
         {/* RIGHT — Activity + Controls */}
-        <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.15)",overflow:"auto",minHeight:0}}>
-          <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0}}>
+        <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.15)",overflow:"auto"}}>
+          <div style={{flex:1,display:"flex",flexDirection:"column"}}>
             <div style={{padding:"14px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <span style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)"}}>Activity Feed</span>
               <span style={{fontSize:10,color:"rgba(255,255,255,0.1)",fontFamily:"'IBM Plex Mono',monospace"}}>{activity.length}</span>
             </div>
-            <div style={{flex:1,overflowY:"auto",minHeight:0}}>
+            <div style={{flex:1,overflowY:"auto"}}>
               {activity.map((a,i)=>{const colors={git:"#34d399",k8s:"#818cf8",warning:"#fbbf24"};const c=colors[a.type]||"#6b7280";return(
                 <div key={i} style={{display:"flex",gap:8,padding:"8px 16px",borderBottom:"1px solid rgba(255,255,255,0.02)",position:"relative"}}>
                   <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:`${c}25`}} />
@@ -743,7 +821,7 @@ function App() {
         <Tab active={tab==="fleet"} label="Warriors" count={String(agents.length)} onClick={()=>setTab("fleet")} />
         <Tab active={tab==="realm"} label="Realm" onClick={()=>setTab("realm")} />
       </div>
-      <div style={{flex:1,overflow:"hidden",minHeight:0}}>
+      <div style={{flex:1,overflow:"hidden"}}>
         {tab==="fleet"&&<FleetView agents={agents} selected={selected} setSelected={setSelected} />}
         {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} />}
         {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} sessionId={currentSessionId} setSessionId={setCurrentSessionId} sessionItems={sessionItems} onLoadSession={loadSession} onNewConversation={newConversation} onClearHistory={clearHistory} onEmergencyStop={emergencyStop} />}
