@@ -306,7 +306,7 @@ var (
 	enabledTools      []string
 	thinkTagRE        = regexp.MustCompile(`(?s)<think>.*?</think>`)
 	orphanThinkRe     = regexp.MustCompile(`</?think>`)
-	xmlToolCallRe     = regexp.MustCompile(`(?s)<minimax:tool_call>\s*<invoke name="([^"]+)">(.*?)</invoke>\s*</minimax:tool_call>`)
+	xmlToolCallRe     = regexp.MustCompile(`(?s)<minimax:tool_call>\s*<invoke\s*name="([^"]+)">(.*?)</invoke>\s*</minimax:tool_call>`)
 	xmlParamRe        = regexp.MustCompile(`<parameter name="([^"]+)">([^<]*)</parameter>`)
 	minimaxToolCallRE = regexp.MustCompile(`(?s)<minimax:tool_call>(.*?)</minimax:tool_call>`)
 
@@ -629,7 +629,7 @@ func parseMiniMaxToolCalls(content string) ([]toolCall, string) {
 	if len(matches) == 0 {
 		return nil, content
 	}
-	invokeRE := regexp.MustCompile(`(?s)<invoke\s+name="([^"]+)">`)
+	invokeRE := regexp.MustCompile(`(?s)<invoke\s*name="([^"]+)">`)
 	paramRE := regexp.MustCompile(`(?s)<parameter\s+name="([^"]+)">(.*?)</parameter>`)
 	calls := make([]toolCall, 0, len(matches))
 	for i, m := range matches {
@@ -2000,8 +2000,32 @@ func main() {
 		var full strings.Builder
 		hadXMLToolCalls := false
 		var xmlToolResults []string
+		insideThink := false
 		for chunk := range streamOllama(messages, nil, *inferenceURL, *model, *apiKey) {
-			sanitized := stripThinkTags(chunk)
+			// Process chunk character by character for think tag boundaries
+			cleaned := ""
+			combined := chunk
+			if insideThink {
+				if idx := strings.Index(combined, "</think>"); idx >= 0 {
+					insideThink = false
+					combined = combined[idx+len("</think>"):]
+				} else {
+					continue // still inside think block, skip entire chunk
+				}
+			}
+			if idx := strings.Index(combined, "<think>"); idx >= 0 {
+				cleaned = combined[:idx]
+				insideThink = true
+				if end := strings.Index(combined[idx:], "</think>"); end >= 0 {
+					insideThink = false
+					cleaned += combined[idx+end+len("</think>"):]
+				}
+			} else {
+				cleaned = combined
+			}
+			// Also strip orphan tags
+			cleaned = orphanThinkRe.ReplaceAllString(cleaned, "")
+			sanitized := strings.TrimSpace(cleaned)
 			if sanitized == "" {
 				continue
 			}
