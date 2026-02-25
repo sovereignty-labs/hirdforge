@@ -1954,7 +1954,9 @@ func main() {
 					toolContent = result.Error
 				}
 			}
-			messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
+			if !strings.HasPrefix(tc.ID, "xml_") && !strings.HasPrefix(tc.ID, "mm_") {
+				messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
+			}
 			return result
 		}
 
@@ -1996,13 +1998,23 @@ func main() {
 
 		var full strings.Builder
 		hadXMLToolCalls := false
+		var xmlToolResults []string
 		for chunk := range streamOllama(messages, nil, *inferenceURL, *model, *apiKey) {
 			sanitized := stripThinkTags(chunk)
 			if sanitized == "" {
 				continue
 			}
 			cleanedChunk, xmlResults := extractAndExecuteXMLToolCalls(sanitized, func(tc toolCall) ToolResult {
-				return executeOneToolCall(tc)
+				result := executeOneToolCall(tc)
+				out := result.Output
+				if result.Error != "" {
+					out = "ERROR: " + result.Error
+				}
+				if len(out) > 500 {
+					out = out[:500] + "...[truncated]"
+				}
+				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+				return result
 			})
 			if len(xmlResults) > 0 {
 				hadXMLToolCalls = true
@@ -2018,7 +2030,16 @@ func main() {
 		finalContent := full.String()
 		if strings.Contains(finalContent, "<minimax:tool_call>") {
 			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
-				return executeOneToolCall(tc)
+				result := executeOneToolCall(tc)
+				out := result.Output
+				if result.Error != "" {
+					out = "ERROR: " + result.Error
+				}
+				if len(out) > 500 {
+					out = out[:500] + "...[truncated]"
+				}
+				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+				return result
 			})
 			if len(postResults) > 0 {
 				hadXMLToolCalls = true
@@ -2032,7 +2053,9 @@ func main() {
 		if cleaned != "" {
 			messages = append(messages, message{Role: "assistant", Content: cleaned})
 		}
-		if hadXMLToolCalls {
+		if hadXMLToolCalls && len(xmlToolResults) > 0 {
+			resultMsg := "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
+			messages = append(messages, message{Role: "user", Content: resultMsg})
 			for i := 0; i < 3; i++ {
 				resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
 				if err != nil {
@@ -2044,13 +2067,29 @@ func main() {
 				}
 				assistant := resp.Choices[0].Message
 				assistant.Content = stripThinkTags(assistant.Content)
+				if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<minimax:tool_call>") {
+					mmCalls, mmCleaned := parseMiniMaxToolCalls(assistant.Content)
+					if len(mmCalls) > 0 {
+						assistant.ToolCalls = mmCalls
+						assistant.Content = mmCleaned
+					}
+				}
 				if len(assistant.ToolCalls) > 0 {
 					messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
 					executeToolCalls(assistant.ToolCalls)
 					continue
 				}
 				chunkContent, xmlResults := extractAndExecuteXMLToolCalls(assistant.Content, func(tc toolCall) ToolResult {
-					return executeOneToolCall(tc)
+					result := executeOneToolCall(tc)
+					out := result.Output
+					if result.Error != "" {
+						out = "ERROR: " + result.Error
+					}
+					if len(out) > 500 {
+						out = out[:500] + "...[truncated]"
+					}
+					xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+					return result
 				})
 				chunkContent = strings.TrimSpace(chunkContent)
 				if chunkContent != "" {
@@ -2062,6 +2101,8 @@ func main() {
 				if len(xmlResults) == 0 {
 					break
 				}
+				resultMsg = "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
+				messages = append(messages, message{Role: "user", Content: resultMsg})
 			}
 			cleaned = strings.TrimSpace(full.String())
 		}
