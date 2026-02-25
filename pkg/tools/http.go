@@ -65,6 +65,16 @@ func (t *HTTPTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: "url is required"}
 	}
 
+	// Normalize in-cluster URLs: downgrade HTTPS to HTTP for .svc addresses.
+	// Most cluster services (like gitea-http.gitea.svc:3000) are plain HTTP,
+	// while LLMs sometimes generate HTTPS URLs.
+	// Keep kubernetes.default.svc on HTTPS for API-server calls.
+	if strings.HasPrefix(urlStr, "https://") &&
+		(strings.Contains(urlStr, ".svc:") || strings.Contains(urlStr, ".svc.cluster.local") || strings.Contains(urlStr, ".svc/")) &&
+		!strings.Contains(urlStr, "kubernetes.default.svc") {
+		urlStr = "http://" + strings.TrimPrefix(urlStr, "https://")
+	}
+
 	method, _ := args["method"].(string)
 	if method == "" {
 		method = "GET"
