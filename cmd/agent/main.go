@@ -1900,10 +1900,11 @@ func main() {
 			}
 			bootstrapContext = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, persona)
 		}
-		messages := []message{{Role: "system", Content: soul}}
+		systemContent := soul
 		if strings.TrimSpace(bootstrapContext) != "" {
-			messages = append(messages, message{Role: "system", Content: bootstrapContext})
+			systemContent = soul + "\n\n" + bootstrapContext
 		}
+		messages := []message{{Role: "system", Content: systemContent}}
 		messages = append(messages, history...)
 		messages = append(messages, message{Role: "user", Content: req.Content})
 
