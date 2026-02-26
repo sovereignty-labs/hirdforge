@@ -4,6 +4,8 @@ on:
     branches:
       - main
 env:
+  REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+  REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
   DOCKER_HOST: tcp://localhost:2375
   REGISTRY: 203.0.113.26:30637/gitea_admin
 jobs:
