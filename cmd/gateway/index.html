@@ -41,17 +41,25 @@
   .scanlines { position:fixed;inset:0;pointer-events:none;z-index:9998;
     background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.025) 2px,rgba(0,0,0,0.025) 4px); }
 
-  /* Scroll fix: Complete flex chain with min-height:0 */
+  /* Scroll fix: Complete flex chain with min-height:0 and height:0 */
   .main-content { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
   .main-content > div:nth-child(3) { min-height: 0; display: flex; flex-direction: column; flex: 1; overflow: hidden; }
   
-  /* Chat container flex chain */
-  .comms-view { display: grid; grid-template-columns: 1fr 420px; height: 100%; min-height: 0; }
+  /* Chat container flex chain - explicit height constraint for scroll */
+  .comms-view { display: grid; grid-template-columns: 1fr 420px; height: 100%; min-height: 0; overflow: hidden; }
   .chat-container { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
-  .messages-wrapper { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .messages-wrapper { 
+    display: flex; 
+    flex-direction: column; 
+    flex: 1; 
+    min-height: 0; 
+    height: 0; /* CRITICAL: Explicit height 0 allows scroll to work */
+    overflow: hidden; 
+  }
   .messages-scroll { 
     flex: 1; 
     min-height: 0; 
+    height: 100%;
     overflow-y: auto; 
     overflow-x: hidden;
     scroll-behavior: smooth;
