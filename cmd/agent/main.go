@@ -2057,7 +2057,7 @@ func main() {
 			}
 			// Also strip orphan tags
 			cleaned = orphanThinkRe.ReplaceAllString(cleaned, "")
-			sanitized := strings.TrimSpace(cleaned)
+			sanitized := cleaned
 			if sanitized == "" {
 				continue
 			}
@@ -2076,7 +2076,6 @@ func main() {
 			if len(xmlResults) > 0 {
 				hadXMLToolCalls = true
 			}
-			cleanedChunk = strings.TrimSpace(cleanedChunk)
 			if cleanedChunk == "" {
 				continue
 			}
@@ -2148,7 +2147,7 @@ func main() {
 					xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
 					return result
 				})
-				chunkContent = strings.TrimSpace(chunkContent)
+				// chunkContent = strings.TrimSpace(chunkContent) // removed: strips OpenAI token spacing
 				if chunkContent != "" {
 					full.WriteString(chunkContent)
 					writeSSE(w, sseChunk{Type: "content", Content: chunkContent, Done: false})
