@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	mcppkg "github.com/kitporath/project_valhalla/pkg/mcp"
 	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
 )
 
@@ -1623,6 +1624,7 @@ func main() {
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for /webhook/gitea")
+	mcpServers := flag.String("mcp-servers", "", "Comma-separated MCP server URLs")
 	flag.Parse()
 
 	if *hunterMode {
@@ -1728,6 +1730,36 @@ func main() {
 	if strings.TrimSpace(*memoryURL) != "" {
 		reg.Register(recallExec)
 		reg.Register(rememberExec)
+	}
+	// MCP tool discovery
+	if *mcpServers != "" {
+		for _, serverURL := range strings.Split(*mcpServers, ",") {
+			serverURL = strings.TrimSpace(serverURL)
+			if serverURL == "" {
+				continue
+			}
+			logJSON("info", "connecting to MCP server", map[string]interface{}{"url": serverURL})
+			client := mcppkg.NewClient(serverURL)
+			if err := client.Initialize(); err != nil {
+				logJSON("warn", "MCP server unreachable, skipping", map[string]interface{}{"url": serverURL, "error": err.Error()})
+				continue
+			}
+			tools, err := client.ListTools()
+			if err != nil {
+				logJSON("warn", "MCP tool discovery failed, skipping", map[string]interface{}{"url": serverURL, "error": err.Error()})
+				continue
+			}
+			for _, td := range tools {
+				mcpTool := mcppkg.NewMCPTool(client, td)
+				// Don't override native tools.
+				if _, exists := reg.Get(td.Name); exists {
+					logJSON("warn", "MCP tool name conflicts with native tool, skipping", map[string]interface{}{"tool": td.Name, "server": serverURL})
+					continue
+				}
+				reg.Register(mcpTool)
+				logJSON("info", "registered MCP tool", map[string]interface{}{"tool": td.Name, "server": serverURL})
+			}
+		}
 	}
 	toolDefs := buildToolDefs(reg)
 	enabledTools = reg.List()
