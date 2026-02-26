@@ -8,6 +8,8 @@
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; overflow: hidden; }
+  /* FIX: Complete flex chain with min-height:0 for proper scrolling */
+  #root { display: flex; flex-direction: column; min-height: 0; }
   body {
     background: radial-gradient(ellipse at 20% 0%, rgba(99,102,241,0.04) 0%, transparent 50%),
                 radial-gradient(ellipse at 80% 100%, rgba(192,132,252,0.03) 0%, transparent 50%),
@@ -39,13 +41,31 @@
   .scanlines { position:fixed;inset:0;pointer-events:none;z-index:9998;
     background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.025) 2px,rgba(0,0,0,0.025) 4px); }
 
-  /* Scroll fix: min-height:0 for flex containers */
-  .messages-container { min-height: 0; display: flex; flex-direction: column; }
-  .messages-wrapper { min-height: 0; display: flex; flex-direction: column; flex: 1; overflow: hidden; }
-  .messages-scroll { min-height: 0; flex: 1; overflow-y: auto; scroll-behavior: smooth; }
+  /* Scroll fix: Complete flex chain with min-height:0 */
+  .main-content { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .main-content > div:nth-child(3) { min-height: 0; display: flex; flex-direction: column; flex: 1; overflow: hidden; }
   
-  /* Message bubble word wrap */
-  .chat-bubble-text { overflow-wrap: break-word; word-wrap: break-word; word-break: break-word; }
+  /* Chat container flex chain */
+  .comms-view { display: grid; grid-template-columns: 1fr 420px; height: 100%; min-height: 0; }
+  .chat-container { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
+  .messages-wrapper { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+  .messages-scroll { 
+    flex: 1; 
+    min-height: 0; 
+    overflow-y: auto; 
+    overflow-x: hidden;
+    scroll-behavior: smooth;
+    display: flex;
+    flex-direction: column;
+  }
+  
+  /* Message bubble word wrap - prevent horizontal overflow */
+  .chat-bubble-text { 
+    overflow-wrap: break-word; 
+    word-wrap: break-word; 
+    word-break: break-word;
+    max-width: 100%;
+  }
   
   /* Forging indicator */
   .forging-indicator {
@@ -611,8 +631,17 @@ const EventEntry = ({event, idx}) => {
 const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending, sessionId, setSessionId, sessionItems, onLoadSession, onNewConversation, onClearHistory, onEmergencyStop}) => {
   const messagesEl=useRef(null); const textareaEl=useRef(null); const streamControllerRef=useRef(null);
   const ta=agents.find(a=>a.id===target)||FALLBACK_AGENTS[0]; const tc=AGENT_COLORS[target]||"#818cf8";
-  const scrollBottom=useCallback(()=>{if(messagesEl.current) messagesEl.current.scrollTop=messagesEl.current.scrollHeight;},[]);
-  useEffect(()=>{requestAnimationFrame(scrollBottom);},[chatHistory]);
+  
+  // Auto-scroll to bottom when new messages arrive
+  const scrollBottom = useCallback(() => {
+    if (messagesEl.current) {
+      messagesEl.current.scrollTop = messagesEl.current.scrollHeight;
+    }
+  }, []);
+  
+  useEffect(() => {
+    requestAnimationFrame(scrollBottom);
+  }, [chatHistory, scrollBottom]);
 
   const markStopped = () => {
     setChatHistory(prev=>{
@@ -658,8 +687,8 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
   };
 
   return (
-    <div className="comms-view" style={{display:"grid",gridTemplateColumns:"1fr 420px",height:"100%"}}>
-      <div className="chat-container messages-wrapper" style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",height:"100%"}}>
+    <div className="comms-view">
+      <div className="chat-container">
         <div className="nav-bar" style={{display:"flex",alignItems:"center",gap:0,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.15)",flexShrink:0,flexWrap:"wrap"}}>
           {agents.map(a=>{const ac=AGENT_COLORS[a.id];const sel=target===a.id;return(
             <button key={a.id} className="agent-tab-btn" onClick={()=>setTarget(a.id)} style={{display:"flex",alignItems:"center",gap:6,padding:"10px 16px",background:sel?`${ac}08`:"transparent",border:"none",borderBottom:sel?`2px solid ${ac}`:"2px solid transparent",cursor:"pointer",transition:"all 0.15s"}}>
@@ -675,12 +704,14 @@ const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, ms
           <ActionBtn label="Clear" icon="⌫" color="#ef4444" small onClick={onClearHistory} />
           <Badge text={ta.model} color={tc} /><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",fontFamily:"'IBM Plex Mono',monospace"}}>{ta.ping_ms?`${ta.ping_ms}ms`:"—"}</span>
         </div>
-        <div className="messages-area messages-scroll scroll-area flex-container" ref={messagesEl} style={{flex:1,overflowY:"auto",scrollBehavior:"smooth",padding:"20px",display:"flex",flexDirection:"column",gap:20}}>
-          {chatHistory.length===0&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",gap:12,opacity:0.3}}><span style={{fontSize:32,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc}}>⚔</span><span style={{fontSize:12,color:"rgba(255,255,255,0.3)"}}>Command the warband</span></div>}
-          {chatHistory.map((m,i)=><ChatBubble key={i} msg={m} />)}
-          {sending&&chatHistory.length>0&&chatHistory[chatHistory.length-1].text===""&&!(chatHistory[chatHistory.length-1].toolCalls||[]).length&&(
-            <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}><AgentAvatar agent={ta} size={22} showStatus={false} /><Glass style={{padding:"8px 14px",display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:10,color:tc,fontWeight:600}}>{ta.name.split(' ')[0]}</span><TypingIndicator color={tc} /></Glass></div>
-          )}
+        <div className="messages-wrapper">
+          <div className="messages-scroll scroll-area" ref={messagesEl} style={{padding:"20px",display:"flex",flexDirection:"column",gap:20}}>
+            {chatHistory.length===0&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",gap:12,opacity:0.3}}><span style={{fontSize:32,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc}}>⚔</span><span style={{fontSize:12,color:"rgba(255,255,255,0.3)"}}>Command the warband</span></div>}
+            {chatHistory.map((m,i)=><ChatBubble key={i} msg={m} />)}
+            {sending&&chatHistory.length>0&&chatHistory[chatHistory.length-1].text===""&&!(chatHistory[chatHistory.length-1].toolCalls||[]).length&&(
+              <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}><AgentAvatar agent={ta} size={22} showStatus={false} /><Glass style={{padding:"8px 14px",display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:10,color:tc,fontWeight:600}}>{ta.name.split(' ')[0]}</span><TypingIndicator color={tc} /></Glass></div>
+            )}
+          </div>
         </div>
         <div style={{padding:"12px 18px",borderTop:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(180deg, rgba(0,0,0,0.1), rgba(0,0,0,0.25))",display:"flex",gap:8,flexShrink:0,alignItems:"flex-end"}}>
           <textarea ref={textareaEl} value={msg} onChange={e=>{setMsg(e.target.value);const el=e.target;el.style.height='56px';el.style.height=Math.min(el.scrollHeight,140)+'px';}} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();}}} placeholder={`Command ${ta.name}...`} rows={2}
@@ -762,7 +793,7 @@ const AgentDetail = ({agent}) => { const c=AGENT_COLORS[agent.id]; return (
 ); };
 
 const FleetView = ({agents,selected,setSelected}) => (
-  <div className="fleet-view" style={{display:"grid",gridTemplateColumns:"1fr 320px",height:"100%"}}>
+  <div className="fleet-view" style={{display:"grid",gridTemplateColumns:"1fr 320px",height:"100%",minHeight:0}}>
     <div style={{borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto"}}>
       <div style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",gap:8,padding:"10px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:9,color:"rgba(255,255,255,0.15)",textTransform:"uppercase",letterSpacing:"0.16em"}}><span></span><span>Agent</span><span>Activity</span><span>Load</span><span style={{textAlign:"right"}}>Tasks</span></div>
       {agents.map((a,i)=><AgentRow key={a.id} agent={a} selected={selected===i} onClick={()=>setSelected(i)} />)}
@@ -791,7 +822,7 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
   }, [k8sEvents, commits]);
 
   return (
-    <div className="realm-view" style={{display:"flex",flexDirection:"column",height:"100%"}}>
+    <div className="realm-view" style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0}}>
       {logPod && <LogModal podName={logPod} onClose={()=>setLogPod(null)} />}
       {/* METRICS */}
       <div className="realm-metrics" style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,padding:"16px 18px",flexShrink:0}}>
@@ -802,7 +833,7 @@ const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
         <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
       </div>
       {/* MAIN */}
-      <div className="realm-content" style={{display:"grid",gridTemplateColumns:"1fr 380px",flex:1}}>
+      <div className="realm-content" style={{display:"grid",gridTemplateColumns:"1fr 380px",flex:1,minHeight:0}}>
         {/* LEFT */}
         <div style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto",padding:"0 18px 18px"}}>
           {/* NODES */}
@@ -1014,7 +1045,7 @@ function App() {
   };
 
   return (
-    <div className="main-content" style={{height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+    <div className="main-content">
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:48,minHeight:48,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(90deg,rgba(10,10,20,0.95),rgba(6,6,16,0.95))",position:"relative"}}>
         <div style={{position:"absolute",bottom:0,left:0,right:0,height:1,background:"linear-gradient(90deg,transparent,rgba(99,102,241,0.12),transparent)"}} />
         <div style={{display:"flex",alignItems:"center",gap:14}}>
