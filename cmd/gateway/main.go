@@ -106,6 +106,33 @@ type giteaRepoInfo struct {
 	DefaultBranch string `json:"default_branch"`
 }
 
+type giteaPRInfo struct {
+	Number    int64    `json:"number"`
+	Title     string   `json:"title"`
+	State     string   `json:"state"`
+	User      string   `json:"user"`
+	Repo      string   `json:"repo"`
+	Base      string   `json:"base"`
+	Head      string   `json:"head"`
+	Body      string   `json:"body"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
+	HTMLURL   string   `json:"html_url"`
+	Labels    []string `json:"labels"`
+	Mergeable bool     `json:"mergeable"`
+}
+
+type giteaRepoListItem struct {
+	Name        string `json:"name"`
+	Owner       string `json:"owner"`
+	FullName    string `json:"full_name"`
+	Description string `json:"description"`
+	Language    string `json:"language"`
+	OpenPRs     int64  `json:"open_prs"`
+	Stars       int64  `json:"stars"`
+	HTMLURL     string `json:"html_url"`
+}
+
 type messageReq struct {
 	Agent     string `json:"agent"`
 	Content   string `json:"content"`
@@ -504,6 +531,11 @@ func asInt64(v interface{}) int64 {
 	}
 }
 
+func asBool(v interface{}) bool {
+	b, _ := v.(bool)
+	return b
+}
+
 func ageFrom(ts string) string {
 	if ts == "" {
 		return ""
@@ -786,6 +818,49 @@ func fetchGiteaJSON(client *http.Client, baseURL, token, path string, out interf
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func giteaRequest(client *http.Client, method, baseURL, token, path string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, strings.TrimRight(baseURL, "/")+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "token "+token)
+	}
+	if method != http.MethodGet {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return client.Do(req)
+}
+
+func giteaGetJSONWithStatus(client *http.Client, baseURL, token, path string, out interface{}) (int, []byte, error) {
+	resp, err := giteaRequest(client, http.MethodGet, baseURL, token, path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, body, nil
+	}
+	if out != nil {
+		if err := json.Unmarshal(body, out); err != nil {
+			return resp.StatusCode, body, err
+		}
+	}
+	return resp.StatusCode, body, nil
+}
+
+func truncateRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
 func (k *k8sState) refreshPods() error {
 	path := "/api/v1/namespaces/valhalla/pods"
 	body, err := k.get(path)
@@ -898,7 +973,7 @@ func main() {
 	}
 
 	proxyClient := &http.Client{}
-	giteaClient := &http.Client{Timeout: 5 * time.Second}
+	giteaClient := &http.Client{Timeout: 10 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1312,6 +1387,199 @@ func main() {
 		if len(out) > 10 {
 			out = out[:10]
 		}
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("/api/v1/whoami", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		user := strings.TrimSpace(r.Header.Get("X-Forwarded-User"))
+		email := strings.TrimSpace(r.Header.Get("X-Forwarded-Email"))
+		if user == "" {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"user":          "Sovereign",
+				"role":          "sovereign",
+				"authenticated": false,
+			})
+			return
+		}
+		resp := map[string]interface{}{
+			"user":          user,
+			"role":          "sovereign",
+			"authenticated": true,
+		}
+		if email != "" {
+			resp["email"] = email
+		}
+		writeJSON(w, http.StatusOK, resp)
+	})
+	mux.HandleFunc("/api/v1/gitea/prs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(*giteaURL) == "" {
+			writeJSON(w, http.StatusOK, []giteaPRInfo{})
+			return
+		}
+		repos := []string{"gitea_admin/project_valhalla", "kit/valhalla-infra"}
+		type query struct {
+			repo  string
+			state string
+			limit int
+		}
+		queries := []query{
+			{repo: repos[0], state: "open", limit: 20},
+			{repo: repos[1], state: "open", limit: 20},
+			{repo: repos[0], state: "closed", limit: 10},
+			{repo: repos[1], state: "closed", limit: 10},
+		}
+		out := make([]giteaPRInfo, 0, 60)
+		for _, q := range queries {
+			path := fmt.Sprintf("/api/v1/repos/%s/pulls?state=%s&sort=newest&limit=%d", q.repo, q.state, q.limit)
+			var prs []map[string]interface{}
+			status, body, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, path, &prs)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			if status < 200 || status >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(body))})
+				return
+			}
+			for _, pr := range prs {
+				labelsRaw := asSlice(pr["labels"])
+				labels := make([]string, 0, len(labelsRaw))
+				for _, l := range labelsRaw {
+					name := asString(asMap(l)["name"])
+					if name != "" {
+						labels = append(labels, name)
+					}
+				}
+				out = append(out, giteaPRInfo{
+					Number:    asInt64(pr["number"]),
+					Title:     asString(pr["title"]),
+					State:     asString(pr["state"]),
+					User:      asString(asMap(pr["user"])["login"]),
+					Repo:      q.repo,
+					Base:      asString(asMap(pr["base"])["ref"]),
+					Head:      asString(asMap(pr["head"])["ref"]),
+					Body:      truncateRunes(asString(pr["body"]), 200),
+					CreatedAt: asString(pr["created_at"]),
+					UpdatedAt: asString(pr["updated_at"]),
+					HTMLURL:   asString(pr["html_url"]),
+					Labels:    labels,
+					Mergeable: asBool(pr["mergeable"]),
+				})
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("/api/v1/gitea/prs/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(*giteaURL) == "" {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1/gitea/prs/")
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		if len(parts) != 4 || parts[3] != "merge" {
+			http.NotFound(w, r)
+			return
+		}
+		owner, repo, idxRaw := parts[0], parts[1], parts[2]
+		if owner == "" || repo == "" || idxRaw == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := strconv.Atoi(idxRaw); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := json.Marshal(map[string]string{
+			"Do":                  "merge",
+			"merge_message_field": "Merged via Hirdforge UI",
+		})
+		uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/merge", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+		resp, err := giteaRequest(giteaClient, http.MethodPost, *giteaURL, *giteaToken, uPath, bytes.NewReader(body))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+			return
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		for k, vv := range resp.Header {
+			if strings.EqualFold(k, "Content-Type") && len(vv) > 0 {
+				w.Header().Set("Content-Type", vv[0])
+				break
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		if len(respBody) > 0 {
+			_, _ = w.Write(respBody)
+		}
+	})
+	mux.HandleFunc("/api/v1/gitea/repos", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(*giteaURL) == "" {
+			writeJSON(w, http.StatusOK, []giteaRepoListItem{})
+			return
+		}
+		all := make([]map[string]interface{}, 0, 40)
+		{
+			var repos []map[string]interface{}
+			status, body, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, "/api/v1/user/repos?limit=20", &repos)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			if status < 200 || status >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(body))})
+				return
+			}
+			all = append(all, repos...)
+		}
+		{
+			var repos []map[string]interface{}
+			status, _, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, "/api/v1/orgs/gitea_admin/repos?limit=20", &repos)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			if status >= 200 && status < 300 {
+				all = append(all, repos...)
+			}
+		}
+		seen := map[string]giteaRepoListItem{}
+		for _, repo := range all {
+			full := asString(repo["full_name"])
+			if full == "" {
+				continue
+			}
+			seen[full] = giteaRepoListItem{
+				Name:        asString(repo["name"]),
+				Owner:       asString(asMap(repo["owner"])["login"]),
+				FullName:    full,
+				Description: asString(repo["description"]),
+				Language:    asString(repo["language"]),
+				OpenPRs:     asInt64(repo["open_pr_counter"]),
+				Stars:       asInt64(repo["stars_count"]),
+				HTMLURL:     asString(repo["html_url"]),
+			}
+		}
+		out := make([]giteaRepoListItem, 0, len(seen))
+		for _, r := range seen {
+			out = append(out, r)
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].FullName < out[j].FullName })
 		writeJSON(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("/api/v1/gitea/repo", func(w http.ResponseWriter, r *http.Request) {
