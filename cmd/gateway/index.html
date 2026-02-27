@@ -205,7 +205,10 @@ async function apiText(p){try{const r=await fetch(CFG.API+p);if(!r.ok)throw new 
 function usePoll(path,fb,iv){
   const[d,set]=useState(fb);
   useEffect(()=>{let m=true;const go=async()=>{const r=await api(path,fb);if(!m)return;
-    if(path==='/api/v1/agents'&&Array.isArray(r)){const n=r.map(a=>({id:a.name||a.id,name:a.display_name||a.name||a.id,role:a.role||"Agent",model:a.model||"?",backend:a.backend||"?",status:a.healthy===false?"offline":(a.healthy?"online":(a.status||"offline")),tools:a.tools||[],uptime_seconds:a.uptime_seconds||0,tasks_completed:a.tasks_completed||0,last_action:a.last_action||"—",ping_ms:a.ping_ms||a.latency_ms||null,cpu_percent:a.cpu_percent||0,memory_percent:a.memory_percent||0,initial:(a.display_name||a.name||a.id||"?")[0].toUpperCase()}));set(n.length?n:fb);}else set(r);};
+    if(path==='/api/v1/agents'&&Array.isArray(r)){const n=r.map(a=>({id:a.name||a.id,name:a.display_name||a.name||a.id,role:a.role||"Agent",model:a.model||"?",backend:a.backend||"?",status:a.healthy===false?"offline":(a.healthy?"online":(a.status||"offline")),tools:a.tools||[],uptime_seconds:a.uptime_seconds||0,tasks_completed:a.tasks_completed||0,last_action:a.last_action||"—",ping_ms:a.ping_ms||a.latency_ms||null,cpu_percent:a.cpu_percent||0,memory_percent:a.memory_percent||0,initial:(a.display_name||a.name||a.id||"?")[0].toUpperCase()}));set(n.length?n:fb);}
+    // P0 #38 Fix: Inject client-side timestamp for events lacking timestamp (same as WebSocket)
+    else if(path==='/api/v1/k8s/events'&&Array.isArray(r)){const n=r.map(e=>{if(!e.timestamp)e.timestamp=new Date().toISOString();return e;});set(n.length?n:fb);}
+    else set(r);};
     go();const id=setInterval(go,iv||CFG.POLL);return()=>{m=false;clearInterval(id);};
   },[path]);return d;
 }
@@ -311,6 +314,9 @@ const HELP=`  HIRDFORGE FORGE TERMINAL — v1.0
   clear              Clear terminal
   help               Show this help`;
 
+// P0 #39 Fix: Known commands list for validation
+const KNOWN_COMMANDS=['status','agents','pods','nodes','prs','commits','events','logs','restart','stop','stop-all','clear','help'];
+
 function ForgeTerminal({agents,pods,nodes,commits,k8sEvents,target}){
   const[lines,setLines]=useState([{t:'system',text:'Forge Terminal ready. Type help for commands.'}]);
   const[input,setInput]=useState('');
@@ -414,6 +420,17 @@ function ForgeTerminal({agents,pods,nodes,commits,k8sEvents,target}){
       return;
     }
 
+    // P0 #39 Fix: Validate input before routing to agent
+    // Check if it's a known command or @agent prefix
+    const firstWord=cmd.split(/\s+/)[0].toLowerCase();
+    const isKnownCommand=KNOWN_COMMANDS.includes(firstWord);
+    const isAgentPrefix=cmd.startsWith('@');
+    
+    if(!isKnownCommand&&!isAgentPrefix){
+      addLine('err',`  command not found: ${cmd} — type help for available commands`);
+      return;
+    }
+
     // Default: route to current target
     addLine('system',`  Routing to ${target}...`);
     setBusy(true);const sid=`term-${target}-${Date.now()}`;let resp='';
@@ -451,14 +468,14 @@ const LogModal=({pod,onClose})=>{const[logs,setLogs]=useState("Loading...");cons
 };
 
 // ═══════════ CHAT BUBBLE ═══════════
-const ChatBubble=({msg})=>{const self=msg.from==="kit";const c=C[msg.from]||"#818cf8";const tc=(msg.toolCalls||[]).length;const ht=tc>0||(msg.toolResults||[]).length>0;
+const ChatBubble=({msg})=>{const self=msg.from==="kit";const c=C[msg.from]||"#818cf8";const tc=(msg.toolCalls||[]).length>0||(msg.toolResults||[]).length>0;
   return<div className={`msg${self?" self":""}`}><Av agent={msg.agent} size={24}/><div className="msg-body">
     <div className="msg-meta"><span style={{fontSize:11,fontWeight:700,color:c}}>{msg.agent.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.18)"}}>{msg.time}</span></div>
     <div className="msg-bubble" style={{borderColor:self?"rgba(16,185,129,0.1)":`${c}12`}}>
       <div style={{position:"absolute",top:0,left:0,bottom:0,width:2,background:self?"#10b981":c,opacity:.35,borderRadius:1}}/>
       {msg.streaming&&!msg.text&&<div className="forging"><span className="dot"/>Forging response...</div>}
       <div className="msg-text" dangerouslySetInnerHTML={{__html:md(msg.text)}}/>
-      {ht&&<details><summary className="tool-toggle">⚒ {tc} tool call{tc!==1?'s':''}</summary><div style={{paddingTop:3}}>
+      {tc&&<details><summary className="tool-toggle">⚒ {(msg.toolCalls||[]).length} tool call{(msg.toolCalls||[]).length!==1?'s':''}</summary><div style={{paddingTop:3}}>
         {(msg.toolCalls||[]).map((t,i)=><div key={`c${i}`} className="tool-chip call"><span style={{color:"#22d3ee",fontWeight:800,fontSize:9,letterSpacing:".06em"}}>TOOL</span><span style={{color:"rgba(255,255,255,0.45)"}}>{t.tool}</span><span className="tool-chip-body">{typeof t.args==='string'?t.args:JSON.stringify(t.args)}</span></div>)}
         {(msg.toolResults||[]).map((t,i)=><div key={`r${i}`} className="tool-chip result"><span style={{color:"#34d399",fontWeight:800,fontSize:9,letterSpacing:".06em"}}>RESULT</span><span className="tool-chip-body">{typeof t.result==='string'?t.result:JSON.stringify(t.result)}</span></div>)}
       </div></details>}
@@ -513,7 +530,7 @@ const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMs
       </div>
       <div className="sidebar-section" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:5,height:5,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}}/><span style={{fontSize:9,fontWeight:700,color:"rgba(255,255,255,0.25)",letterSpacing:".1em",textTransform:"uppercase"}}>{wsConnected?"Live":"Offline"}</span></div><span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>{events.length}</span></div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>{[{l:"DELEGATES",v:events.filter(e=>e.type==="delegate").length,c:"#818cf8"},{l:"GIT",v:events.filter(e=>e.type==="git").length,c:"#34d399"},{l:"ALERTS",v:events.filter(e=>e.type==="alert").length,c:"#fbbf24"}].map(s=><div key={s.l} style={{padding:"6px 8px",textAlign:"center",background:"rgba(0,0,0,0.1)"}}><div style={{fontSize:14,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.v}</div><div style={{fontSize:7,color:"rgba(255,255,255,0.15)",letterSpacing:".1em"}}>{s.l}</div></div>)}</div>
-      <div style={{flex:1,overflowY:"auto"}}>{events.length===0?<div style={{padding:14,textAlign:"center",fontSize:10,color:"rgba(255,255,255,0.08)"}}>Waiting for events...</div>:events.map((e,i)=>{const ec={delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24"}[e.type]||"#6b7280";return<div key={i} style={{display:"flex",gap:6,padding:"5px 12px",borderBottom:"1px solid rgba(255,255,255,0.02)",borderLeft:`2px solid ${ec}18`}}><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",minWidth:44,flexShrink:0}}>{fT(e.timestamp)}</span><div style={{flex:1,minWidth:0}}><span style={{fontSize:9,fontWeight:800,color:ec,marginRight:4}}>{(e.source||"SYS").slice(0,3).toUpperCase()}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.35)"}}>{e.message}</span></div></div>;})}</div>
+      <div style={{flex:1,overflowY:"auto"}}>{events.length===0?<div style={{padding:14,textAlign:"center",fontSize:10,color:"rgba(255,255,255,0.08)"}}>Waiting for events...</div>:events.map((e,i)=>{const ec={delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24"}[e.type]||"#6b7280";const source=e.source||e.type||"SYSTEM";return<div key={i} style={{display:"flex",gap:6,padding:"5px 12px",borderBottom:"1px solid rgba(255,255,255,0.02)",borderLeft:`2px solid ${ec}18`}}><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",minWidth:44,flexShrink:0}}>{fT(e.timestamp)}</span><div style={{flex:1,minWidth:0}}><span style={{fontSize:9,fontWeight:800,color:ec,marginRight:4}}>{source.slice(0,3).toUpperCase()}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.35)"}}>{e.message}</span></div></div>;})}</div>
     </div>
   </div>;
 };
