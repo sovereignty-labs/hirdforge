@@ -1344,7 +1344,7 @@ func initPersonaRepo(repoURL, agentName string) (*personaRepo, error) {
 	if strings.TrimSpace(agentName) == "" {
 		return nil, fmt.Errorf("--agent-name is required when --persona-repo is set")
 	}
-	dst := filepath.Join(os.TempDir(), "valhalla-personas", agentName)
+	dst := filepath.Join(os.TempDir(), "valhalla-personas")
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return nil, err
 	}
