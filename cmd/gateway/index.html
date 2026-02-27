@@ -6,345 +6,181 @@
 <title>Hirdforge — Valhalla Command</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body, #root { height: 100%; overflow: hidden; }
-  /* FIX: Complete flex chain with min-height:0 for proper scrolling */
-  #root { display: flex; flex-direction: column; min-height: 0; }
-  body {
-    background: radial-gradient(ellipse at 20% 0%, rgba(99,102,241,0.04) 0%, transparent 50%),
-                radial-gradient(ellipse at 80% 100%, rgba(192,132,252,0.03) 0%, transparent 50%),
-                linear-gradient(180deg, #0a0a14 0%, #060610 50%, #04040c 100%);
-    color: #e2e8f0;
-    font-family: 'IBM Plex Mono', 'SF Mono', monospace;
-    font-size: 13px;
-  }
-  ::selection { background: rgba(99,102,241,0.3); color: #e2e8f0; }
-  ::-webkit-scrollbar { width: 8px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.25); border-radius: 3px; }
-  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.4); }
-  input::placeholder, textarea::placeholder { color: rgba(255,255,255,0.18); }
-  button { font-family: inherit; }
-  button:hover { filter: brightness(1.2); }
-  textarea { resize: none; }
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html,body,#root{height:100%;overflow:hidden}
+  #root{display:flex;flex-direction:column}
+  body{background:#08090f;color:#c8cdd5;font-family:'IBM Plex Mono','SF Mono',monospace;font-size:13px}
+  ::selection{background:rgba(99,102,241,0.3);color:#e2e8f0}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-track{background:rgba(255,255,255,0.02)}
+  ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:4px}
+  ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.25)}
+  *{scrollbar-width:thin;scrollbar-color:rgba(255,255,255,0.14) transparent}
+  input::placeholder,textarea::placeholder{color:rgba(255,255,255,0.22)}
+  button{font-family:inherit;cursor:pointer}
+  button:hover{filter:brightness(1.15)}
+  textarea{resize:none}
+  a{color:#818cf8;text-decoration:none}a:hover{text-decoration:underline}
 
-  @keyframes glow-pulse { 0%,100%{opacity:0.15;transform:scale(1)} 50%{opacity:0.3;transform:scale(1.3)} }
-  @keyframes avatar-spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
-  @keyframes typing-bounce { 0%,60%,100%{transform:translateY(0);opacity:0.3} 30%{transform:translateY(-4px);opacity:0.8} }
-  @keyframes spin { to{transform:rotate(360deg)} }
-  @keyframes rec-pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-  @keyframes msg-slide-in { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-  @keyframes event-fade-in { from{opacity:0;transform:translateX(-4px)} to{opacity:1;transform:translateX(0)} }
-  @keyframes forge-pulse { 0%,100%{box-shadow:0 0 8px rgba(34,211,238,0.4)} 50%{box-shadow:0 0 16px rgba(34,211,238,0.7)} }
+  @keyframes glow-pulse{0%,100%{opacity:.15;transform:scale(1)}50%{opacity:.35;transform:scale(1.3)}}
+  @keyframes avatar-spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @keyframes rec-pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  @keyframes msg-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes forge-glow{0%,100%{opacity:.6}50%{opacity:1}}
+  @keyframes cursor-blink{0%,100%{opacity:1}50%{opacity:0}}
+  @keyframes term-in{from{opacity:0}to{opacity:1}}
 
-  .grain { position:fixed;inset:0;pointer-events:none;z-index:9999;opacity:0.025;mix-blend-mode:overlay; }
-  .scanlines { position:fixed;inset:0;pointer-events:none;z-index:9998;
-    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.025) 2px,rgba(0,0,0,0.025) 4px); }
+  .app{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+  .header{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:46px;min-height:46px;border-bottom:1px solid rgba(255,255,255,0.06);background:rgba(6,6,14,0.95);flex-shrink:0;position:relative;z-index:10}
+  .header::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,rgba(99,102,241,0.15),transparent)}
+  .tabs{display:flex;align-items:center;padding:0 20px;border-bottom:1px solid rgba(255,255,255,0.05);background:rgba(0,0,0,0.2);flex-shrink:0}
+  .body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+  .tab-content{flex:1;overflow:hidden;min-height:0}
+  .status-bar{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:24px;min-height:24px;border-top:1px solid rgba(255,255,255,0.04);background:rgba(0,0,0,0.35);font-size:10px;color:rgba(255,255,255,0.2);flex-shrink:0}
 
-  /* Scroll fix: Complete flex chain with min-height:0 and height:0 */
-  .main-content { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
-  .main-content > div:nth-child(3) { min-height: 0; display: flex; flex-direction: column; flex: 1; overflow: hidden; }
-  
-  /* Chat container flex chain - explicit height constraint for scroll */
-  .comms-view { display: grid; grid-template-columns: 1fr 420px; height: 100%; min-height: 0; overflow: hidden; }
-  .chat-container { display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; }
-  .messages-wrapper { 
-    display: flex; 
-    flex-direction: column; 
-    flex: 1; 
-    min-height: 0; 
-    height: 0; /* CRITICAL: Explicit height 0 allows scroll to work */
-    overflow: hidden; 
-  }
-  .messages-scroll { 
-    flex: 1; 
-    min-height: 0; 
-    height: 100%;
-    overflow-y: auto; 
-    overflow-x: hidden;
-    scroll-behavior: smooth;
-    display: flex;
-    flex-direction: column;
-  }
-  
-  /* Message bubble word wrap - prevent horizontal overflow */
-  .chat-bubble-text { 
-    overflow-wrap: break-word; 
-    word-wrap: break-word; 
-    word-break: break-word;
-    max-width: 100%;
-  }
-  
-  /* Forging indicator */
-  .forging-indicator {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 14px;
-    background: rgba(34,211,238,0.08);
-    border: 1px solid rgba(34,211,238,0.2);
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    color: #22d3ee;
-    animation: forge-pulse 1.5s ease-in-out infinite;
-  }
-  
-  /* Collapsible activity stream */
-  .activity-stream details {
-    margin-top: 8px;
-  }
-  .activity-stream summary {
-    cursor: pointer;
-    padding: 6px 10px;
-    background: rgba(34,211,238,0.06);
-    border: 1px solid rgba(34,211,238,0.12);
-    border-radius: 4px;
-    font-size: 10px;
-    font-weight: 700;
-    color: #22d3ee;
-    letter-spacing: 0.08em;
-    outline: none;
-    user-select: none;
-  }
-  .activity-stream summary::-webkit-details-marker { display: none; }
-  .activity-stream summary:hover { background: rgba(34,211,238,0.1); }
-  .activity-stream-content {
-    margin-top: 4px;
-    padding-left: 4px;
-  }
+  /* Terminal panel */
+  .terminal-wrapper{border-top:1px solid rgba(34,211,238,0.15);background:#050508;flex-shrink:0;display:flex;flex-direction:column;overflow:hidden;transition:height 0.2s ease}
+  .terminal-header{display:flex;align-items:center;justify-content:space-between;padding:0 14px;height:28px;min-height:28px;background:rgba(34,211,238,0.04);border-bottom:1px solid rgba(34,211,238,0.08);flex-shrink:0;cursor:pointer;user-select:none}
+  .terminal-body{flex:1;overflow:hidden;display:flex;flex-direction:column;min-height:0}
+  .terminal-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:8px 14px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.6}
+  .terminal-region{flex:1;position:relative;min-height:0}
+  .term-line{color:rgba(255,255,255,0.6);white-space:pre-wrap;word-break:break-all;animation:term-in 0.15s ease}
+  .term-line.cmd{color:#22d3ee}
+  .term-line.err{color:#ef4444}
+  .term-line.info{color:#34d399}
+  .term-line.warn{color:#fbbf24}
+  .term-line.system{color:rgba(255,255,255,0.25);font-style:italic}
+  .term-line.header{color:#818cf8;font-weight:700}
+  .term-table{border-collapse:collapse;font-size:11px;margin:4px 0}
+  .term-table th{color:rgba(255,255,255,0.4);text-align:left;padding:2px 12px 2px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-weight:700}
+  .term-table td{color:rgba(255,255,255,0.6);padding:2px 12px 2px 0}
+  .term-input-row{display:flex;align-items:center;padding:4px 14px 8px;flex-shrink:0;gap:0}
+  .term-prompt{color:#34d399;font-weight:700;font-size:12px;white-space:nowrap;margin-right:8px}
+  .term-input{flex:1;background:transparent;border:none;color:#e2e8f0;font-family:'IBM Plex Mono',monospace;font-size:12px;outline:none;caret-color:#22d3ee}
 
-  /* ============================================
-     MOBILE-RESPONSIVE CSS (max-width: 767px)
-     ============================================ */
-  @media (max-width: 767px) {
-    /* Base font size - prevents iOS zoom on input focus */
-    body {
-      font-size: 16px;
-    }
+  /* Comms layout */
+  .comms{display:grid;grid-template-columns:1fr 360px;height:100%;overflow:hidden}
+  .chat-col{display:flex;flex-direction:column;height:100%;overflow:hidden;border-right:1px solid rgba(255,255,255,0.04)}
+  .agent-bar{display:flex;align-items:center;gap:2px;padding:4px 10px;border-bottom:1px solid rgba(255,255,255,0.05);background:rgba(0,0,0,0.25);flex-shrink:0;overflow-x:auto}
+  .agent-tab{display:flex;align-items:center;gap:5px;padding:7px 12px;background:transparent;border:none;border-radius:5px;transition:all .15s;white-space:nowrap;border-bottom:2px solid transparent}
+  .agent-tab:hover{background:rgba(255,255,255,0.03)}
+  .agent-tab.active{background:rgba(255,255,255,0.04)}
+  .agent-info{display:flex;align-items:center;gap:10px;padding:5px 16px;border-bottom:1px solid rgba(255,255,255,0.04);background:rgba(0,0,0,0.1);flex-shrink:0}
+  .messages-region{flex:1;position:relative;min-height:0}
+  .messages-scroll{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+  .messages-scroll>.spacer{flex:1 0 auto}
+  .msg{display:flex;gap:10px;max-width:80%;animation:msg-in .3s ease both}
+  .msg.self{align-self:flex-end;flex-direction:row-reverse}
+  .msg-body{display:flex;flex-direction:column;gap:2px;min-width:0;max-width:100%}
+  .msg-meta{display:flex;gap:8px;align-items:baseline}
+  .msg.self .msg-meta{justify-content:flex-end}
+  .msg-bubble{padding:10px 14px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05);border-radius:2px 8px 8px 8px;position:relative;overflow:hidden}
+  .msg.self .msg-bubble{background:rgba(16,185,129,0.05);border-color:rgba(16,185,129,0.1);border-radius:8px 2px 8px 8px}
+  .msg-text{font-size:13px;color:rgba(255,255,255,0.82);line-height:1.7;white-space:pre-wrap;word-break:break-word;overflow-wrap:break-word}
+  .msg-text h1,.msg-text h2,.msg-text h3{font-family:'Space Grotesk',sans-serif;color:rgba(255,255,255,0.9);margin:10px 0 4px}
+  .msg-text h1{font-size:16px;font-weight:800}.msg-text h2{font-size:14px;font-weight:700}.msg-text h3{font-size:13px;font-weight:700}
+  .msg-text strong{color:rgba(255,255,255,0.92);font-weight:700}
+  .msg-text em{color:rgba(255,255,255,0.7)}
+  .msg-text code{background:rgba(255,255,255,0.06);padding:1px 5px;border-radius:3px;font-size:12px;color:#22d3ee}
+  .msg-text pre{background:rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.06);padding:10px 12px;margin:8px 0;overflow-x:auto;border-radius:4px}
+  .msg-text pre code{background:none;padding:0;color:rgba(255,255,255,0.65)}
+  .msg-text ul,.msg-text ol{padding-left:18px;margin:4px 0}.msg-text li{margin:2px 0}
+  .msg-text table{border-collapse:collapse;margin:6px 0;width:100%;font-size:12px}
+  .msg-text th,.msg-text td{border:1px solid rgba(255,255,255,0.07);padding:3px 8px;text-align:left}
+  .msg-text th{background:rgba(255,255,255,0.03);font-weight:700;color:rgba(255,255,255,0.6)}
+  .msg-text hr{border:none;border-top:1px solid rgba(255,255,255,0.08);margin:10px 0}
+  .tool-toggle{display:inline-flex;align-items:center;gap:5px;margin-top:6px;padding:3px 8px;background:rgba(34,211,238,0.04);border:1px solid rgba(34,211,238,0.1);border-radius:3px;font-size:10px;font-weight:700;color:#22d3ee;cursor:pointer;letter-spacing:.06em;user-select:none}
+  .tool-toggle::-webkit-details-marker{display:none}
+  .tool-chip{display:flex;align-items:center;gap:5px;padding:3px 7px;margin-top:2px;font-size:10px;border-radius:3px;overflow:hidden}
+  .tool-chip.call{background:rgba(34,211,238,0.03);border:1px solid rgba(34,211,238,0.07)}
+  .tool-chip.result{background:rgba(52,211,153,0.02);border:1px solid rgba(52,211,153,0.06)}
+  .tool-chip-body{color:rgba(255,255,255,0.3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .forging{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;margin-bottom:4px;background:rgba(34,211,238,0.05);border:1px solid rgba(34,211,238,0.12);border-radius:4px;font-size:11px;font-weight:700;color:#22d3ee}
+  .forging .dot{width:5px;height:5px;border-radius:50%;background:#22d3ee;animation:forge-glow 1.2s ease infinite}
+  .input-bar{display:flex;gap:8px;padding:10px 16px;border-top:1px solid rgba(255,255,255,0.05);background:rgba(0,0,0,0.25);flex-shrink:0;align-items:flex-end}
+  .input-bar textarea{flex:1;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);padding:10px 14px;color:#e2e8f0;font-size:13px;font-family:'IBM Plex Mono',monospace;outline:none;line-height:1.5;min-height:44px;max-height:120px;border-radius:5px;transition:border-color .15s}
+  .input-bar textarea:focus{border-color:rgba(129,140,248,0.25)}
+  .btn-send{padding:10px 22px;border:1px solid;border-radius:5px;font-size:11px;font-family:'IBM Plex Mono',monospace;font-weight:700;letter-spacing:.1em;text-transform:uppercase;min-height:44px;transition:all .15s}
+  .btn-stop{background:rgba(239,68,68,0.15);border-color:rgba(239,68,68,0.5);color:#ef4444;box-shadow:0 0 18px rgba(239,68,68,0.2)}
 
-    /* Hide grain and scanlines on mobile for performance */
-    .grain, .scanlines {
-      display: none;
-    }
+  /* Sidebar */
+  .sidebar{display:flex;flex-direction:column;background:rgba(0,0,0,0.25);height:100%;overflow:hidden}
+  .sidebar-section{padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.04);flex-shrink:0}
+  .sidebar-title{font-size:9px;font-weight:700;letter-spacing:.12em;color:rgba(255,255,255,0.3);text-transform:uppercase;margin-bottom:6px}
+  .session-item{padding:5px 7px;border:1px solid rgba(255,255,255,0.04);border-radius:3px;cursor:pointer;margin-bottom:2px;transition:all .1s}
+  .session-item:hover{background:rgba(255,255,255,0.02)}
+  .session-item.active{border-color:rgba(129,140,248,0.3);background:rgba(129,140,248,0.05)}
 
-    /* Top navigation bar - full width, horizontal */
-    .nav-bar {
-      flex-direction: row !important;
-      width: 100% !important;
-      position: fixed !important;
-      top: 0 !important;
-      left: 0 !important;
-      right: 0 !important;
-      height: auto !important;
-      z-index: 1000 !important;
-    }
+  /* Fleet */
+  .fleet{display:grid;grid-template-columns:1fr 300px;height:100%;overflow:hidden}
+  .fleet-list{border-right:1px solid rgba(255,255,255,0.04);overflow-y:auto}
+  .fleet-detail{overflow-y:auto;background:rgba(0,0,0,0.2);padding:18px}
+  .fleet-row{display:grid;grid-template-columns:32px 1fr 70px 44px;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.02);cursor:pointer;transition:background .1s}
+  .fleet-row:hover{background:rgba(255,255,255,0.015)}
+  .fleet-row.active{background:rgba(129,140,248,0.04);border-left:2px solid #818cf8}
 
-    /* Main content area - full width, account for top nav */
-    .main-content {
-      width: 100% !important;
-      margin-top: 0 !important;
-      padding-top: 50px !important;
-    }
+  /* Realm */
+  .realm{display:flex;flex-direction:column;height:100%;overflow:hidden}
+  .realm-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;padding:12px 16px;flex-shrink:0}
+  .realm-body{display:grid;grid-template-columns:220px 1fr 340px;flex:1;min-height:0;overflow:hidden}
+  .realm-nav{border-right:1px solid rgba(255,255,255,0.04);overflow-y:auto;background:rgba(0,0,0,0.15);padding:10px 0}
+  .realm-main{overflow-y:auto;padding:14px 16px}
+  .realm-right{display:flex;flex-direction:column;overflow-y:auto;background:rgba(0,0,0,0.15);border-left:1px solid rgba(255,255,255,0.04)}
+  .nav-group{margin-bottom:4px}
+  .nav-group-title{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:10px;font-weight:700;color:rgba(255,255,255,0.3);letter-spacing:.08em;text-transform:uppercase;cursor:pointer;user-select:none}
+  .nav-group-title:hover{color:rgba(255,255,255,0.5)}
+  .nav-item{display:flex;align-items:center;gap:6px;padding:5px 14px 5px 28px;font-size:11px;color:rgba(255,255,255,0.4);cursor:pointer;transition:all .1s;border-left:2px solid transparent}
+  .nav-item:hover{background:rgba(255,255,255,0.02);color:rgba(255,255,255,0.6)}
+  .nav-item.active{color:#22d3ee;border-left-color:#22d3ee;background:rgba(34,211,238,0.04)}
+  .pod-row{display:grid;grid-template-columns:6px 1fr 80px 60px 70px;gap:6px;padding:6px 10px;align-items:center;border-bottom:1px solid rgba(255,255,255,0.02);font-size:11px}
+  .node-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:14px}
 
-    /* Comms View: Stack sidebar below main chat */
-    .comms-view {
-      grid-template-columns: 1fr !important;
-      grid-template-rows: 1fr auto !important;
-    }
+  /* Primitives */
+  .badge{display:inline-block;padding:2px 6px;font-size:9px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:2px}
+  .glass{background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.05)}
+  .bar-track{height:3px;background:rgba(255,255,255,0.04);position:relative;overflow:hidden;border-radius:2px}
+  .bar-fill{position:absolute;left:0;top:0;height:100%;border-radius:2px;transition:width 1s ease}
+  .metric{padding:12px 14px;display:flex;flex-direction:column;gap:2px}
+  .metric-label{font-size:9px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,0.3)}
+  .metric-value{font-size:20px;font-weight:800;font-family:'Space Grotesk',sans-serif;line-height:1;letter-spacing:-.02em}
+  .metric-sub{font-size:10px;color:rgba(255,255,255,0.22)}
 
-    /* Chat container full width */
-    .chat-container {
-      width: 100% !important;
-      border-right: none !important;
-      border-bottom: 1px solid rgba(255,255,255,0.04) !important;
-    }
+  /* Topology */
+  .topo{padding:14px}
+  .topo-box{rx:4;stroke-width:1;fill-opacity:0.06}
+  .topo-label{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:11px;fill:rgba(255,255,255,0.5)}
+  .topo-sub{font-family:'IBM Plex Mono',monospace;font-size:9px;fill:rgba(255,255,255,0.3)}
+  .topo-line{stroke-width:1;stroke-dasharray:4,3;opacity:0.3}
+  .topo-wall{stroke-width:2;stroke-dasharray:6,3;opacity:0.5}
 
-    /* Messages area full width */
-    .messages-area {
-      width: 100% !important;
-      padding: 12px !important;
-    }
-
-    /* Event stream sidebar - collapsible below */
-    .event-sidebar {
-      width: 100% !important;
-      max-height: 200px !important;
-      overflow-y: auto !important;
-    }
-
-    /* Fleet View: Stack agent list and detail */
-    .fleet-view {
-      grid-template-columns: 1fr !important;
-      grid-template-rows: 1fr 1fr !important;
-    }
-
-    /* Realm View: Stack metrics and content */
-    .realm-view {
-      grid-template-columns: 1fr !important;
-    }
-
-    .realm-metrics {
-      grid-template-columns: 1fr 1fr !important;
-    }
-
-    .realm-content {
-      grid-template-columns: 1fr !important;
-    }
-
-    /* Touch-friendly buttons - minimum 44px tap target */
-    button {
-      min-height: 44px !important;
-      min-width: 44px !important;
-      padding: 12px 16px !important;
-      font-size: 14px !important;
-    }
-
-    /* Action buttons */
-    .action-btn {
-      min-height: 44px !important;
-      padding: 12px 16px !important;
-    }
-
-    /* Send button */
-    .send-btn {
-      min-height: 56px !important;
-      padding: 14px 20px !important;
-    }
-
-    /* Textarea input */
-    textarea {
-      min-height: 56px !important;
-      font-size: 16px !important;
-      padding: 14px 16px !important;
-    }
-
-    /* Readable font sizes */
-    .message-text {
-      font-size: 15px !important;
-      line-height: 1.6 !important;
-    }
-
-    .agent-name {
-      font-size: 12px !important;
-    }
-
-    .timestamp {
-      font-size: 11px !important;
-    }
-
-    /* Tab labels */
-    .tab-label {
-      font-size: 12px !important;
-      padding: 12px 8px !important;
-    }
-
-    /* Headers and titles - minimum 14px */
-    h1, h2, h3, .header-title {
-      font-size: 14px !important;
-    }
-
-    /* Metric cards */
-    .metric-value {
-      font-size: 20px !important;
-    }
-
-    .metric-label {
-      font-size: 10px !important;
-    }
-
-    /* Agent avatar buttons */
-    .agent-tab-btn {
-      padding: 10px 12px !important;
-    }
-
-    /* Session items */
-    .session-item {
-      padding: 10px 12px !important;
-    }
-
-    /* Event entries */
-    .event-entry {
-      padding: 10px 12px !important;
-    }
-
-    /* Modal adjustments */
-    .modal-content {
-      width: 95% !important;
-      max-height: 80vh !important;
-    }
-
-    /* Badge text */
-    .badge {
-      font-size: 10px !important;
-      padding: 4px 8px !important;
-    }
-
-    /* Scrollable areas */
-    .scroll-area {
-      -webkit-overflow-scrolling: touch;
-    }
-
-    /* Flex containers need min-height: 0 for proper scrolling */
-    .flex-container {
-      min-height: 0 !important;
-    }
-  }
-
-  /* Extra small screens (under 480px) */
-  @media (max-width: 480px) {
-    /* Further reduce padding */
-    body {
-      font-size: 14px;
-    }
-
-    /* Single column layouts */
-    .comms-view,
-    .fleet-view,
-    .realm-view {
-      grid-template-columns: 1fr !important;
-    }
-
-    /* Smaller metrics */
-    .metric-card {
-      padding: 10px 12px !important;
-    }
-
-    .metric-value {
-      font-size: 18px !important;
-    }
-
-    /* Agent list compact */
-    .agent-row {
-      padding: 8px 10px !important;
-      grid-template-columns: 30px 1fr 60px !important;
-    }
-
-    /* Hide less important elements on very small screens */
-    .hide-xs {
-      display: none !important;
-    }
+  /* Mobile */
+  @media(max-width:767px){
+    body{font-size:15px}
+    .comms{grid-template-columns:1fr!important}.sidebar{display:none}
+    .fleet{grid-template-columns:1fr!important}.fleet-detail{display:none}
+    .realm-body{grid-template-columns:1fr!important}.realm-nav,.realm-right{display:none}
+    .realm-metrics{grid-template-columns:1fr 1fr!important}
+    .node-grid{grid-template-columns:1fr!important}
+    .agent-bar{overflow-x:auto}
+    button{min-height:44px}
+    textarea{font-size:16px!important;min-height:48px!important}
+    .terminal-wrapper{height:140px!important}
   }
 </style>
 </head>
 <body>
-<div class="grain"><svg width="100%" height="100%"><filter id="g"><feTurbulence type="fractalNoise" baseFrequency="0.8" numOctaves="4" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(#g)"/></svg></div>
-<div class="scanlines"></div>
 <div id="root"></div>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-
 <script type="text/babel" data-type="module">
-const { useState, useEffect, useRef, useMemo, useCallback } = React;
+const{useState,useEffect,useRef,useMemo,useCallback}=React;
+const CFG={API:'',WS:'',POLL:5000,MOCK:false};
+const C={ragnar:"#818cf8",chuck:"#f472b6",knut:"#34d399",ivar:"#fbbf24",orm:"#22d3ee",val:"#c084fc",freya:"#f59e0b",system:"#6b7280",kit:"#10b981"};
+const sc=s=>s==="online"?"#34d399":s==="degraded"?"#fbbf24":"#ef4444";
 
-const CONFIG = { API_BASE:'', WS_URL:'', POLL_INTERVAL:5000, USE_MOCK:false };
-
-const AGENT_COLORS = { ragnar:"#818cf8", chuck:"#f472b6", knut:"#34d399", ivar:"#fbbf24", orm:"#22d3ee", val:"#c084fc", freya:"#f59e0b", system:"#6b7280", kit:"#10b981" };
-const statusColor = s => s==="online"?"#34d399":s==="degraded"?"#fbbf24":"#ef4444";
-
-const FALLBACK_AGENTS = [
+const FA=[
   {id:"ragnar",name:"Ragnar Codebrok",role:"Architect / PM",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"R"},
   {id:"chuck",name:"Chuck Norse",role:"Primary Builder",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"C"},
   {id:"knut",name:"Knut the Swift",role:"Secondary Builder",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"K"},
@@ -352,741 +188,576 @@ const FALLBACK_AGENTS = [
   {id:"orm",name:"Orm the Scribe",role:"Documentation",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"O"},
   {id:"val",name:"Val Kyrie",role:"Operations",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"V"},
 ];
-const FALLBACK_NODES = [
-  {name:"node-cp-1",ip:"203.0.113.26",role:"Control+Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},
-  {name:"node-worker-1",ip:"203.0.113.27",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},
-  {name:"node-worker-2",ip:"203.0.113.28",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},
-];
+const FN=[{name:"node-cp-1",ip:"203.0.113.26",role:"Control+Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},{name:"node-worker-1",ip:"203.0.113.27",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},{name:"node-worker-2",ip:"203.0.113.28",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0}];
 
-// ═══════════════════════════════════════════════════════════
-//  API LAYER
-// ═══════════════════════════════════════════════════════════
-async function apiFetch(path, fallback) {
-  if (CONFIG.USE_MOCK) return fallback;
-  try {
-    const res = await fetch(CONFIG.API_BASE + path);
-    if (!res.ok) throw new Error(res.status);
-    const data = await res.json();
-    if (path.includes('cluster/nodes') && data.items) {
-      return data.items.map(n => ({
-        name: n.metadata?.name||"unknown",
-        ip: (n.status?.addresses?.find(a=>a.type==="InternalIP")||{}).address||"—",
-        role: Object.keys(n.metadata?.labels||{}).filter(l=>l.startsWith("node-role")).map(l=>l.split("/")[1]).join("+")||"worker",
-        status: n.status?.conditions?.find(c=>c.type==="Ready")?.status==="True"?"Ready":"NotReady",
-        pods:0, cpu_percent:0, memory_percent:0,
-      }));
-    }
-    return data;
-  } catch(e) { console.warn(`API ${path} failed:`,e.message); return fallback; }
+// ═══════════ API ═══════════
+async function api(path,fb){
+  if(CFG.MOCK)return fb;
+  try{const r=await fetch(CFG.API+path);if(!r.ok)throw new Error(r.status);const d=await r.json();
+    if(path.includes('cluster/nodes')&&d.items)return d.items.map(n=>({name:n.metadata?.name||"?",ip:(n.status?.addresses?.find(a=>a.type==="InternalIP")||{}).address||"—",role:Object.keys(n.metadata?.labels||{}).filter(l=>l.startsWith("node-role")).map(l=>l.split("/")[1]).join("+")||"worker",status:n.status?.conditions?.find(c=>c.type==="Ready")?.status==="True"?"Ready":"NotReady",pods:0,cpu_percent:0,memory_percent:0}));
+    return d;
+  }catch(e){return fb;}
 }
-async function apiPost(path) { try { const r=await fetch(CONFIG.API_BASE+path,{method:'POST'}); return await r.json(); } catch(e) { return {error:e.message}; } }
-async function apiFetchText(path) { try { const r=await fetch(CONFIG.API_BASE+path); if(!r.ok) throw new Error(r.status); return await r.text(); } catch(e) { return `Failed to fetch: ${e.message}`; } }
+async function apiPost(p){try{const r=await fetch(CFG.API+p,{method:'POST'});return await r.json();}catch(e){return{error:e.message};}}
+async function apiText(p){try{const r=await fetch(CFG.API+p);if(!r.ok)throw new Error(r.status);return await r.text();}catch(e){return`Error: ${e.message}`;}}
 
-function usePolledData(path, fallback, interval) {
-  const [data, setData] = useState(fallback);
-  useEffect(() => {
-    let mounted = true;
-    const poll = async () => {
-      const d = await apiFetch(path, fallback);
-      if (mounted) {
-        if (path==='/api/v1/agents' && Array.isArray(d)) {
-          const normalized = d.map(a => ({
-            id:a.name||a.id, name:a.display_name||a.name||a.id, role:a.role||"Agent", model:a.model||"unknown", backend:a.backend||"unknown",
-            status:a.healthy===false?"offline":(a.healthy?"online":(a.status||"offline")),
-            tools:a.tools||[], uptime_seconds:a.uptime_seconds||0, tasks_completed:a.tasks_completed||0,
-            last_action:a.last_action||"—", ping_ms:a.ping_ms||a.latency_ms||null,
-            cpu_percent:a.cpu_percent||0, memory_percent:a.memory_percent||0,
-            initial:(a.display_name||a.name||a.id||"?")[0].toUpperCase(),
-          }));
-          setData(normalized.length>0?normalized:fallback);
-        } else setData(d);
-      }
-    };
-    poll();
-    const id = setInterval(poll, interval||CONFIG.POLL_INTERVAL);
-    return () => { mounted=false; clearInterval(id); };
-  }, [path]);
-  return data;
+function usePoll(path,fb,iv){
+  const[d,set]=useState(fb);
+  useEffect(()=>{let m=true;const go=async()=>{const r=await api(path,fb);if(!m)return;
+    if(path==='/api/v1/agents'&&Array.isArray(r)){const n=r.map(a=>({id:a.name||a.id,name:a.display_name||a.name||a.id,role:a.role||"Agent",model:a.model||"?",backend:a.backend||"?",status:a.healthy===false?"offline":(a.healthy?"online":(a.status||"offline")),tools:a.tools||[],uptime_seconds:a.uptime_seconds||0,tasks_completed:a.tasks_completed||0,last_action:a.last_action||"—",ping_ms:a.ping_ms||a.latency_ms||null,cpu_percent:a.cpu_percent||0,memory_percent:a.memory_percent||0,initial:(a.display_name||a.name||a.id||"?")[0].toUpperCase()}));set(n.length?n:fb);}else set(r);};
+    go();const id=setInterval(go,iv||CFG.POLL);return()=>{m=false;clearInterval(id);};
+  },[path]);return d;
+}
+function useWS(){const[ev,setEv]=useState([]);const[ok,setOk]=useState(false);
+  useEffect(()=>{if(CFG.MOCK)return;const u=CFG.WS||`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;let ws,d=3e3;const go=()=>{ws=new WebSocket(u);ws.onopen=()=>{setOk(true);d=3e3};ws.onclose=()=>{setOk(false);d=Math.min(d*2,3e4);setTimeout(go,d)};ws.onmessage=e=>{try{setEv(p=>[JSON.parse(e.data),...p].slice(0,100))}catch{}};};go();return()=>ws?.close();},[]);return{ev,ok};
 }
 
-function useEventStream() {
-  const [events, setEvents] = useState([]);
-  const [connected, setConnected] = useState(false);
-  useEffect(() => {
-    if (CONFIG.USE_MOCK) return;
-    const wsUrl = CONFIG.WS_URL||`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;
-    let ws, retryDelay=3000;
-    const connect = () => {
-      ws = new WebSocket(wsUrl);
-      ws.onopen = () => { setConnected(true); retryDelay=3000; };
-      ws.onclose = () => { setConnected(false); retryDelay=Math.min(retryDelay*2,30000); setTimeout(connect,retryDelay); };
-      ws.onmessage = (e) => { try { const evt=JSON.parse(e.data); setEvents(prev=>[evt,...prev].slice(0,100)); } catch{} };
-    };
-    connect();
-    return () => ws?.close();
-  }, []);
-  return { events, connected };
+// ═══════════ AUTH ═══════════
+async function whoami(){
+  try{const r=await fetch('/api/v1/whoami');if(!r.ok)return{user:'Sovereign',role:'sovereign',authenticated:false};
+    return await r.json();}catch{return{user:'Sovereign',role:'sovereign',authenticated:false};}
+}
+function useAuth(){
+  const[auth,setAuth]=useState({user:'Sovereign',role:'sovereign',authenticated:false});
+  useEffect(()=>{whoami().then(setAuth);const id=setInterval(()=>whoami().then(setAuth),60000);return()=>clearInterval(id);},[]);
+  return auth;
+}
+const logout=()=>{window.location.href='/oauth2/sign_out?rd=/'};
+
+// ═══════════ GITEA ═══════════
+function usePRs(){
+  const[prs,setPrs]=useState([]);const[loading,setLoading]=useState(true);
+  useEffect(()=>{let m=true;const go=async()=>{try{
+    const r=await fetch('/api/v1/gitea/prs');
+    if(!r.ok)throw new Error(r.status);const d=await r.json();if(m)setPrs(Array.isArray(d)?d:[]);
+  }catch{if(m)setPrs([]);}finally{if(m)setLoading(false);}};
+  go();const id=setInterval(go,8000);return()=>{m=false;clearInterval(id);};},[]);
+  return{prs,loading};
+}
+function useRepos(){
+  const[repos,setRepos]=useState([]);
+  useEffect(()=>{let m=true;const go=async()=>{try{
+    const r=await fetch('/api/v1/gitea/repos');
+    if(!r.ok)throw new Error(r.status);const d=await r.json();if(m)setRepos(Array.isArray(d)?d:[]);
+  }catch{if(m)setRepos([
+    {name:'project_valhalla',owner:'gitea_admin',description:'Go source — agent, gateway, lockbox',open_prs:0,language:'Go'},
+    {name:'valhalla-infra',owner:'kit',description:'K8s manifests — ArgoCD source of truth',open_prs:0,language:'YAML'},
+    {name:'hirdforge-personas',owner:'kit',description:'Agent SOULs, docs, swarm protocol',open_prs:0,language:'Markdown'},
+    {name:'hirdforge-discord',owner:'kit',description:'Discord bot — Gateway bridge',open_prs:0,language:'Python'},
+  ]);}};go();const id=setInterval(go,30000);return()=>{m=false;clearInterval(id);};},[]);
+  return repos;
+}
+async function mergePR(repo,index){
+  try{const r=await fetch(`/api/v1/gitea/prs/${repo}/${index}/merge`,{method:'POST'});
+    return r.ok?{ok:true}:{ok:false,error:`${r.status}`};}catch(e){return{ok:false,error:e.message};}
 }
 
-// ═══════════════════════════════════════════════════════════
-//  CHAT API
-// ═══════════════════════════════════════════════════════════
-async function streamChat(agentId, message, sessionId, signal, onChunk, onReplace, onToolCall, onToolResult, onDone, onError) {
-  try {
-    const res = await fetch(`${CONFIG.API_BASE}/api/v1/message`, { method:'POST', signal, headers:{'Content-Type':'application/json'}, body:JSON.stringify({agent:agentId,content:message,session_id:sessionId}) });
-    if (!res.ok) { const err=await res.json().catch(()=>({error:res.statusText})); onError(`Error: ${err.error||res.statusText}`); return; }
-    const reader=res.body.getReader(); const decoder=new TextDecoder(); let buffer='';
-    while (true) {
-      const {done,value}=await reader.read(); if(done) break;
-      buffer+=decoder.decode(value,{stream:true}); const lines=buffer.split('\n'); buffer=lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const chunk=JSON.parse(line.slice(6));
-          if(chunk.type==='content'&&chunk.content) onChunk(chunk.content);
-          else if(chunk.type==='replace'&&chunk.content) onReplace(chunk.content);
-          else if(chunk.type==='tool_call') onToolCall(chunk.tool||'tool',chunk.args);
-          else if(chunk.type==='tool_result') onToolResult(chunk.tool||'tool',chunk.result);
-          if(chunk.done){onDone(chunk.session_id||sessionId);return;}
-        } catch{}
-      }
-    }
-    onDone(sessionId);
-  } catch(e) {
-    if (e && e.name === 'AbortError') {
-      onError('[Stopped by Sovereign]');
+// ═══════════ STREAM ═══════════
+async function streamChat(ag,msg,sid,sig,onC,onR,onTC,onTR,onD,onE){
+  try{const r=await fetch(`${CFG.API}/api/v1/message`,{method:'POST',signal:sig,headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:ag,content:msg,session_id:sid})});
+    if(!r.ok){const e=await r.json().catch(()=>({error:r.statusText}));onE(`Error: ${e.error||r.statusText}`);return;}
+    const rd=r.body.getReader();const dec=new TextDecoder();let buf='';
+    while(true){const{done,value}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});const ls=buf.split('\n');buf=ls.pop();
+      for(const l of ls){if(!l.startsWith('data: '))continue;try{const c=JSON.parse(l.slice(6));if(c.type==='content'&&c.content)onC(c.content);else if(c.type==='replace'&&c.content)onR(c.content);else if(c.type==='tool_call')onTC(c.tool||'tool',c.args);else if(c.type==='tool_result')onTR(c.tool||'tool',c.result);if(c.done){onD(c.session_id||sid);return;}}catch{}}}
+    onD(sid);
+  }catch(e){if(e?.name==='AbortError'){onE('[Stopped by Sovereign]');return;}onE(`Failed: ${e.message}`);}
+}
+
+// ═══════════ MARKDOWN ═══════════
+function md(text){if(!text)return'';
+  let h=text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/```(\w*)\n([\s\S]*?)```/g,(_,l,c)=>`<pre><code>${c.trim()}</code></pre>`)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>')
+    .replace(/\*\*\*(.+?)\*\*\*/g,'<strong><em>$1</em></strong>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*(.+?)\*/g,'<em>$1</em>')
+    .replace(/^---$/gm,'<hr/>')
+    .replace(/^\|(.+)\|$/gm,m=>{const c=m.split('|').filter(x=>x.trim());if(c.every(x=>/^[-:\s]+$/.test(x)))return'<!--sep-->';return'<tr>'+c.map(x=>`<td>${x.trim()}</td>`).join('')+'</tr>';})
+    .replace(/^[-*] (.+)$/gm,'<li>$1</li>').replace(/^\d+\. (.+)$/gm,'<li>$1</li>');
+  h=h.replace(/((?:<li>.*<\/li>\n?)+)/g,'<ul>$1</ul>');
+  h=h.replace(/((?:<tr>.*<\/tr>\n?)+)/g,m=>'<table>'+m.replace(/<!--sep-->\n?/g,'')+'</table>');
+  h=h.replace(/\n/g,'<br/>').replace(/(<\/(h[1-3]|pre|ul|ol|table|hr)>)<br\/>/g,'$1').replace(/<br\/>(<(h[1-3]|pre|ul|ol|table|hr))/g,'$1');
+  return h;
+}
+
+// ═══════════ PRIMITIVES ═══════════
+const Pip=({status,size=6})=>{const c=sc(status);return<span style={{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",width:size,height:size,flexShrink:0}}>{status==="online"&&<span style={{position:"absolute",width:size*2.5,height:size*2.5,borderRadius:"50%",background:c,opacity:.12,animation:"glow-pulse 2s ease infinite"}}/>}<span style={{width:size,height:size,borderRadius:"50%",background:c,boxShadow:`0 0 ${size}px ${c}50`}}/></span>;};
+
+const Av=({agent,size=28})=>{const c=C[agent.id]||"#818cf8";return<div style={{position:"relative",width:size,height:size,flexShrink:0}}><div style={{position:"absolute",inset:-2,borderRadius:"50%",background:`conic-gradient(from 0deg,${c}00,${c}35,${c}00,${c}25,${c}00)`,animation:agent.status==="online"?"avatar-spin 8s linear infinite":"none",opacity:agent.status==="online"?1:.25}}/><div style={{position:"absolute",inset:0,borderRadius:"50%",background:`linear-gradient(135deg,${c}20,${c}08)`,border:`1px solid ${c}30`,display:"flex",alignItems:"center",justifyContent:"center"}}><span style={{fontSize:size*.4,fontWeight:800,color:c,fontFamily:"'Space Grotesk',sans-serif",lineHeight:1}}>{agent.initial||agent.name?.[0]||"?"}</span></div><div style={{position:"absolute",bottom:-1,right:-1,width:size*.3,height:size*.3,borderRadius:"50%",background:sc(agent.status),border:"2px solid #08090f"}}/></div>;};
+
+const Bar=({value,max=100,color="#818cf8",h=3})=><div className="bar-track"><div className="bar-fill" style={{width:`${(value/max)*100}%`,background:`linear-gradient(90deg,${color}60,${color})`}}/></div>;
+const Badge=({text,color="rgba(255,255,255,0.4)"})=><span className="badge" style={{color,background:`${color}10`,border:`1px solid ${color}18`}}>{text}</span>;
+const Btn=({label,icon,color="#818cf8",onClick,disabled,small})=><button onClick={onClick} disabled={disabled} style={{padding:small?"3px 7px":"5px 10px",fontSize:small?8:9,fontWeight:700,letterSpacing:".06em",background:`${color}10`,border:`1px solid ${color}22`,color:disabled?`${color}40`:color,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",opacity:disabled?.5:1,display:"inline-flex",alignItems:"center",gap:3,borderRadius:3}}>{icon&&<span style={{fontSize:small?9:10}}>{icon}</span>}{label}</button>;
+
+const fUp=s=>s<=0?"—":`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+const fT=ts=>{try{return new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch{return ts;}};
+const fAgo=ts=>{try{const s=(Date.now()-new Date(ts).getTime())/1000;if(s<60)return`${Math.floor(s)}s`;if(s<3600)return`${Math.floor(s/60)}m`;if(s<86400)return`${Math.floor(s/3600)}h`;return`${Math.floor(s/86400)}d`;}catch{return"—";}};
+
+// ═══════════ TERMINAL ═══════════
+const HELP=`  HIRDFORGE FORGE TERMINAL — v1.0
+  ─────────────────────────────────────────
+  agents             List all agents + status
+  pods               List all pods
+  nodes              List cluster nodes
+  prs                Open pull requests
+  logs <pod> [n]     Tail pod logs (default 50 lines)
+  events             Recent K8s events
+  commits            Recent git commits
+  status             Cluster summary
+  restart <pod>      Restart a pod
+  stop <agent>       Stop agent processing
+  stop-all           Emergency stop all agents
+  @<agent> <msg>     Send command to specific agent
+  clear              Clear terminal
+  help               Show this help`;
+
+function ForgeTerminal({agents,pods,nodes,commits,k8sEvents,target}){
+  const[lines,setLines]=useState([{t:'system',text:'Forge Terminal ready. Type help for commands.'}]);
+  const[input,setInput]=useState('');
+  const[busy,setBusy]=useState(false);
+  const scrollRef=useRef(null);
+  const inputRef=useRef(null);
+  const ctrlRef=useRef(null);
+
+  const addLine=(t,text)=>setLines(p=>[...p,{t,text}]);
+  const addHtml=(t,html)=>setLines(p=>[...p,{t,html}]);
+  useEffect(()=>{if(scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight;},[lines]);
+
+  const exec=async(raw)=>{
+    const cmd=raw.trim();if(!cmd)return;
+    addLine('cmd',`forge@valhalla:~$ ${cmd}`);
+
+    if(cmd==='clear'){setLines([]);return;}
+    if(cmd==='help'){addLine('','HELP');addHtml('',`<pre style="color:rgba(255,255,255,0.5);margin:0">${HELP}</pre>`);return;}
+
+    if(cmd==='agents'){
+      const ag=await api('/api/v1/agents',FA);const rows=ag.map(a=>{const n=(a.name||a.id).padEnd(20);const r=(a.role||'').padEnd(18);const m=(a.model||'?').padEnd(22);const s=a.status==='online'?'● ONLINE':'○ OFFLINE';return{n:a.name||a.id,r:a.role,m:a.model,s:a.status,up:fUp(a.uptime_seconds)};});
+      addHtml('',`<table class="term-table"><tr><th>AGENT</th><th>ROLE</th><th>MODEL</th><th>STATUS</th><th>UPTIME</th></tr>${rows.map(r=>`<tr><td style="color:${C[r.n.split(' ')[0].toLowerCase()]||'#818cf8'};font-weight:600">${r.n}</td><td>${r.r}</td><td>${r.m}</td><td style="color:${r.s==='online'?'#34d399':'#ef4444'}">${r.s==='online'?'● ONLINE':'○ OFFLINE'}</td><td>${r.up}</td></tr>`).join('')}</table>`);
       return;
     }
-    onError(`Failed to reach ${agentId}: ${e.message}`);
-  }
-}
 
-// ═══════════════════════════════════════════════════════════
-//  PRIMITIVES
-// ═══════════════════════════════════════════════════════════
-const GlowPip = ({status, size=7}) => { const c=statusColor(status); return React.createElement('span',{style:{position:"relative",display:"inline-flex",alignItems:"center",justifyContent:"center",width:size,height:size,flexShrink:0}}, status==="online"&&React.createElement('span',{style:{position:"absolute",width:size*2.5,height:size*2.5,borderRadius:"50%",background:c,opacity:0.15,animation:"glow-pulse 2s ease-in-out infinite"}}), React.createElement('span',{style:{position:"relative",width:size,height:size,borderRadius:"50%",background:c,boxShadow:`0 0 ${size}px ${c}60`}})); };
-
-const Glass = ({children, style={}, glow, onClick}) => (
-  <div onClick={onClick} style={{background:"linear-gradient(135deg,rgba(255,255,255,0.025) 0%,rgba(255,255,255,0.005) 100%)",backdropFilter:"blur(16px)",WebkitBackdropFilter:"blur(16px)",border:"1px solid rgba(255,255,255,0.04)",position:"relative",overflow:"hidden",...style}}>
-    {glow && <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${glow}35,transparent)`}} />}
-    {children}
-  </div>
-);
-
-const Bar = ({value, max=100, color="#818cf8", h=3}) => (
-  <div style={{height:h,background:"rgba(255,255,255,0.04)",position:"relative",overflow:"hidden"}}>
-    <div style={{position:"absolute",left:0,top:0,height:"100%",width:`${(value/max)*100}%`,background:`linear-gradient(90deg,${color}60,${color})`,boxShadow:`0 0 8px ${color}20`,transition:"width 1s cubic-bezier(0.16,1,0.3,1)"}} />
-  </div>
-);
-
-const Badge = ({text, color="rgba(255,255,255,0.4)"}) => (<span style={{display:"inline-block",padding:"2px 7px",fontSize:9,fontWeight:700,letterSpacing:"0.1em",textTransform:"uppercase",color,background:`${color}12`,border:`1px solid ${color}20`}}>{text}</span>);
-
-const Sparkline = ({data, color="#818cf8", w=64, h=20}) => { const max=Math.max(...data),min=Math.min(...data),r=max-min||1; const pts=data.map((v,i)=>`${(i/(data.length-1))*w},${h-((v-min)/r)*h}`).join(" "); return <svg width={w} height={h} style={{display:"block"}}><polyline points={`${pts} ${w},${h} 0,${h}`} fill={`${color}08`} stroke="none"/><polyline points={pts} fill="none" stroke={color} strokeWidth="1.2" opacity="0.6"/></svg>; };
-
-const MetricCard = ({label,value,sub,color="#e2e8f0"}) => (
-  <Glass glow={color!=="#e2e8f0"?color:null} style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:4}}>
-    <span style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.25)"}}>{label}</span>
-    <div style={{fontSize:24,fontWeight:800,color,fontFamily:"'Space Grotesk',sans-serif",lineHeight:1,letterSpacing:"-0.02em"}}>{value}</div>
-    {sub && <span style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{sub}</span>}
-  </Glass>
-);
-
-const ActionBtn = ({label, icon, color="#818cf8", onClick, disabled, small}) => (
-  <button onClick={onClick} disabled={disabled} className="action-btn" style={{padding:small?"4px 8px":"6px 12px",fontSize:small?8:9,fontWeight:700,letterSpacing:"0.1em",background:`linear-gradient(135deg,${color}15,${color}08)`,border:`1px solid ${color}30`,color:disabled?`${color}40`:color,cursor:disabled?"not-allowed":"pointer",textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",opacity:disabled?0.5:1,display:"inline-flex",alignItems:"center",gap:4,transition:"all 0.15s"}}>{icon&&<span style={{fontSize:small?9:11}}>{icon}</span>}{label}</button>
-);
-
-const makeSparkline = (n=16,base=30,v=25) => Array.from({length:n},()=>base+Math.random()*v);
-const fmtUptime = s => s<=0?"—":`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
-const fmtTime = ts => { try { return new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch { return ts; } };
-const fmtTimeAgo = ts => { try { const s=(Date.now()-new Date(ts).getTime())/1000; if(s<60) return `${Math.floor(s)}s ago`; if(s<3600) return `${Math.floor(s/60)}m ago`; if(s<86400) return `${Math.floor(s/3600)}h ago`; return `${Math.floor(s/86400)}d ago`; } catch { return "—"; } };
-
-// ═══════════════════════════════════════════════════════════
-//  AGENT AVATAR
-// ═══════════════════════════════════════════════════════════
-const AgentAvatar = ({agent, size=32, showStatus=true}) => {
-  const c=AGENT_COLORS[agent.id]||"#818cf8"; const sc=statusColor(agent.status); const initial=agent.initial||agent.name?.[0]||"?";
-  return (
-    <div style={{position:"relative",width:size,height:size,flexShrink:0}}>
-      <div style={{position:"absolute",inset:-2,borderRadius:"50%",background:`conic-gradient(from 0deg, ${c}00, ${c}40, ${c}00, ${c}30, ${c}00)`,animation:agent.status==="online"?"avatar-spin 8s linear infinite":"none",opacity:agent.status==="online"?1:0.3}} />
-      <div style={{position:"absolute",inset:0,borderRadius:"50%",background:`linear-gradient(135deg, ${c}25, ${c}08)`,border:`1px solid ${c}30`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-        <span style={{fontSize:size*0.4,fontWeight:800,color:c,fontFamily:"'Space Grotesk',sans-serif",textShadow:`0 0 12px ${c}40`,lineHeight:1}}>{initial}</span>
-      </div>
-      {showStatus && <div style={{position:"absolute",bottom:-1,right:-1,width:size*0.32,height:size*0.32,borderRadius:"50%",background:sc,border:"2px solid #0a0a14",boxShadow:`0 0 6px ${sc}60`}} />}
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════
-//  LOG VIEWER MODAL
-// ═══════════════════════════════════════════════════════════
-const LogModal = ({podName, onClose}) => {
-  const [logs, setLogs] = useState("Loading logs...");
-  const [lines, setLines] = useState(100);
-  const logRef = useRef(null);
-  useEffect(() => {
-    let mounted = true;
-    const fetchLogs = async () => {
-      const text = await apiFetchText(`/api/v1/cluster/pods/${podName}/logs?lines=${lines}`);
-      if (mounted) { setLogs(text); if(logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight; }
-    };
-    fetchLogs();
-    const id = setInterval(fetchLogs, 5000);
-    return () => { mounted=false; clearInterval(id); };
-  }, [podName, lines]);
-
-  return (
-    <div style={{position:"fixed",inset:0,zIndex:10000,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.7)",backdropFilter:"blur(4px)"}} onClick={onClose}>
-      <div onClick={e=>e.stopPropagation()} className="modal-content" style={{width:"80%",maxWidth:900,height:"70vh",background:"linear-gradient(135deg,#0d0d1a,#08080f)",border:"1px solid rgba(255,255,255,0.08)",display:"flex",flexDirection:"column"}}>
-        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 18px",borderBottom:"1px solid rgba(255,255,255,0.06)",flexShrink:0}}>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <span style={{fontSize:13,fontWeight:700,color:"#22d3ee",fontFamily:"'Space Grotesk',sans-serif"}}>⬡ {podName}</span>
-            <Badge text="logs" color="#22d3ee" />
-          </div>
-          <div style={{display:"flex",alignItems:"center",gap:8}}>
-            {[50,100,500].map(n=>(
-              <button key={n} onClick={()=>setLines(n)} style={{padding:"3px 8px",fontSize:9,fontWeight:lines===n?700:400,background:lines===n?"rgba(34,211,238,0.12)":"transparent",border:`1px solid ${lines===n?"rgba(34,211,238,0.3)":"rgba(255,255,255,0.06)"}`,color:lines===n?"#22d3ee":"rgba(255,255,255,0.3)",cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace"}}>{n}L</button>
-            ))}
-            <button onClick={onClose} style={{padding:"3px 10px",fontSize:12,background:"rgba(239,68,68,0.1)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace",fontWeight:700}}>✕</button>
-          </div>
-        </div>
-        <div ref={logRef} style={{flex:1,overflow:"auto",padding:"12px 18px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,lineHeight:1.6,color:"rgba(255,255,255,0.5)",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
-          {logs}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════
-//  COMMS VIEW
-// ═══════════════════════════════════════════════════════════
-const TypingIndicator = ({color="#818cf8"}) => (<div style={{display:"flex",gap:3,alignItems:"center",padding:"6px 0"}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:color,opacity:0.4,animation:`typing-bounce 1.2s ease-in-out ${i*0.15}s infinite`}} />)}</div>);
-
-const ToolCallChip = ({tool,args}) => (<div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:6,background:"rgba(34,211,238,0.06)",border:"1px solid rgba(34,211,238,0.12)",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",maxWidth:"100%",overflow:"hidden",borderRadius:4}}><span style={{color:"#22d3ee",fontWeight:700,fontSize:9,letterSpacing:"0.1em"}}>TOOL</span><span style={{color:"rgba(255,255,255,0.5)"}}>{tool}</span>{args&&<span style={{color:"rgba(255,255,255,0.2)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{typeof args==='string'?args:JSON.stringify(args)}</span>}</div>);
-
-const ToolResultChip = ({tool,result}) => (<div style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",marginTop:2,background:"rgba(52,211,153,0.04)",border:"1px solid rgba(52,211,153,0.10)",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",maxWidth:"100%",overflow:"hidden",borderRadius:4}}><span style={{color:"#34d399",fontWeight:700,fontSize:9,letterSpacing:"0.1em"}}>RESULT</span><span style={{color:"rgba(255,255,255,0.4)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{typeof result==='string'?result:JSON.stringify(result)}</span></div>);
-
-// Forging Indicator Component
-const ForgingIndicator = ({count = 0}) => {
-  if (count === 0) return null;
-  return React.createElement('div', { className: 'forging-indicator' },
-    React.createElement('span', { style: { animation: 'spin 1s linear infinite' } }, '⚒'),
-    React.createElement('span', null, `Forging... ${count} tool call${count !== 1 ? 's' : ''}`)
-  );
-};
-
-const ChatBubble = ({msg}) => {
-  const isSelf=msg.from==="kit"; const c=AGENT_COLORS[msg.from]||"#818cf8";
-  const shouldAnimate = !msg.streaming;
-  const elRef=useRef(null); const [animated,setAnimated]=useState(!shouldAnimate);
-  useEffect(()=>{if(!animated&&elRef.current){const t=setTimeout(()=>setAnimated(true),400);return()=>clearTimeout(t);}},[]);
-  
-  const toolCallCount = (msg.toolCalls || []).length;
-  const hasToolActivity = toolCallCount > 0 || (msg.toolResults || []).length > 0;
-  
-  return (
-    <div ref={elRef} className="chat-bubble" style={{display:"flex",gap:12,maxWidth:"85%",overflow:"hidden",alignSelf:isSelf?"flex-end":"flex-start",flexDirection:isSelf?"row-reverse":"row",animation:!animated?"msg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1) forwards":"none"}}>
-      <AgentAvatar agent={msg.agent} size={28} />
-      <div style={{display:"flex",flexDirection:"column",gap:3,maxWidth:"calc(100% - 44px)"}}>
-        <div style={{display:"flex",gap:8,alignItems:"center",justifyContent:isSelf?"flex-end":"flex-start"}}>
-          <span className="agent-name" style={{fontSize:11,fontWeight:700,color:c}}>{msg.agent.name}</span>
-          <span className="timestamp" style={{fontSize:10,color:"rgba(255,255,255,0.15)"}}>{msg.time}</span>
-        </div>
-        <div style={{padding:"12px 16px",overflow:"hidden",background:isSelf?"linear-gradient(135deg, rgba(16,185,129,0.08), rgba(16,185,129,0.03))":"linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01))",border:`1px solid ${isSelf?"rgba(16,185,129,0.12)":"rgba(255,255,255,0.04)"}`,position:"relative"}}>
-          <div style={{position:"absolute",top:0,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${c}15,transparent)`}} />
-          
-          {/* Forging indicator - show when streaming */}
-          {msg.streaming && React.createElement(ForgingIndicator, { count: toolCallCount })}
-          
-          <span className="chat-bubble-text message-text" style={{fontSize:13,color:"rgba(255,255,255,0.75)",lineHeight:1.7,display:"block",whiteSpace:"pre-wrap",wordBreak:"break-word",overflowWrap:"break-word"}}>{msg.text}</span>
-          
-          {/* Collapsible activity stream for tool calls/results */}
-          {hasToolActivity && React.createElement('div', { className: 'activity-stream' },
-            React.createElement('details', { open: false },
-              React.createElement('summary', null, `⚒ Forging — ${toolCallCount} tool call${toolCallCount !== 1 ? 's' : ''}`),
-              React.createElement('div', { className: 'activity-stream-content' },
-                (msg.toolCalls || []).map((tc, i) => 
-                  React.createElement(ToolCallChip, { key: `tc-${i}`, tool: tc.tool, args: tc.args })
-                ),
-                (msg.toolResults || []).map((tr, i) => 
-                  React.createElement(ToolResultChip, { key: `tr-${i}`, tool: tr.tool, result: tr.result })
-                )
-              )
-            )
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const EventEntry = ({event, idx}) => {
-  const typeColors={delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24",sync:"#34d399",pulse:"#c084fc",infra:"#6b7280"};
-  const accent=typeColors[event.type]||"#6b7280"; const src=(event.source||"SYS").slice(0,3).toUpperCase();
-  return (
-    <div className="event-entry" style={{display:"flex",gap:8,padding:"8px 16px",borderBottom:"1px solid rgba(255,255,255,0.02)",animation:`event-fade-in 0.3s ease ${Math.min(idx,10)*0.03}s both`,position:"relative"}}>
-      <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:`${accent}20`}} />
-      <span style={{fontSize:10,color:"rgba(255,255,255,0.18)",fontFamily:"'IBM Plex Mono',monospace",minWidth:56,flexShrink:0,paddingTop:1}}>{fmtTime(event.timestamp)}</span>
-      <div style={{width:5,height:5,borderRadius:"50%",background:accent,marginTop:5,flexShrink:0,boxShadow:`0 0 6px ${accent}40`}} />
-      <div style={{flex:1,minWidth:0}}>
-        <span style={{fontSize:9,fontWeight:800,color:accent,letterSpacing:"0.08em",marginRight:6}}>{src}</span>
-        <span style={{fontSize:11,color:"rgba(255,255,255,0.45)",lineHeight:1.5}}>{event.message}</span>
-      </div>
-    </div>
-  );
-};
-
-const CommsView = ({agents, events, wsConnected, chatHistory, setChatHistory, msg, setMsg, target, setTarget, sending, setSending, sessionId, setSessionId, sessionItems, onLoadSession, onNewConversation, onClearHistory, onEmergencyStop}) => {
-  const messagesEl=useRef(null); const textareaEl=useRef(null); const streamControllerRef=useRef(null);
-  const ta=agents.find(a=>a.id===target)||FALLBACK_AGENTS[0]; const tc=AGENT_COLORS[target]||"#818cf8";
-  
-  // Auto-scroll to bottom when new messages arrive
-  const scrollBottom = useCallback(() => {
-    if (messagesEl.current) {
-      messagesEl.current.scrollTop = messagesEl.current.scrollHeight;
+    if(cmd==='pods'){
+      const pd=await api('/api/v1/cluster/pods',[]);
+      addHtml('',`<table class="term-table"><tr><th>NAME</th><th>STATUS</th><th>NODE</th><th>RESTARTS</th></tr>${pd.map(p=>`<tr><td style="color:${Object.keys(C).some(a=>(p.name||'').startsWith(a))?'#818cf8':'rgba(255,255,255,0.6)'}">${p.name}</td><td style="color:${p.status==='Running'?'#34d399':'#ef4444'}">${p.status==='Running'?'●':'○'} ${p.status}</td><td>${p.node||'—'}</td><td>${p.restarts||0}</td></tr>`).join('')}</table>`);
+      addLine('info',`${pd.length} pods total, ${pd.filter(p=>p.status==='Running').length} running`);
+      return;
     }
-  }, []);
-  
-  useEffect(() => {
-    requestAnimationFrame(scrollBottom);
-  }, [chatHistory, scrollBottom]);
 
-  const markStopped = () => {
-    setChatHistory(prev=>{
-      if (!prev.length) return prev;
-      const u=[...prev];
-      const last={...u[u.length-1]};
-      if (last.from===target && last.streaming) {
-        last.streaming=false;
-        last.text = (last.text ? `${last.text}\n` : "") + "[Stopped by Sovereign]";
-        u[u.length-1]=last;
-      }
-      return u;
-    });
-  };
-
-  const stopCurrent = async () => {
-    if (streamControllerRef.current) {
-      streamControllerRef.current.abort();
-      streamControllerRef.current = null;
+    if(cmd==='nodes'){
+      const nd=await api('/api/v1/cluster/nodes',FN);
+      addHtml('',`<table class="term-table"><tr><th>NAME</th><th>ROLE</th><th>STATUS</th><th>IP</th><th>CPU</th><th>MEM</th></tr>${nd.map(n=>`<tr><td style="color:#e2e8f0;font-weight:600">${n.name}</td><td>${n.role}</td><td style="color:${n.status==='Ready'?'#34d399':'#ef4444'}">${n.status}</td><td>${n.ip}</td><td>${n.cpu_percent||0}%</td><td>${n.memory_percent||0}%</td></tr>`).join('')}</table>`);
+      return;
     }
-    markStopped();
-    setSending(false);
-    await apiPost(`/api/v1/agents/${target}/stop`);
-  };
 
-  const handleSend = async () => {
-    if(!msg.trim()||sending) return;
-    const userMsg={from:"kit",agent:{id:"kit",name:"Kit (Sovereign)",initial:"K",status:"online"},text:msg,time:new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),toolCalls:[],toolResults:[]};
-    const sentMsg=msg; setChatHistory(prev=>[...prev,userMsg]); setMsg(""); setSending(true);
-    if(textareaEl.current) textareaEl.current.style.height='56px';
-    const timeStr=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
-    setChatHistory(prev=>[...prev,{from:target,agent:ta,text:"",time:timeStr,streaming:true,toolCalls:[],toolResults:[]}]);
-    const ctrl = new AbortController();
-    streamControllerRef.current = ctrl;
-    await streamChat(target,sentMsg,sessionId,ctrl.signal,
-      (chunk)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=(l.text||"")+chunk;u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
-      (cleaned)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.text=cleaned;u[u.length-1]=l;return u;});},
-      (tool,args)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.toolCalls=[...(l.toolCalls||[]),{tool,args}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
-      (tool,result)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.toolResults=[...(l.toolResults||[]),{tool,result}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollBottom);},
-      (sid)=>{if(sid) setSessionId(sid);setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};l.streaming=false;if(!l.text&&!(l.toolCalls||[]).length)l.text="(empty response)";u[u.length-1]=l;return u;});setSending(false);streamControllerRef.current=null;},
-      (err)=>{setChatHistory(prev=>{const u=[...prev];const l={...u[u.length-1]};if(err&&err!=="[Stopped by Sovereign]") l.text=err;l.streaming=false;u[u.length-1]=l;return u;});setSending(false);streamControllerRef.current=null;}
+    if(cmd==='status'){
+      const ag=await api('/api/v1/agents',FA);const pd=await api('/api/v1/cluster/pods',[]);const nd=await api('/api/v1/cluster/nodes',FN);
+      const on=ag.filter(a=>a.status==='online').length;const run=pd.filter(p=>p.status==='Running').length;const rdy=nd.filter(n=>n.status==='Ready').length;
+      addLine('header','═══ VALHALLA CLUSTER STATUS ═══');
+      addLine(on===ag.length?'info':'warn',`  Agents:  ${on}/${ag.length} online`);
+      addLine(run===pd.length?'info':'warn',`  Pods:    ${run}/${pd.length} running`);
+      addLine(rdy===nd.length?'info':'warn',`  Nodes:   ${rdy}/${nd.length} ready`);
+      addLine('info',`  ArgoCD:  Synced / Healthy`);
+      return;
+    }
+
+    if(cmd==='events'){
+      const ev=await api('/api/v1/k8s/events',[]);const items=(Array.isArray(ev)?ev:ev?.items||[]).slice(0,15);
+      items.forEach(e=>{const t=e.type==='Warning'?'warn':'';addLine(t,`  ${(e.reason||'').padEnd(20)} ${(e.involvedObject?.name||'').padEnd(30)} ${(e.message||'').slice(0,80)}`);});
+      if(!items.length)addLine('system','  No recent events');
+      return;
+    }
+
+    if(cmd==='prs'){
+      try{const r=await fetch('/api/v1/gitea/prs');if(!r.ok)throw new Error();const d=await r.json();const open=d.filter(p=>p.state==='open');
+        if(!open.length){addLine('info','  No open pull requests');return;}
+        addLine('header',`  ${open.length} OPEN PULL REQUEST${open.length>1?'S':''}`);
+        addHtml('',`<table class="term-table"><tr><th>#</th><th>TITLE</th><th>AUTHOR</th><th>REPO</th><th>AGE</th></tr>${open.map(p=>`<tr><td style="color:#34d399;font-weight:600">${p.number||'?'}</td><td style="color:#e2e8f0">${(p.title||'').slice(0,40)}</td><td style="color:${C[p.user?.toLowerCase()]||'#818cf8'}">${p.user||'?'}</td><td>${p.repo||'?'}</td><td>${fAgo(p.created_at)}</td></tr>`).join('')}</table>`);
+      }catch{addLine('warn','  PR endpoint not available — needs Gateway update');addLine('system','  Check Gitea directly: http://203.0.113.26:30637');}
+      return;
+    }
+
+    if(cmd==='commits'){
+      const cm=await api('/api/v1/gitea/commits',[]);cm.slice(0,10).forEach(c=>{addLine('',`  ${(c.sha||'').slice(0,7)}  ${fAgo(c.date).padEnd(5)}  ${(c.author||'?').padEnd(12)}  ${(c.message||'').split('\n')[0].slice(0,60)}`);});
+      if(!cm.length)addLine('system','  No commits found');
+      return;
+    }
+
+    if(cmd.startsWith('logs ')){
+      const parts=cmd.split(/\s+/);const pod=parts[1];const n=parseInt(parts[2])||50;
+      addLine('system',`  Fetching ${n} lines from ${pod}...`);
+      const text=await apiText(`/api/v1/cluster/pods/${pod}/logs?lines=${n}`);
+      addLine('',text);return;
+    }
+
+    if(cmd.startsWith('restart ')){
+      const pod=cmd.split(/\s+/)[1];addLine('warn',`  Restarting ${pod}...`);
+      await apiPost(`/api/v1/cluster/pods/${pod}/restart`);addLine('info',`  ✓ Restart triggered for ${pod}`);return;
+    }
+
+    if(cmd.startsWith('stop-all')){await apiPost('/api/v1/agents/stop-all');addLine('err','  ■ All agents stopped');return;}
+    if(cmd.startsWith('stop ')){const a=cmd.split(/\s+/)[1];await apiPost(`/api/v1/agents/${a}/stop`);addLine('warn',`  ■ Stopped ${a}`);return;}
+
+    // Agent-routed command: @agent message
+    if(cmd.startsWith('@')){
+      const sp=cmd.indexOf(' ');const ag=cmd.slice(1,sp>0?sp:undefined);const msg=sp>0?cmd.slice(sp+1):'';
+      if(!msg){addLine('err',`  Usage: @${ag} <message>`);return;}
+      setBusy(true);
+      const sid=`term-${ag}-${Date.now()}`;let resp='';
+      const ctrl=new AbortController();ctrlRef.current=ctrl;
+      await streamChat(ag,msg,sid,ctrl.signal,
+        chunk=>{resp+=chunk;setLines(p=>{const u=[...p];if(u.length&&u[u.length-1]._stream){u[u.length-1]={t:'',text:resp,_stream:true};}else{u.push({t:'',text:resp,_stream:true});}return u;});if(scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight;},
+        cleaned=>{resp=cleaned;setLines(p=>{const u=[...p];if(u.length&&u[u.length-1]._stream)u[u.length-1]={t:'',text:resp,_stream:true};return u;});},
+        ()=>{},()=>{},
+        ()=>{setBusy(false);ctrlRef.current=null;setLines(p=>{const u=[...p];if(u.length&&u[u.length-1]._stream)delete u[u.length-1]._stream;return u;});},
+        err=>{addLine('err',`  ${err}`);setBusy(false);ctrlRef.current=null;}
+      );
+      return;
+    }
+
+    // Default: route to current target
+    addLine('system',`  Routing to ${target}...`);
+    setBusy(true);const sid=`term-${target}-${Date.now()}`;let resp='';
+    const ctrl=new AbortController();ctrlRef.current=ctrl;
+    await streamChat(target,cmd,sid,ctrl.signal,
+      chunk=>{resp+=chunk;setLines(p=>{const u=[...p];if(u.length&&u[u.length-1]._stream){u[u.length-1]={t:'',text:resp,_stream:true};}else{u.push({t:'',text:resp,_stream:true});}return u;});if(scrollRef.current)scrollRef.current.scrollTop=scrollRef.current.scrollHeight;},
+      cleaned=>{resp=cleaned;setLines(p=>{const u=[...p];if(u.length&&u[u.length-1]._stream)u[u.length-1]={t:'',text:resp,_stream:true};return u;});},
+      ()=>{},()=>{},
+      ()=>{setBusy(false);ctrlRef.current=null;setLines(p=>{const u=[...p];if(u.length&&u[u.length-1]._stream)delete u[u.length-1]._stream;return u;});},
+      err=>{addLine('err',`  ${err}`);setBusy(false);ctrlRef.current=null;}
     );
   };
 
-  return (
-    <div className="comms-view">
-      <div className="chat-container">
-        <div className="nav-bar" style={{display:"flex",alignItems:"center",gap:0,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.15)",flexShrink:0,flexWrap:"wrap"}}>
-          {agents.map(a=>{const ac=AGENT_COLORS[a.id];const sel=target===a.id;return(
-            <button key={a.id} className="agent-tab-btn" onClick={()=>setTarget(a.id)} style={{display:"flex",alignItems:"center",gap:6,padding:"10px 16px",background:sel?`${ac}08`:"transparent",border:"none",borderBottom:sel?`2px solid ${ac}`:"2px solid transparent",cursor:"pointer",transition:"all 0.15s"}}>
-              <AgentAvatar agent={a} size={22} showStatus={false} />
-              <span style={{fontSize:11,fontWeight:sel?700:400,color:sel?ac:"rgba(255,255,255,0.3)",fontFamily:"'IBM Plex Mono',monospace"}}>{(a.name||a.id).split(' ')[0]}</span>
-            </button>
-          );})}
-          <div style={{marginLeft:"auto",padding:"0 14px"}}><button className="action-btn" style={{padding:"6px 14px",fontSize:9,fontWeight:700,letterSpacing:"0.12em",background:"linear-gradient(135deg,rgba(251,191,36,0.12),rgba(251,191,36,0.04))",border:"1px solid rgba(251,191,36,0.2)",color:"#fbbf24",cursor:"pointer",textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ Broadcast</button></div>
-        </div>
-        <div style={{display:"flex",alignItems:"center",gap:12,padding:"8px 18px",background:`linear-gradient(90deg, ${tc}06, transparent)`,borderBottom:"1px solid rgba(255,255,255,0.03)",flexShrink:0}}>
-          <AgentAvatar agent={ta} size={26} />
-          <div style={{flex:1}}><span style={{fontSize:12,fontWeight:700,color:tc}}>{ta.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginLeft:8}}>{ta.role}</span></div>
-          <ActionBtn label="Clear" icon="⌫" color="#ef4444" small onClick={onClearHistory} />
-          <Badge text={ta.model} color={tc} /><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",fontFamily:"'IBM Plex Mono',monospace"}}>{ta.ping_ms?`${ta.ping_ms}ms`:"—"}</span>
-        </div>
-        <div className="messages-wrapper">
-          <div className="messages-scroll scroll-area" ref={messagesEl} style={{padding:"20px",display:"flex",flexDirection:"column",gap:20}}>
-            {chatHistory.length===0&&<div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100%",flexDirection:"column",gap:12,opacity:0.3}}><span style={{fontSize:32,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc}}>⚔</span><span style={{fontSize:12,color:"rgba(255,255,255,0.3)"}}>Command the warband</span></div>}
-            {chatHistory.map((m,i)=><ChatBubble key={i} msg={m} />)}
-            {sending&&chatHistory.length>0&&chatHistory[chatHistory.length-1].text===""&&!(chatHistory[chatHistory.length-1].toolCalls||[]).length&&(
-              <div style={{display:"flex",gap:12,alignItems:"center",opacity:0.6,paddingLeft:4}}><AgentAvatar agent={ta} size={22} showStatus={false} /><Glass style={{padding:"8px 14px",display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:10,color:tc,fontWeight:600}}>{ta.name.split(' ')[0]}</span><TypingIndicator color={tc} /></Glass></div>
-            )}
-          </div>
-        </div>
-        <div style={{padding:"12px 18px",borderTop:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(180deg, rgba(0,0,0,0.1), rgba(0,0,0,0.25))",display:"flex",gap:8,flexShrink:0,alignItems:"flex-end"}}>
-          <textarea ref={textareaEl} value={msg} onChange={e=>{setMsg(e.target.value);const el=e.target;el.style.height='56px';el.style.height=Math.min(el.scrollHeight,140)+'px';}} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();handleSend();}}} placeholder={`Command ${ta.name}...`} rows={2}
-            style={{flex:1,background:"rgba(255,255,255,0.02)",border:`1px solid ${tc}15`,padding:"14px 18px",color:"#e2e8f0",fontSize:13,fontFamily:"'IBM Plex Mono',monospace",outline:"none",lineHeight:1.5,minHeight:56,maxHeight:140,overflowY:"auto"}} />
-          {sending ? (
-            <button onClick={stopCurrent} className="send-btn" style={{padding:"14px 22px",background:"linear-gradient(135deg, rgba(239,68,68,0.35), rgba(239,68,68,0.2))",border:"1px solid rgba(239,68,68,0.7)",color:"#ef4444",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:800,cursor:"pointer",letterSpacing:"0.14em",textTransform:"uppercase",boxShadow:"0 0 24px rgba(239,68,68,0.35)",alignSelf:"stretch",minHeight:56}}>STOP</button>
-          ) : (
-            <button onClick={handleSend} disabled={sending} className="send-btn" style={{padding:"14px 28px",background:`linear-gradient(135deg, ${tc}30, ${tc}15)`,border:`1px solid ${tc}40`,color:tc,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,cursor:sending?"wait":"pointer",letterSpacing:"0.14em",textTransform:"uppercase",boxShadow:`0 0 24px ${tc}15`,alignSelf:"stretch",minHeight:56,opacity:sending?0.5:1}}>SEND</button>
-          )}
-        </div>
-      </div>
-      {/* EVENT STREAM - Sidebar */}
-      <div className="event-sidebar" style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.2)",height:"100%"}}>
-        <div style={{padding:"10px 12px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-            <span style={{fontSize:10,fontWeight:700,letterSpacing:"0.14em",color:"rgba(255,255,255,0.25)",textTransform:"uppercase"}}>Sessions</span>
-            <div style={{display:"flex",gap:6}}>
-              <ActionBtn label="New" icon="＋" color={tc} small onClick={onNewConversation} />
-              <ActionBtn label="Stop All" icon="■" color="#ef4444" small onClick={onEmergencyStop} />
-            </div>
-          </div>
-          <div style={{maxHeight:170,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
-            {sessionItems.map((s)=>(
-              <div key={s.id} className="session-item" onClick={()=>onLoadSession(s.id)} style={{padding:"7px 8px",border:`1px solid ${sessionId===s.id?`${tc}50`:"rgba(255,255,255,0.06)"}`,background:sessionId===s.id?`${tc}10`:"rgba(255,255,255,0.01)",cursor:"pointer"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-                  <span style={{fontSize:10,color:sessionId===s.id?tc:"rgba(255,255,255,0.35)",fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.id}</span>
-                  <span style={{fontSize:9,color:"rgba(255,255,255,0.18)"}}>{fmtTimeAgo((s.updated_at||0)*1000)}</span>
-                </div>
-                <div style={{fontSize:10,color:"rgba(255,255,255,0.28)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.last_preview||"(empty)"}</div>
-              </div>
-            ))}
-            {sessionItems.length===0 && <div style={{fontSize:10,color:"rgba(255,255,255,0.2)",padding:"8px"}}>No sessions yet</div>}
-          </div>
-        </div>
-        <div style={{padding:"12px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
-          <div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:6,height:6,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}} /><span style={{fontSize:10,fontWeight:700,color:"rgba(255,255,255,0.35)",letterSpacing:"0.16em",textTransform:"uppercase"}}>{wsConnected?"Live Feed":"Disconnected"}</span></div>
-          <span style={{fontSize:10,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>{events.length} events</span>
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:1,padding:"1px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
-          {[{l:"DELEGATES",val:events.filter(e=>e.type==="delegate").length,c:"#818cf8"},{l:"GIT OPS",val:events.filter(e=>e.type==="git").length,c:"#34d399"},{l:"ALERTS",val:events.filter(e=>e.type==="alert").length,c:"#fbbf24"}].map(s=>(
-            <div key={s.l} style={{padding:"10px 12px",background:"rgba(0,0,0,0.15)",textAlign:"center"}}><div style={{fontSize:18,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.val}</div><div style={{fontSize:8,color:"rgba(255,255,255,0.2)",letterSpacing:"0.14em",marginTop:2}}>{s.l}</div></div>
-          ))}
-        </div>
-        <div className="scroll-area" style={{flex:1,overflowY:"auto"}}>{events.length===0?<div style={{padding:20,textAlign:"center",color:"rgba(255,255,255,0.12)",fontSize:11}}>Waiting for events...</div>:events.map((e,i)=><EventEntry key={i} event={e} idx={i} />)}</div>
-      </div>
+  return<div className="terminal-body">
+    <div className="terminal-region"><div className="terminal-scroll" ref={scrollRef}>
+      {lines.map((l,i)=>l.html?<div key={i} className="term-line" dangerouslySetInnerHTML={{__html:l.html}}/>:<div key={i} className={`term-line ${l.t||''}`}>{l.text}</div>)}
+    </div></div>
+    <div className="term-input-row">
+      <span className="term-prompt">forge@valhalla:~$</span>
+      <input ref={inputRef} className="term-input" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!busy){exec(input);setInput('');}}} placeholder={busy?"processing...":"enter command"} disabled={busy} autoFocus={false}/>
     </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════
-//  FLEET VIEW
-// ═══════════════════════════════════════════════════════════
-const AgentRow = ({agent,selected,onClick}) => { const c=AGENT_COLORS[agent.id]; const sparkData=useMemo(()=>makeSparkline(16,agent.cpu_percent||10,15),[agent.id]); return (
-  <div className="agent-row" onClick={onClick} style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",alignItems:"center",gap:8,padding:"12px 14px",background:selected?`${c}06`:"transparent",borderLeft:selected?`2px solid ${c}`:"2px solid transparent",borderBottom:"1px solid rgba(255,255,255,0.02)",cursor:"pointer",transition:"all 0.15s"}}>
-    <AgentAvatar agent={agent} size={30} />
-    <div><div style={{fontSize:12,fontWeight:600,color:"#e2e8f0",lineHeight:1.1}}>{agent.name}</div><div style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginTop:3,display:"flex",gap:6}}><span>{agent.role}</span><span style={{color:c}}>{agent.model}</span></div></div>
-    <Sparkline data={sparkData} color={c} w={72} h={20} />
-    <div><Bar value={agent.cpu_percent||0} color={agent.cpu_percent>60?"#fbbf24":"#34d399"} /><div style={{display:"flex",justifyContent:"space-between",marginTop:3,fontSize:9,color:"rgba(255,255,255,0.25)"}}><span>CPU {agent.cpu_percent||0}%</span><span>MEM {agent.memory_percent||0}%</span></div></div>
-    <div style={{textAlign:"right"}}><div style={{fontSize:16,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.tasks_completed||0}</div><div style={{fontSize:8,color:"rgba(255,255,255,0.2)",letterSpacing:"0.08em"}}>tasks</div></div>
-  </div>
-); };
-
-const AgentDetail = ({agent}) => { const c=AGENT_COLORS[agent.id]; return (
-  <div style={{padding:"20px",display:"flex",flexDirection:"column",gap:18}}>
-    <div style={{display:"flex",alignItems:"center",gap:14}}>
-      <AgentAvatar agent={agent} size={44} />
-      <div style={{flex:1}}><div style={{fontSize:18,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.name}</div><div style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{agent.role}</div></div>
-      <Badge text={agent.status} color={statusColor(agent.status)} />
-    </div>
-    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-      {[{l:"CPU",v:`${agent.cpu_percent||0}%`,c:agent.cpu_percent>60?"#fbbf24":"#34d399"},{l:"Memory",v:`${agent.memory_percent||0}%`,c:"#818cf8"},{l:"Latency",v:agent.ping_ms?`${agent.ping_ms}ms`:"—",c:"#22d3ee"},{l:"Uptime",v:fmtUptime(agent.uptime_seconds||0),c:"#e2e8f0"}].map(m=>(
-        <Glass key={m.l} style={{padding:"12px 14px"}}><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.12em"}}>{m.l}</div><div style={{fontSize:20,fontWeight:800,color:m.c,fontFamily:"'Space Grotesk',sans-serif",marginTop:3}}>{m.v}</div></Glass>
-      ))}
-    </div>
-    <div><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Pipeline</div><Glass style={{padding:"12px 14px",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:12,fontWeight:600,color:c}}>{agent.model}</span><span style={{color:`${c}30`,fontSize:14}}>→</span><span style={{fontSize:12,color:"rgba(255,255,255,0.4)"}}>{agent.backend}</span></Glass></div>
-    <div><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Tools ({(agent.tools||[]).length})</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{(agent.tools||[]).map(t=><Badge key={t} text={t} color="rgba(255,255,255,0.35)" />)}</div></div>
-    <div><div style={{fontSize:9,color:"rgba(255,255,255,0.25)",textTransform:"uppercase",letterSpacing:"0.14em",marginBottom:8}}>Last Action</div><Glass style={{padding:"12px 14px"}}><span style={{fontSize:12,color:"rgba(255,255,255,0.45)",lineHeight:1.5}}>{agent.last_action||"—"}</span></Glass></div>
-  </div>
-); };
-
-const FleetView = ({agents,selected,setSelected}) => (
-  <div className="fleet-view" style={{display:"grid",gridTemplateColumns:"1fr 320px",height:"100%",minHeight:0}}>
-    <div style={{borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto"}}>
-      <div style={{display:"grid",gridTemplateColumns:"36px 1fr 80px 80px 50px",gap:8,padding:"10px 14px",borderBottom:"1px solid rgba(255,255,255,0.04)",fontSize:9,color:"rgba(255,255,255,0.15)",textTransform:"uppercase",letterSpacing:"0.16em"}}><span></span><span>Agent</span><span>Activity</span><span>Load</span><span style={{textAlign:"right"}}>Tasks</span></div>
-      {agents.map((a,i)=><AgentRow key={a.id} agent={a} selected={selected===i} onClick={()=>setSelected(i)} />)}
-    </div>
-    <div style={{overflow:"auto",background:"rgba(0,0,0,0.2)"}}><AgentDetail agent={agents[selected]||agents[0]} /></div>
-  </div>
-);
-
-// ═══════════════════════════════════════════════════════════
-//  REALM VIEW — Command Center
-// ═══════════════════════════════════════════════════════════
-const RealmView = ({agents, nodes, pods, commits, k8sEvents}) => {
-  const [logPod, setLogPod] = useState(null);
-  const [restartingPod, setRestartingPod] = useState(null);
-  const handleRestart = async (name) => { setRestartingPod(name); await apiPost(`/api/v1/cluster/pods/${name}/restart`); setTimeout(()=>setRestartingPod(null),3000); };
-
-  const runningPods = (pods||[]).filter(p=>p.status==="Running");
-  const totalPods = (pods||[]).length;
-
-  const activity = useMemo(() => {
-    const items = [];
-    (k8sEvents||[]).forEach(e => { items.push({ time:e.lastTimestamp||e.metadata?.creationTimestamp||"", type:e.type==="Warning"?"warning":"k8s", source:e.involvedObject?.name||"k8s", message:`${e.reason||""}: ${e.message||""}`.slice(0,120) }); });
-    (commits||[]).forEach(c => { items.push({ time:c.date||"", type:"git", source:c.author||"git", message:c.message||"—" }); });
-    items.sort((a,b)=>new Date(b.time)-new Date(a.time));
-    return items.slice(0,30);
-  }, [k8sEvents, commits]);
-
-  return (
-    <div className="realm-view" style={{display:"flex",flexDirection:"column",height:"100%",minHeight:0}}>
-      {logPod && <LogModal podName={logPod} onClose={()=>setLogPod(null)} />}
-      {/* METRICS */}
-      <div className="realm-metrics" style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8,padding:"16px 18px",flexShrink:0}}>
-        <MetricCard label="Pods" value={`${totalPods}`} sub={`${runningPods.length} Running`} color="#34d399" />
-        <MetricCard label="Nodes" value={`${nodes.length}`} sub={`${nodes.filter(n=>n.status==="Ready").length} Ready`} color="#fbbf24" />
-        <MetricCard label="Agents" value={`${agents.filter(a=>a.status==="online").length}/${agents.length}`} sub="Online" color="#c084fc" />
-        <MetricCard label="Commits" value={`${(commits||[]).length||"—"}`} sub={(commits||[])[0]?.message?.split('\n')[0]?.slice(0,28)||"—"} color="#818cf8" />
-        <MetricCard label="ArgoCD" value="Synced" sub="asgard-infra · Healthy" color="#22d3ee" />
-      </div>
-      {/* MAIN */}
-      <div className="realm-content" style={{display:"grid",gridTemplateColumns:"1fr 380px",flex:1,minHeight:0}}>
-        {/* LEFT */}
-        <div style={{display:"flex",flexDirection:"column",borderRight:"1px solid rgba(255,255,255,0.04)",overflow:"auto",padding:"0 18px 18px"}}>
-          {/* NODES */}
-          <div style={{marginBottom:18}}>
-            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Cluster Nodes <span style={{color:"rgba(255,255,255,0.1)",fontWeight:400}}>{nodes.length}</span></div>
-            <div style={{display:"grid",gridTemplateColumns:`repeat(${Math.min(nodes.length,3)},1fr)`,gap:8}}>
-              {nodes.map(n=>(
-                <Glass key={n.name} glow={n.status==="Ready"?"#34d399":"#ef4444"} style={{padding:"14px 16px"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                    <div style={{display:"flex",alignItems:"center",gap:8}}><GlowPip status={n.status==="Ready"?"online":"offline"} size={6} /><span style={{fontSize:14,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{n.name}</span></div>
-                    <Badge text={n.role||"worker"} color="rgba(255,255,255,0.3)" />
-                  </div>
-                  <div style={{fontSize:10,color:"rgba(255,255,255,0.15)",marginBottom:10}}>{n.ip}</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                    {[{l:"CPU",v:n.cpu_percent,c:n.cpu_percent>60?"#fbbf24":"#34d399"},{l:"MEM",v:n.memory_percent,c:n.memory_percent>75?"#fbbf24":"#818cf8"}].map(x=>(
-                      <div key={x.l}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontSize:9,color:"rgba(255,255,255,0.2)"}}>{x.l}</span><span style={{fontSize:11,fontWeight:700,color:x.c,fontFamily:"'Space Grotesk',sans-serif"}}>{x.v}%</span></div><Bar value={x.v} color={x.c} h={4}/></div>
-                    ))}
-                  </div>
-                </Glass>
-              ))}
-            </div>
-          </div>
-          {/* PODS */}
-          <div>
-            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Pods <span style={{color:"rgba(255,255,255,0.1)",fontWeight:400}}>{totalPods}</span></div>
-            <div style={{display:"grid",gridTemplateColumns:"6px 1fr 100px 70px 90px",gap:8,padding:"6px 12px",fontSize:9,color:"rgba(255,255,255,0.12)",textTransform:"uppercase",letterSpacing:"0.14em",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
-              <span></span><span>Name</span><span>Node</span><span>Status</span><span style={{textAlign:"right"}}>Actions</span>
-            </div>
-            {(pods||[]).map((p,i) => {
-              const name=p.name||"unknown"; const phase=p.status||"Unknown"; const node=p.node||"—"; const ready=phase==="Running";
-              const isAgent=Object.keys(AGENT_COLORS).some(a=>name.startsWith(a));
-              return (
-                <div key={i} style={{display:"grid",gridTemplateColumns:"6px 1fr 100px 70px 90px",gap:8,padding:"8px 12px",alignItems:"center",borderBottom:"1px solid rgba(255,255,255,0.02)",background:isAgent?"rgba(129,140,248,0.02)":"transparent"}}>
-                  <GlowPip status={ready?"online":"offline"} size={5} />
-                  <span style={{fontSize:11,color:"#e2e8f0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:isAgent?600:400}}>{name}</span>
-                  <span style={{fontSize:10,color:"rgba(255,255,255,0.18)",fontFamily:"'IBM Plex Mono',monospace",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{node}</span>
-                  <Badge text={phase} color={ready?"#34d399":"#ef4444"} />
-                  <div style={{display:"flex",gap:4,justifyContent:"flex-end"}}>
-                    <ActionBtn label="Logs" icon="⬡" color="#22d3ee" small onClick={()=>setLogPod(name)} />
-                    <ActionBtn label="↻" color="#fbbf24" small onClick={()=>handleRestart(name)} disabled={restartingPod===name} />
-                  </div>
-                </div>
-              );
-            })}
-            {totalPods===0&&<div style={{padding:16,textAlign:"center",fontSize:11,color:"rgba(255,255,255,0.12)"}}>No pods loaded</div>}
-          </div>
-        </div>
-        {/* RIGHT — Activity + Controls */}
-        <div style={{display:"flex",flexDirection:"column",background:"rgba(0,0,0,0.15)",overflow:"auto"}}>
-          <div style={{flex:1,display:"flex",flexDirection:"column"}}>
-            <div style={{padding:"14px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)"}}>Activity Feed</span>
-              <span style={{fontSize:10,color:"rgba(255,255,255,0.1)",fontFamily:"'IBM Plex Mono',monospace"}}>{activity.length}</span>
-            </div>
-            <div style={{flex:1,overflowY:"auto"}}>
-              {activity.map((a,i)=>{const colors={git:"#34d399",k8s:"#818cf8",warning:"#fbbf24"};const c=colors[a.type]||"#6b7280";return(
-                <div key={i} style={{display:"flex",gap:8,padding:"8px 16px",borderBottom:"1px solid rgba(255,255,255,0.02)",position:"relative"}}>
-                  <div style={{position:"absolute",left:0,top:0,bottom:0,width:2,background:`${c}25`}} />
-                  <div style={{width:5,height:5,borderRadius:"50%",background:c,marginTop:6,flexShrink:0,boxShadow:`0 0 6px ${c}40`}} />
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:2}}><Badge text={a.type} color={c} /><span style={{fontSize:9,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>{fmtTimeAgo(a.time)}</span></div>
-                    <span style={{fontSize:11,color:"rgba(255,255,255,0.4)",lineHeight:1.5,display:"block",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.message}</span>
-                  </div>
-                </div>
-              );})}
-              {activity.length===0&&<div style={{padding:20,textAlign:"center",fontSize:11,color:"rgba(255,255,255,0.12)"}}>No recent activity</div>}
-            </div>
-          </div>
-          {/* GITOPS PIPELINE */}
-          <div style={{padding:"16px",borderTop:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
-            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>GitOps Pipeline</div>
-            <Glass glow="#34d399" style={{padding:"14px 16px"}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                {["PUSH","PR","REVIEW","MERGE","SYNC"].map((s,i)=>(<div key={s} style={{display:"flex",alignItems:"center"}}><div style={{padding:"5px 10px",fontSize:9,fontWeight:700,letterSpacing:"0.08em",color:s==="REVIEW"?"#fbbf24":"#34d399",background:s==="REVIEW"?"rgba(251,191,36,0.08)":"rgba(52,211,153,0.06)",border:`1px solid ${s==="REVIEW"?"rgba(251,191,36,0.15)":"rgba(52,211,153,0.1)"}`}}>{s}</div>{i<4&&<div style={{width:12,height:1,background:"rgba(255,255,255,0.06)"}} />}</div>))}
-              </div>
-              <div style={{fontSize:10,color:"rgba(255,255,255,0.2)",marginTop:10}}>Agent → Gitea → PR → Sovereign → ArgoCD</div>
-            </Glass>
-          </div>
-          {/* SERVICES */}
-          <div style={{padding:"0 16px 16px",flexShrink:0}}>
-            <div style={{fontSize:10,fontWeight:600,letterSpacing:"0.16em",textTransform:"uppercase",color:"rgba(255,255,255,0.2)",marginBottom:10}}>Services</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>
-              {[{n:"Gateway",p:"8080"},{n:"Seidr",p:"8082"},{n:"ChromaDB",p:"8000"},{n:"Bifrost",p:"3000"},{n:"Gitea",p:"30637"},{n:"ArgoCD"},{n:"cert-manager"},{n:"ingress",p:"30447"}].map(s=>(
-                <Glass key={s.n} style={{padding:"7px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",alignItems:"center",gap:5}}><GlowPip status="online" size={4} /><span style={{fontSize:11,color:"#e2e8f0"}}>{s.n}</span></div>{s.p&&<span style={{fontSize:10,color:"rgba(255,255,255,0.15)",fontFamily:"'IBM Plex Mono',monospace"}}>:{s.p}</span>}</Glass>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ═══════════════════════════════════════════════════════════
-//  MAIN APP
-// ═══════════════════════════════════════════════════════════
-const Tab = ({active,label,count,onClick}) => (<button onClick={onClick} className="tab-label" style={{background:"none",border:"none",position:"relative",color:active?"#e2e8f0":"rgba(255,255,255,0.25)",padding:"14px 0",marginRight:28,cursor:"pointer",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:"0.14em",textTransform:"uppercase",transition:"all 0.15s"}}><span>{label}</span>{count&&<span style={{marginLeft:6,fontSize:10,fontWeight:700,color:active?"#818cf8":"rgba(255,255,255,0.12)"}}>{count}</span>}{active&&<div style={{position:"absolute",bottom:0,left:0,right:0,height:2,background:"linear-gradient(90deg,#818cf8,#818cf800)",boxShadow:"0 0 8px rgba(129,140,248,0.3)"}} />}</button>);
-
-const localChatKey = (agent) => `hirdforge-chat-${agent}`;
-const localSessionKey = (agent) => `hirdforge-session-${agent}`;
-const uiToStored = (m) => ({ role: m.from==="kit"?"user":"assistant", content: m.text||"", timestamp: Date.now() });
-const storedToUI = (agentId, m) => {
-  const isUser = m.role === "user";
-  const from = isUser ? "kit" : agentId;
-  const agent = isUser ? {id:"kit",name:"Kit (Sovereign)",initial:"K",status:"online"} : {id:agentId,name:agentId,initial:(agentId||"?")[0]?.toUpperCase()||"?",status:"online"};
-  return { from, agent, text: m.content||"", time: new Date((m.timestamp||Date.now())).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}), streaming:false, toolCalls:[], toolResults:[] };
-};
-const serverSessionToUI = (session) => (session.messages||[]).map((m)=>storedToUI(session.agent||"unknown", m));
-
-function App() {
-  const [tab,setTab]=useState("comms"); const [selected,setSelected]=useState(0);
-  const [chatHistory,setChatHistory]=useState([]); const [msg,setMsg]=useState(""); const [target,setTarget]=useState("ragnar"); const [sending,setSending]=useState(false);
-  const [sessionIdByAgent,setSessionIdByAgent]=useState({});
-  const [sessionItems,setSessionItems]=useState([]);
-  const [toast,setToast]=useState("");
-  const agents=usePolledData('/api/v1/agents',FALLBACK_AGENTS,CONFIG.POLL_INTERVAL);
-  const nodes=usePolledData('/api/v1/cluster/nodes',FALLBACK_NODES,CONFIG.POLL_INTERVAL*2);
-  const pods=usePolledData('/api/v1/cluster/pods',[],CONFIG.POLL_INTERVAL*2);
-  const commits=usePolledData('/api/v1/gitea/commits',[],CONFIG.POLL_INTERVAL*3);
-  const k8sEvents=usePolledData('/api/v1/k8s/events',[],CONFIG.POLL_INTERVAL*2);
-  const {events,connected:wsConnected}=useEventStream();
-  const online=agents.filter(a=>a.status==="online").length;
-
-  const currentSessionId = sessionIdByAgent[target] || localStorage.getItem(localSessionKey(target)) || `hirdforge-${target}-${Date.now()}`;
-
-  useEffect(() => {
-    if (!target) return;
-    const raw = localStorage.getItem(localChatKey(target));
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) setChatHistory(parsed.map(m => storedToUI(target, m)));
-        else setChatHistory([]);
-      } catch { setChatHistory([]); }
-    } else {
-      setChatHistory([]);
-    }
-    const sid = localStorage.getItem(localSessionKey(target));
-    if (sid) {
-      setSessionIdByAgent(prev => ({...prev, [target]: sid}));
-      apiFetch(`/api/v1/sessions/${sid}`, null).then((sess)=>{
-        if (sess && sess.messages) setChatHistory(serverSessionToUI(sess));
-      });
-    }
-  }, [target]);
-
-  useEffect(() => {
-    if (!target) return;
-    localStorage.setItem(localChatKey(target), JSON.stringify(chatHistory.map(uiToStored)));
-  }, [chatHistory, target]);
-
-  useEffect(() => {
-    if (!target) return;
-    if (sessionIdByAgent[target]) {
-      localStorage.setItem(localSessionKey(target), sessionIdByAgent[target]);
-    }
-  }, [sessionIdByAgent, target]);
-
-  useEffect(() => {
-    let mounted = true;
-    const load = async () => {
-      const all = await apiFetch('/api/v1/sessions', []);
-      if (!mounted || !Array.isArray(all)) return;
-      setSessionItems(all.filter(s => s.agent === target));
-    };
-    load();
-    const id = setInterval(load, 5000);
-    return () => { mounted = false; clearInterval(id); };
-  }, [target, sending]);
-
-  const setCurrentSessionId = (sid) => {
-    setSessionIdByAgent(prev => ({...prev, [target]: sid}));
-  };
-
-  const loadSession = async (sid) => {
-    const sess = await apiFetch(`/api/v1/sessions/${sid}`, null);
-    if (!sess || !sess.messages) return;
-    setCurrentSessionId(sid);
-    setChatHistory(serverSessionToUI(sess));
-  };
-
-  const newConversation = () => {
-    const sid = `hirdforge-${target}-${Date.now()}`;
-    setCurrentSessionId(sid);
-    setChatHistory([]);
-  };
-
-  const clearHistory = () => {
-    setChatHistory([]);
-    localStorage.removeItem(localChatKey(target));
-  };
-
-  const emergencyStop = async () => {
-    await apiPost('/api/v1/agents/stop-all');
-    setSending(false);
-    setChatHistory(prev=>{
-      if (!prev.length) return prev;
-      const u=[...prev];
-      const last={...u[u.length-1]};
-      if (last.streaming) {
-        last.streaming=false;
-        last.text = (last.text ? `${last.text}\n` : "") + "[Stopped by Sovereign]";
-        u[u.length-1]=last;
-      }
-      return u;
-    });
-    setToast("All agents stopped");
-    setTimeout(()=>setToast(""), 1800);
-  };
-
-  return (
-    <div className="main-content">
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:48,minHeight:48,borderBottom:"1px solid rgba(255,255,255,0.04)",background:"linear-gradient(90deg,rgba(10,10,20,0.95),rgba(6,6,16,0.95))",position:"relative"}}>
-        <div style={{position:"absolute",bottom:0,left:0,right:0,height:1,background:"linear-gradient(90deg,transparent,rgba(99,102,241,0.12),transparent)"}} />
-        <div style={{display:"flex",alignItems:"center",gap:14}}>
-          <div style={{display:"flex",alignItems:"center",gap:8}}><div style={{width:9,height:9,background:"#818cf8",boxShadow:"0 0 14px rgba(129,140,248,0.5)",borderRadius:1}} /><span style={{fontSize:14,fontWeight:800,letterSpacing:"0.22em",color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>HIRDFORGE</span></div>
-          <div style={{width:1,height:20,background:"rgba(255,255,255,0.05)"}} /><span style={{fontSize:10,color:"rgba(255,255,255,0.18)",letterSpacing:"0.12em"}}>VALHALLA CLUSTER</span>
-        </div>
-        <div style={{display:"flex",alignItems:"center",gap:18}}>
-          {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=>(<div key={x.l} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:"rgba(255,255,255,0.25)"}}><GlowPip status={x.s} size={5} /><span>{x.l}</span></div>))}
-          <button onClick={emergencyStop} title="Emergency Stop — Cancel all agent operations" style={{width:28,height:28,borderRadius:"50%",border:"1px solid rgba(239,68,68,0.6)",background:"rgba(239,68,68,0.15)",color:"#ef4444",cursor:"pointer",fontWeight:900,boxShadow:sending?"0 0 12px rgba(239,68,68,0.6)":"none",animation:sending?"rec-pulse 1.2s ease infinite":"none"}}>■</button>
-          <div style={{width:1,height:20,background:"rgba(255,255,255,0.05)"}} />
-          <span style={{fontSize:12,fontFamily:"'Space Grotesk',sans-serif"}}><span style={{color:"#34d399",fontWeight:700}}>{online}</span><span style={{color:"rgba(255,255,255,0.15)"}}> / {agents.length}</span></span>
-        </div>
-      </div>
-      <div style={{display:"flex",padding:"0 20px",borderBottom:"1px solid rgba(255,255,255,0.04)",background:"rgba(0,0,0,0.12)",flexShrink:0}}>
-        <Tab active={tab==="comms"} label="Comms" count={String(events.length)} onClick={()=>setTab("comms")} />
-        <Tab active={tab==="fleet"} label="Warriors" count={String(agents.length)} onClick={()=>setTab("fleet")} />
-        <Tab active={tab==="realm"} label="Realm" onClick={()=>setTab("realm")} />
-      </div>
-      <div style={{flex:1,overflow:"hidden"}}>
-        {tab==="fleet"&&<FleetView agents={agents} selected={selected} setSelected={setSelected} />}
-        {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} />}
-        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsConnected} chatHistory={chatHistory} setChatHistory={setChatHistory} msg={msg} setMsg={setMsg} target={target} setTarget={setTarget} sending={sending} setSending={setSending} sessionId={currentSessionId} setSessionId={setCurrentSessionId} sessionItems={sessionItems} onLoadSession={loadSession} onNewConversation={newConversation} onClearHistory={clearHistory} onEmergencyStop={emergencyStop} />}
-      </div>
-      {toast && <div style={{position:"fixed",top:58,right:20,padding:"10px 14px",background:"rgba(239,68,68,0.16)",border:"1px solid rgba(239,68,68,0.45)",color:"#ef4444",fontSize:11,fontWeight:700,zIndex:20000}}>{toast}</div>}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 20px",height:28,minHeight:28,borderTop:"1px solid rgba(255,255,255,0.03)",background:"rgba(0,0,0,0.3)",fontSize:10,color:"rgba(255,255,255,0.2)",flexShrink:0}}>
-        <div style={{display:"flex",gap:18}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
-        <div style={{display:"flex",gap:18}}><span>WS: <span style={{color:wsConnected?"#34d399":"#ef4444"}}>{wsConnected?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.12)"}}>v0.7.5-s7</span></div>
-      </div>
-    </div>
-  );
+  </div>;
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+// ═══════════ LOG MODAL ═══════════
+const LogModal=({pod,onClose})=>{const[logs,setLogs]=useState("Loading...");const[n,setN]=useState(100);const ref=useRef(null);
+  useEffect(()=>{let m=true;const go=async()=>{const t=await apiText(`/api/v1/cluster/pods/${pod}/logs?lines=${n}`);if(m){setLogs(t);if(ref.current)ref.current.scrollTop=ref.current.scrollHeight;}};go();const id=setInterval(go,5000);return()=>{m=false;clearInterval(id);};},[pod,n]);
+  return<div style={{position:"fixed",inset:0,zIndex:10000,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.7)",backdropFilter:"blur(4px)"}} onClick={onClose}><div onClick={e=>e.stopPropagation()} style={{width:"80%",maxWidth:900,height:"70vh",background:"#0a0b12",border:"1px solid rgba(255,255,255,0.08)",display:"flex",flexDirection:"column",borderRadius:6,overflow:"hidden"}}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"8px 14px",borderBottom:"1px solid rgba(255,255,255,0.06)",flexShrink:0}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:13,fontWeight:700,color:"#22d3ee",fontFamily:"'Space Grotesk',sans-serif"}}>{pod}</span><Badge text="logs" color="#22d3ee"/></div>
+      <div style={{display:"flex",alignItems:"center",gap:4}}>{[50,100,500].map(x=><button key={x} onClick={()=>setN(x)} style={{padding:"2px 7px",fontSize:9,fontWeight:n===x?700:400,background:n===x?"rgba(34,211,238,0.08)":"transparent",border:`1px solid ${n===x?"rgba(34,211,238,0.2)":"rgba(255,255,255,0.05)"}`,color:n===x?"#22d3ee":"rgba(255,255,255,0.3)",fontFamily:"'IBM Plex Mono',monospace",borderRadius:3}}>{x}L</button>)}<button onClick={onClose} style={{padding:"2px 8px",fontSize:12,background:"rgba(239,68,68,0.06)",border:"1px solid rgba(239,68,68,0.2)",color:"#ef4444",fontFamily:"'IBM Plex Mono',monospace",fontWeight:700,borderRadius:3}}>✕</button></div>
+    </div>
+    <div ref={ref} style={{flex:1,overflow:"auto",padding:"10px 14px",fontFamily:"'IBM Plex Mono',monospace",fontSize:11,lineHeight:1.6,color:"rgba(255,255,255,0.5)",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{logs}</div>
+  </div></div>;
+};
+
+// ═══════════ CHAT BUBBLE ═══════════
+const ChatBubble=({msg})=>{const self=msg.from==="kit";const c=C[msg.from]||"#818cf8";const tc=(msg.toolCalls||[]).length;const ht=tc>0||(msg.toolResults||[]).length>0;
+  return<div className={`msg${self?" self":""}`}><Av agent={msg.agent} size={24}/><div className="msg-body">
+    <div className="msg-meta"><span style={{fontSize:11,fontWeight:700,color:c}}>{msg.agent.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.18)"}}>{msg.time}</span></div>
+    <div className="msg-bubble" style={{borderColor:self?"rgba(16,185,129,0.1)":`${c}12`}}>
+      <div style={{position:"absolute",top:0,left:0,bottom:0,width:2,background:self?"#10b981":c,opacity:.35,borderRadius:1}}/>
+      {msg.streaming&&!msg.text&&<div className="forging"><span className="dot"/>Forging response...</div>}
+      <div className="msg-text" dangerouslySetInnerHTML={{__html:md(msg.text)}}/>
+      {ht&&<details><summary className="tool-toggle">⚒ {tc} tool call{tc!==1?'s':''}</summary><div style={{paddingTop:3}}>
+        {(msg.toolCalls||[]).map((t,i)=><div key={`c${i}`} className="tool-chip call"><span style={{color:"#22d3ee",fontWeight:800,fontSize:9,letterSpacing:".06em"}}>TOOL</span><span style={{color:"rgba(255,255,255,0.45)"}}>{t.tool}</span><span className="tool-chip-body">{typeof t.args==='string'?t.args:JSON.stringify(t.args)}</span></div>)}
+        {(msg.toolResults||[]).map((t,i)=><div key={`r${i}`} className="tool-chip result"><span style={{color:"#34d399",fontWeight:800,fontSize:9,letterSpacing:".06em"}}>RESULT</span><span className="tool-chip-body">{typeof t.result==='string'?t.result:JSON.stringify(t.result)}</span></div>)}
+      </div></details>}
+    </div>
+  </div></div>;
+};
+
+// ═══════════ COMMS VIEW ═══════════
+const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMsg,target,setTarget,sending,setSending,sessionId,setSessionId,sessionItems,onLoadSession,onNewConversation,onClearHistory,onEmergencyStop,auth})=>{
+  const mRef=useRef(null);const tRef=useRef(null);const cRef=useRef(null);
+  const ta=agents.find(a=>a.id===target)||FA[0];const tc=C[target]||"#818cf8";
+  const userName=auth?.user||'Sovereign';const userRole=auth?.role||'sovereign';
+  const scrollB=useCallback(()=>{if(mRef.current)mRef.current.scrollTop=mRef.current.scrollHeight;},[]);
+  useEffect(()=>{requestAnimationFrame(scrollB);},[chatHistory,scrollB]);
+
+  const stopCur=async()=>{if(cRef.current){cRef.current.abort();cRef.current=null;}setChatHistory(p=>{if(!p.length)return p;const u=[...p];const l={...u[u.length-1]};if(l.from===target&&l.streaming){l.streaming=false;l.text=(l.text?l.text+"\n":"")+"[Stopped by Sovereign]";u[u.length-1]=l;}return u;});setSending(false);await apiPost(`/api/v1/agents/${target}/stop`);};
+
+  const send=async()=>{if(!msg.trim()||sending)return;const now=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
+    setChatHistory(p=>[...p,{from:"kit",agent:{id:"kit",name:`${userName} (${userRole})`,initial:userName[0]?.toUpperCase()||"S",status:"online"},text:msg,time:now,toolCalls:[],toolResults:[]}]);
+    const sent=msg;setMsg('');setSending(true);if(tRef.current)tRef.current.style.height='44px';
+    setChatHistory(p=>[...p,{from:target,agent:ta,text:"",time:now,streaming:true,toolCalls:[],toolResults:[]}]);
+    const ctrl=new AbortController();cRef.current=ctrl;
+    await streamChat(target,sent,sessionId,ctrl.signal,
+      ch=>{setChatHistory(p=>{const u=[...p];const l={...u[u.length-1]};l.text=(l.text||"")+ch;u[u.length-1]=l;return u;});requestAnimationFrame(scrollB);},
+      cl=>{setChatHistory(p=>{const u=[...p];u[u.length-1]={...u[u.length-1],text:cl};return u;});},
+      (t,a)=>{setChatHistory(p=>{const u=[...p];const l={...u[u.length-1]};l.toolCalls=[...(l.toolCalls||[]),{tool:t,args:a}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollB);},
+      (t,r)=>{setChatHistory(p=>{const u=[...p];const l={...u[u.length-1]};l.toolResults=[...(l.toolResults||[]),{tool:t,result:r}];u[u.length-1]=l;return u;});requestAnimationFrame(scrollB);},
+      sid=>{if(sid)setSessionId(sid);setChatHistory(p=>{const u=[...p];const l={...u[u.length-1]};l.streaming=false;if(!l.text&&!(l.toolCalls||[]).length)l.text="(empty response)";u[u.length-1]=l;return u;});setSending(false);cRef.current=null;},
+      err=>{setChatHistory(p=>{const u=[...p];const l={...u[u.length-1]};if(err!=="[Stopped by Sovereign]")l.text=err;l.streaming=false;u[u.length-1]=l;return u;});setSending(false);cRef.current=null;}
+    );
+  };
+
+  return<div className="comms">
+    <div className="chat-col">
+      <div className="agent-bar">{agents.map(a=>{const ac=C[a.id];const sel=target===a.id;return<button key={a.id} className={`agent-tab${sel?" active":""}`} onClick={()=>setTarget(a.id)} style={{borderBottomColor:sel?ac:"transparent"}}><Av agent={a} size={18}/><span style={{fontSize:11,fontWeight:sel?700:400,color:sel?ac:"rgba(255,255,255,0.3)",fontFamily:"'IBM Plex Mono',monospace"}}>{(a.name||a.id).split(' ')[0]}</span></button>;})}
+        <div style={{marginLeft:"auto",paddingRight:6}}><Btn label="Broadcast" icon="⚡" color="#fbbf24" small/></div>
+      </div>
+      <div className="agent-info"><Av agent={ta} size={22}/><div style={{flex:1}}><span style={{fontSize:12,fontWeight:700,color:tc}}>{ta.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginLeft:8}}>{ta.role}</span></div><Btn label="Clear" icon="⌫" color="#ef4444" small onClick={onClearHistory}/><Badge text={ta.model} color={tc}/></div>
+      <div className="messages-region"><div className="messages-scroll" ref={mRef}>
+        <div className="spacer"/>
+        {chatHistory.length===0&&<div style={{textAlign:"center",padding:"30px 0",opacity:.25}}><div style={{fontSize:24,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc,marginBottom:6}}>⚔</div><div style={{fontSize:12}}>Command the warband</div></div>}
+        {chatHistory.map((m,i)=><ChatBubble key={i} msg={m}/>)}
+      </div></div>
+      <div className="input-bar">
+        <textarea ref={tRef} value={msg} onChange={e=>{setMsg(e.target.value);e.target.style.height='44px';e.target.style.height=Math.min(e.target.scrollHeight,120)+'px';}} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}} placeholder={`Command ${(ta.name||"").split(' ')[0]}...`} rows={1}/>
+        {sending?<button className="btn-send btn-stop" onClick={stopCur}>STOP</button>:<button className="btn-send" onClick={send} style={{background:`${tc}15`,borderColor:`${tc}30`,color:tc,boxShadow:`0 0 14px ${tc}0c`}}>SEND</button>}
+      </div>
+    </div>
+    <div className="sidebar">
+      <div className="sidebar-section"><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><span className="sidebar-title" style={{margin:0}}>Sessions</span><div style={{display:"flex",gap:3}}><Btn label="New" icon="＋" color={tc} small onClick={onNewConversation}/><Btn label="Stop All" icon="■" color="#ef4444" small onClick={onEmergencyStop}/></div></div>
+        <div style={{maxHeight:140,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>{sessionItems.map(s=><div key={s.id} className={`session-item${sessionId===s.id?" active":""}`} onClick={()=>onLoadSession(s.id)}><div style={{display:"flex",justifyContent:"space-between",gap:4}}><span style={{fontSize:10,color:sessionId===s.id?tc:"rgba(255,255,255,0.3)",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.id}</span><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",flexShrink:0}}>{fAgo((s.updated_at||0)*1000)}</span></div><div style={{fontSize:10,color:"rgba(255,255,255,0.2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{s.last_preview||"…"}</div></div>)}{sessionItems.length===0&&<div style={{fontSize:10,color:"rgba(255,255,255,0.12)",padding:4}}>No sessions</div>}</div>
+      </div>
+      <div className="sidebar-section" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:5,height:5,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}}/><span style={{fontSize:9,fontWeight:700,color:"rgba(255,255,255,0.25)",letterSpacing:".1em",textTransform:"uppercase"}}>{wsConnected?"Live":"Offline"}</span></div><span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>{events.length}</span></div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>{[{l:"DELEGATES",v:events.filter(e=>e.type==="delegate").length,c:"#818cf8"},{l:"GIT",v:events.filter(e=>e.type==="git").length,c:"#34d399"},{l:"ALERTS",v:events.filter(e=>e.type==="alert").length,c:"#fbbf24"}].map(s=><div key={s.l} style={{padding:"6px 8px",textAlign:"center",background:"rgba(0,0,0,0.1)"}}><div style={{fontSize:14,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.v}</div><div style={{fontSize:7,color:"rgba(255,255,255,0.15)",letterSpacing:".1em"}}>{s.l}</div></div>)}</div>
+      <div style={{flex:1,overflowY:"auto"}}>{events.length===0?<div style={{padding:14,textAlign:"center",fontSize:10,color:"rgba(255,255,255,0.08)"}}>Waiting for events...</div>:events.map((e,i)=>{const ec={delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24"}[e.type]||"#6b7280";return<div key={i} style={{display:"flex",gap:6,padding:"5px 12px",borderBottom:"1px solid rgba(255,255,255,0.02)",borderLeft:`2px solid ${ec}18`}}><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",minWidth:44,flexShrink:0}}>{fT(e.timestamp)}</span><div style={{flex:1,minWidth:0}}><span style={{fontSize:9,fontWeight:800,color:ec,marginRight:4}}>{(e.source||"SYS").slice(0,3).toUpperCase()}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.35)"}}>{e.message}</span></div></div>;})}</div>
+    </div>
+  </div>;
+};
+
+// ═══════════ FLEET VIEW ═══════════
+const FleetView=({agents,selected,setSelected})=>{const a=agents[selected]||agents[0];const c=C[a?.id]||"#818cf8";
+  return<div className="fleet"><div className="fleet-list">
+    <div style={{display:"grid",gridTemplateColumns:"32px 1fr 70px 44px",gap:8,padding:"7px 14px",fontSize:9,color:"rgba(255,255,255,0.12)",textTransform:"uppercase",letterSpacing:".1em",borderBottom:"1px solid rgba(255,255,255,0.04)"}}><span/><span>Agent</span><span>Load</span><span style={{textAlign:"right"}}>Tasks</span></div>
+    {agents.map((ag,i)=>{const ac=C[ag.id];return<div key={ag.id} className={`fleet-row${selected===i?" active":""}`} onClick={()=>setSelected(i)}><Av agent={ag} size={26}/><div><div style={{fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{ag.name}</div><div style={{fontSize:10,color:"rgba(255,255,255,0.22)",marginTop:1}}>{ag.role} <span style={{color:ac}}>{ag.model}</span></div></div><div><Bar value={ag.cpu_percent||0} color={ag.cpu_percent>60?"#fbbf24":"#34d399"}/><div style={{display:"flex",justifyContent:"space-between",marginTop:2,fontSize:8,color:"rgba(255,255,255,0.18)"}}><span>CPU {ag.cpu_percent||0}%</span><span>MEM {ag.memory_percent||0}%</span></div></div><div style={{textAlign:"right"}}><div style={{fontSize:15,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{ag.tasks_completed||0}</div><div style={{fontSize:7,color:"rgba(255,255,255,0.15)"}}>tasks</div></div></div>;})}
+  </div><div className="fleet-detail">
+    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18}}><Av agent={a} size={38}/><div style={{flex:1}}><div style={{fontSize:16,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{a.name}</div><div style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{a.role}</div></div><Badge text={a.status} color={sc(a.status)}/></div>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:14}}>{[{l:"CPU",v:`${a.cpu_percent||0}%`,c:a.cpu_percent>60?"#fbbf24":"#34d399"},{l:"Memory",v:`${a.memory_percent||0}%`,c:"#818cf8"},{l:"Latency",v:a.ping_ms?`${a.ping_ms}ms`:"—",c:"#22d3ee"},{l:"Uptime",v:fUp(a.uptime_seconds||0),c:"#e2e8f0"}].map(m=><div key={m.l} className="glass metric"><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span></div>)}</div>
+    <div style={{marginBottom:12}}><span className="metric-label" style={{display:"block",marginBottom:4}}>Pipeline</span><div className="glass" style={{padding:"8px 12px",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:12,fontWeight:600,color:c}}>{a.model}</span><span style={{color:"rgba(255,255,255,0.08)"}}>→</span><span style={{fontSize:12,color:"rgba(255,255,255,0.35)"}}>{a.backend}</span></div></div>
+    <div><span className="metric-label" style={{display:"block",marginBottom:4}}>Tools ({(a.tools||[]).length})</span><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(a.tools||[]).map(t=><Badge key={t} text={t} color="rgba(255,255,255,0.3)"/>)}</div></div>
+  </div></div>;
+};
+
+// ═══════════ NETWORK TOPOLOGY ═══════════
+const Topology=()=><svg viewBox="0 0 600 260" style={{width:"100%",maxWidth:600}}>
+  {/* Cluster boundary */}
+  <rect x="10" y="8" width="580" height="175" className="topo-box" stroke="#818cf8" fill="#818cf8"/>
+  <text x="24" y="26" className="topo-label" fill="#818cf8">VALHALLA CLUSTER</text>
+  {/* Agents */}
+  <rect x="24" y="36" width="200" height="70" className="topo-box" stroke="#34d399" fill="#34d399"/>
+  <text x="36" y="54" className="topo-label" fill="#34d399">WARBAND</text>
+  {[{n:"Ragnar",c:C.ragnar,y:64},{n:"Chuck",c:C.chuck,y:76},{n:"Knut",c:C.knut,y:88}].map(a=><text key={a.n} x="40" y={a.y} className="topo-sub" fill={a.c}>{a.n}</text>)}
+  {[{n:"Freya",c:C.freya,y:64},{n:"Val",c:C.val,y:76},{n:"Ivar / Orm",c:C.ivar,y:88}].map(a=><text key={a.n} x="130" y={a.y} className="topo-sub" fill={a.c}>{a.n}</text>)}
+  {/* Services */}
+  <rect x="240" y="36" width="160" height="70" className="topo-box" stroke="#22d3ee" fill="#22d3ee"/>
+  <text x="252" y="54" className="topo-label" fill="#22d3ee">SERVICES</text>
+  {["Gateway","Seidr / ChromaDB","Lockbox","Vault"].map((s,i)=><text key={s} x="256" y={66+i*12} className="topo-sub">{s}</text>)}
+  {/* GitOps */}
+  <rect x="416" y="36" width="160" height="70" className="topo-box" stroke="#34d399" fill="#34d399"/>
+  <text x="428" y="54" className="topo-label" fill="#34d399">GITOPS</text>
+  {["Gitea","ArgoCD","CI Runner"].map((s,i)=><text key={s} x="432" y={66+i*12} className="topo-sub">{s}</text>)}
+  {/* Hunter boundary */}
+  <rect x="24" y="116" width="200" height="58" className="topo-box" stroke="#ef4444" fill="#ef4444"/>
+  <text x="36" y="134" className="topo-label" fill="#ef4444">HUNTERS (ISOLATED)</text>
+  <text x="40" y="148" className="topo-sub">Research: internet, no creds</text>
+  <text x="40" y="160" className="topo-sub">Service: Lockbox, no internet</text>
+  {/* NetworkPolicy wall */}
+  <line x1="20" y1="112" x2="230" y2="112" className="topo-wall" stroke="#ef4444"/>
+  <text x="100" y="110" style={{fontFamily:"'IBM Plex Mono',monospace",fontSize:8,fill:"#ef4444",opacity:0.6}}>NetworkPolicy</text>
+  {/* Connection lines */}
+  <line x1="224" y1="70" x2="240" y2="70" className="topo-line" stroke="#818cf8"/>
+  <line x1="400" y1="70" x2="416" y2="70" className="topo-line" stroke="#34d399"/>
+  {/* Internet */}
+  <rect x="24" y="200" width="200" height="44" className="topo-box" stroke="#6b7280" fill="#6b7280"/>
+  <text x="90" y="226" className="topo-label" fill="#6b7280">INTERNET</text>
+  <line x1="124" y1="174" x2="124" y2="200" className="topo-line" stroke="#ef4444"/>
+  {/* Sovereign */}
+  <rect x="360" y="200" width="220" height="44" className="topo-box" stroke="#10b981" fill="#10b981"/>
+  <text x="405" y="220" className="topo-label" fill="#10b981">SOVEREIGN (Kit)</text>
+  <text x="395" y="234" className="topo-sub">PR Review → Merge → Deploy</text>
+  <line x1="470" y1="200" x2="470" y2="174" className="topo-line" stroke="#10b981"/>
+</svg>;
+
+// ═══════════ REALM VIEW ═══════════
+const RealmView=({agents,nodes,pods,commits,k8sEvents,prs,repos})=>{
+  const[logPod,setLogPod]=useState(null);const[restarting,setRestarting]=useState(null);const[section,setSection]=useState('pods');
+  const[merging,setMerging]=useState(null);const[mergeResult,setMergeResult]=useState(null);
+  const restart=async n=>{setRestarting(n);await apiPost(`/api/v1/cluster/pods/${n}/restart`);setTimeout(()=>setRestarting(null),3000);};
+  const doMerge=async(repo,idx)=>{setMerging(`${repo}/${idx}`);const r=await mergePR(repo,idx);setMergeResult(r.ok?'Merged!':r.error);setMerging(null);setTimeout(()=>setMergeResult(null),3000);};
+  const running=(pods||[]).filter(p=>p.status==="Running").length;const total=(pods||[]).length;
+  const openPRs=(prs||[]).filter(p=>p.state==='open');
+  const activity=useMemo(()=>{const items=[];(k8sEvents||[]).forEach(e=>items.push({time:e.lastTimestamp||e.metadata?.creationTimestamp||"",type:e.type==="Warning"?"warning":"k8s",source:e.involvedObject?.name||"k8s",message:`${e.reason||""}: ${e.message||""}`.slice(0,120)}));(commits||[]).forEach(c=>items.push({time:c.date||"",type:"git",source:c.author||"git",message:c.message||"—"}));(prs||[]).filter(p=>p.state==='open').forEach(p=>items.push({time:p.created_at||"",type:"pr",source:p.user||"agent",message:`PR #${p.number}: ${p.title||"—"}`}));items.sort((a,b)=>new Date(b.time)-new Date(a.time));return items.slice(0,30);},[k8sEvents,commits,prs]);
+
+  return<div className="realm">
+    {logPod&&<LogModal pod={logPod} onClose={()=>setLogPod(null)}/>}
+    <div className="realm-metrics">{[{l:"Pods",v:total,s:`${running} Running`,c:"#34d399"},{l:"Nodes",v:nodes.length,s:`${nodes.filter(n=>n.status==="Ready").length} Ready`,c:"#fbbf24"},{l:"Agents",v:`${agents.filter(a=>a.status==="online").length}/${agents.length}`,s:"Online",c:"#c084fc"},{l:"Open PRs",v:openPRs.length,s:openPRs.length>0?(openPRs[0]?.title||'').slice(0,22):"All clear",c:openPRs.length>0?"#fbbf24":"#34d399"},{l:"ArgoCD",v:"Synced",s:"Healthy",c:"#22d3ee"}].map(m=><div key={m.l} className="glass metric" style={{cursor:m.l==='Open PRs'?'pointer':undefined}} onClick={m.l==='Open PRs'?()=>setSection('prs'):undefined}><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span><span className="metric-sub">{m.s}</span></div>)}</div>
+    <div className="realm-body">
+      {/* Left nav */}
+      <div className="realm-nav">
+        <div className="nav-group"><div className="nav-group-title">⬡ Cluster</div>
+          {[{k:'nodes',l:'Nodes',n:nodes.length},{k:'pods',l:'Pods',n:total},{k:'services',l:'Services',n:8}].map(x=><div key={x.k} className={`nav-item${section===x.k?" active":""}`} onClick={()=>setSection(x.k)}>{x.l} <span style={{color:"rgba(255,255,255,0.12)",marginLeft:4}}>{x.n}</span></div>)}
+        </div>
+        <div className="nav-group"><div className="nav-group-title">⚔ Warband</div>
+          {[{k:'agents',l:'Agents',n:agents.length},{k:'topology',l:'Security Map',n:''}].map(x=><div key={x.k} className={`nav-item${section===x.k?" active":""}`} onClick={()=>setSection(x.k)}>{x.l} {x.n&&<span style={{color:"rgba(255,255,255,0.12)",marginLeft:4}}>{x.n}</span>}</div>)}
+        </div>
+        <div className="nav-group"><div className="nav-group-title">⚙ GitOps</div>
+          {[{k:'prs',l:'Pull Requests',n:openPRs.length||''},{k:'repos',l:'Repositories',n:(repos||[]).length||''},{k:'commits',l:'Commits',n:(commits||[]).length},{k:'pipeline',l:'Pipeline',n:''}].map(x=><div key={x.k} className={`nav-item${section===x.k?" active":""}`} onClick={()=>setSection(x.k)}>{x.l} {x.n?<span style={{color:x.k==='prs'&&openPRs.length>0?"#fbbf24":"rgba(255,255,255,0.12)",marginLeft:4,fontWeight:x.k==='prs'&&openPRs.length>0?700:400}}>{x.n}</span>:null}</div>)}
+        </div>
+      </div>
+      {/* Main content */}
+      <div className="realm-main">
+        {section==='nodes'&&<div><div className="metric-label" style={{marginBottom:8}}>Cluster Nodes</div><div className="node-grid">{nodes.map(n=><div key={n.name} className="glass" style={{padding:"10px 12px"}}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div style={{display:"flex",alignItems:"center",gap:5}}><Pip status={n.status==="Ready"?"online":"offline"} size={5}/><span style={{fontSize:13,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{n.name}</span></div><Badge text={n.role||"worker"} color="rgba(255,255,255,0.22)"/></div><div style={{fontSize:10,color:"rgba(255,255,255,0.12)",marginBottom:6}}>{n.ip}</div>{[{l:"CPU",v:n.cpu_percent,c:n.cpu_percent>60?"#fbbf24":"#34d399"},{l:"MEM",v:n.memory_percent,c:n.memory_percent>75?"#fbbf24":"#818cf8"}].map(x=><div key={x.l} style={{marginBottom:4}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{fontSize:9,color:"rgba(255,255,255,0.18)"}}>{x.l}</span><span style={{fontSize:10,fontWeight:700,color:x.c}}>{x.v}%</span></div><Bar value={x.v} color={x.c} h={3}/></div>)}</div>)}</div></div>}
+        {section==='pods'&&<div><div className="metric-label" style={{marginBottom:6}}>Pods ({total})</div><div style={{fontSize:9,display:"grid",gridTemplateColumns:"6px 1fr 80px 60px 70px",gap:6,padding:"5px 10px",color:"rgba(255,255,255,0.1)",textTransform:"uppercase",letterSpacing:".1em",borderBottom:"1px solid rgba(255,255,255,0.04)"}}><span/><span>Name</span><span>Node</span><span>Status</span><span style={{textAlign:"right"}}>Actions</span></div>
+          {(pods||[]).map((p,i)=>{const nm=p.name||"?";const ok=p.status==="Running";const isA=Object.keys(C).some(a=>nm.startsWith(a));return<div key={i} className="pod-row" style={{background:isA?"rgba(129,140,248,0.012)":"transparent"}}><Pip status={ok?"online":"offline"} size={4}/><span style={{color:"#e2e8f0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",fontWeight:isA?600:400}}>{nm}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.15)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.node||"—"}</span><Badge text={p.status||"?"} color={ok?"#34d399":"#ef4444"}/><div style={{display:"flex",gap:2,justifyContent:"flex-end"}}><Btn label="Logs" color="#22d3ee" small onClick={()=>setLogPod(nm)}/><Btn label="↻" color="#fbbf24" small onClick={()=>restart(nm)} disabled={restarting===nm}/></div></div>;})}
+        </div>}
+        {section==='services'&&<div><div className="metric-label" style={{marginBottom:8}}>Services</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4}}>{[{n:"Gateway",p:"8080",s:"online"},{n:"Seidr",p:"8082",s:"online"},{n:"ChromaDB",p:"8000",s:"online"},{n:"Lockbox",p:"8083",s:"online"},{n:"Echo MCP",p:"8080",s:"online"},{n:"Bifrost",p:"3000",s:"online"},{n:"Gitea",p:"30637",s:"online"},{n:"ArgoCD",p:"443",s:"online"},{n:"cert-manager",s:"online"},{n:"Vault",p:"8200",s:"online"},{n:"ingress-nginx",p:"30447",s:"online"},{n:"Discord Bot",s:"online"}].map(s=><div key={s.n} className="glass" style={{padding:"6px 10px",display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",alignItems:"center",gap:4}}><Pip status={s.s} size={3}/><span style={{fontSize:11,color:"#c8cdd5"}}>{s.n}</span></div>{s.p&&<span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>{s.p}</span>}</div>)}</div></div>}
+        {section==='agents'&&<div><div className="metric-label" style={{marginBottom:8}}>Warband Status</div>{agents.map(a=><div key={a.id} className="glass" style={{padding:"8px 12px",marginBottom:4,display:"flex",alignItems:"center",gap:10}}><Av agent={a} size={24}/><div style={{flex:1}}><span style={{fontSize:12,fontWeight:600,color:C[a.id]}}>{a.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.2)",marginLeft:8}}>{a.role}</span></div><Badge text={a.model} color={C[a.id]}/><Badge text={a.status} color={sc(a.status)}/><span style={{fontSize:10,color:"rgba(255,255,255,0.15)"}}>{fUp(a.uptime_seconds)}</span></div>)}</div>}
+        {section==='topology'&&<div><div className="metric-label" style={{marginBottom:8}}>Security Architecture</div><Topology/><div className="glass" style={{padding:10,marginTop:8,fontSize:11,color:"rgba(255,255,255,0.4)",lineHeight:1.6}}><strong style={{color:"rgba(255,255,255,0.6)"}}>Core Principle:</strong> No single agent has both sensitive data AND an internet connection. Research Hunters have internet but no credentials. Service Hunters have Lockbox credentials but no internet. Enforced by Kubernetes NetworkPolicy — not prompts, not trust.</div></div>}
+        {section==='prs'&&<div><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><div className="metric-label">Pull Requests</div>{openPRs.length>0&&<Badge text={`${openPRs.length} open`} color="#fbbf24"/>}</div>
+          {openPRs.length===0&&<div className="glass" style={{padding:"20px 14px",textAlign:"center"}}><div style={{fontSize:11,color:"rgba(255,255,255,0.2)",marginBottom:4}}>No open pull requests</div><div style={{fontSize:10,color:"rgba(255,255,255,0.1)"}}>Agents create PRs through the GitOps pipeline</div></div>}
+          {(prs||[]).map((pr,i)=>{const isOpen=pr.state==='open';const ac=C[pr.user?.toLowerCase()]||"#818cf8";return<div key={i} className="glass" style={{padding:"10px 12px",marginBottom:4}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+                  <span style={{fontSize:9,fontWeight:700,color:isOpen?"#34d399":"#c084fc",fontFamily:"'IBM Plex Mono',monospace"}}>#{pr.number||i}</span>
+                  <span style={{fontSize:12,fontWeight:600,color:"#e2e8f0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pr.title||"Untitled"}</span>
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <span style={{fontSize:10,color:ac,fontWeight:600}}>{pr.user||"unknown"}</span>
+                  <span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>→</span>
+                  <span style={{fontSize:10,color:"rgba(255,255,255,0.22)"}}>{pr.base||"main"}</span>
+                  <span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>·</span>
+                  <span style={{fontSize:9,color:"rgba(255,255,255,0.12)"}}>{pr.repo||""}</span>
+                  {pr.created_at&&<span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>{fAgo(pr.created_at)}</span>}
+                </div>
+                {pr.body&&<div style={{fontSize:10,color:"rgba(255,255,255,0.2)",marginTop:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{pr.body}</div>}
+              </div>
+              <div style={{display:"flex",gap:3,flexShrink:0,alignItems:"center"}}>
+                <Badge text={isOpen?"open":"merged"} color={isOpen?"#34d399":"#c084fc"}/>
+                {isOpen&&<Btn label="Merge" icon="⚔" color="#34d399" small onClick={()=>doMerge(pr.repo||'',pr.number||0)} disabled={merging===`${pr.repo}/${pr.number}`}/>}
+                {pr.html_url&&<Btn label="View" icon="↗" color="#818cf8" small onClick={()=>window.open(pr.html_url,'_blank')}/>}
+              </div>
+            </div>
+            {pr.labels&&pr.labels.length>0&&<div style={{display:"flex",gap:2,marginTop:4}}>{pr.labels.map((l,j)=><Badge key={j} text={l} color="#fbbf24"/>)}</div>}
+          </div>;})}
+          {mergeResult&&<div style={{padding:"6px 10px",marginTop:4,fontSize:10,fontWeight:700,color:mergeResult==='Merged!'?"#34d399":"#ef4444",background:mergeResult==='Merged!'?"rgba(52,211,153,0.06)":"rgba(239,68,68,0.06)",border:`1px solid ${mergeResult==='Merged!'?"rgba(52,211,153,0.15)":"rgba(239,68,68,0.15)"}`,borderRadius:3}}>{mergeResult}</div>}
+        </div>}
+        {section==='repos'&&<div><div className="metric-label" style={{marginBottom:8}}>Repositories</div>
+          {(repos||[]).map((r,i)=><div key={i} className="glass" style={{padding:"10px 12px",marginBottom:4}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+              <div style={{display:"flex",alignItems:"center",gap:6}}>
+                <span style={{fontSize:13,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{r.name}</span>
+                <Badge text={r.owner} color="rgba(255,255,255,0.2)"/>
+                {r.language&&<Badge text={r.language} color={r.language==='Go'?"#22d3ee":r.language==='YAML'?"#34d399":r.language==='Python'?"#fbbf24":"#818cf8"}/>}
+              </div>
+              {r.open_prs>0&&<Badge text={`${r.open_prs} PRs`} color="#fbbf24"/>}
+            </div>
+            <div style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{r.description||"—"}</div>
+            <div style={{display:"flex",gap:10,marginTop:6,fontSize:9,color:"rgba(255,255,255,0.12)"}}>
+              <span>↗ <span style={{color:"rgba(255,255,255,0.2)",cursor:"pointer"}} onClick={()=>window.open(`http://203.0.113.26:30637/${r.owner}/${r.name}`,'_blank')}>Open in Gitea</span></span>
+              {r.name==='project_valhalla'&&<span>CI: <span style={{color:"#34d399"}}>active</span></span>}
+              {r.name==='valhalla-infra'&&<span>ArgoCD: <span style={{color:"#34d399"}}>watching</span></span>}
+            </div>
+          </div>)}
+          <div className="glass" style={{padding:8,marginTop:6,fontSize:10,color:"rgba(255,255,255,0.15)"}}><strong style={{color:"rgba(255,255,255,0.25)"}}>Flow:</strong> project_valhalla (source) → CI → Docker images → valhalla-infra (manifests) → ArgoCD → cluster</div>
+        </div>}
+        {section==='commits'&&<div><div className="metric-label" style={{marginBottom:8}}>Recent Commits</div>{(commits||[]).map((c,i)=><div key={i} style={{display:"flex",gap:8,padding:"5px 0",borderBottom:"1px solid rgba(255,255,255,0.02)"}}><span style={{fontSize:11,color:"#34d399",fontWeight:600,fontFamily:"'IBM Plex Mono',monospace",flexShrink:0}}>{(c.sha||'').slice(0,7)}</span><span style={{fontSize:11,color:"rgba(255,255,255,0.5)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.message}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.12)",flexShrink:0}}>{c.author} · {fAgo(c.date)}</span></div>)}</div>}
+        {section==='pipeline'&&<div><div className="metric-label" style={{marginBottom:8}}>GitOps Pipeline</div><div className="glass" style={{padding:"12px 14px"}}><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>{["PUSH","CI","PR","REVIEW","MERGE","SYNC"].map((s,i)=><div key={s} style={{display:"flex",alignItems:"center"}}><div style={{padding:"4px 8px",fontSize:8,fontWeight:700,letterSpacing:".06em",color:s==="REVIEW"?"#fbbf24":"#34d399",background:s==="REVIEW"?"rgba(251,191,36,0.05)":"rgba(52,211,153,0.03)",border:`1px solid ${s==="REVIEW"?"rgba(251,191,36,0.1)":"rgba(52,211,153,0.06)"}`,borderRadius:2}}>{s}</div>{i<5&&<div style={{width:8,height:1,background:"rgba(255,255,255,0.04)"}}/>}</div>)}</div><div style={{fontSize:9,color:"rgba(255,255,255,0.15)",marginTop:8}}>Agent → Gitea → CI Build → SHA-tagged Images → Infra PR → Sovereign Merge → ArgoCD Auto-Sync</div></div><div className="glass" style={{padding:10,marginTop:8}}><div className="metric-label" style={{marginBottom:4}}>Proven Chain</div><div style={{fontSize:11,color:"rgba(255,255,255,0.4)",lineHeight:1.6}}>Code PR merge → CI builds 3 images → CI creates infra PR → Sovereign merges → Gitea webhook → ArgoCD syncs. <strong style={{color:"#34d399"}}>Zero kubectl. Zero manual intervention beyond PR approvals.</strong></div></div></div>}
+      </div>
+      {/* Right panel — activity */}
+      <div className="realm-right">
+        <div style={{padding:"10px 12px",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0,display:"flex",justifyContent:"space-between"}}><span className="metric-label" style={{margin:0}}>Activity</span><span style={{fontSize:9,color:"rgba(255,255,255,0.08)"}}>{activity.length}</span></div>
+        <div style={{flex:1,overflowY:"auto"}}>{activity.map((a,i)=>{const c2={git:"#34d399",k8s:"#818cf8",warning:"#fbbf24",pr:"#c084fc"}[a.type]||"#6b7280";return<div key={i} style={{display:"flex",gap:6,padding:"5px 12px",borderBottom:"1px solid rgba(255,255,255,0.02)",borderLeft:`2px solid ${c2}15`}}><div style={{flex:1,minWidth:0}}><div style={{display:"flex",gap:3,alignItems:"center",marginBottom:1}}><Badge text={a.type} color={c2}/><span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>{fAgo(a.time)}</span></div><span style={{fontSize:10,color:"rgba(255,255,255,0.35)",display:"block",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.message}</span></div></div>;})}</div>
+        <div style={{padding:12,borderTop:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>
+          <div className="metric-label" style={{marginBottom:6}}>Services</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:2}}>{[{n:"Gateway"},{n:"Seidr"},{n:"Gitea"},{n:"ArgoCD"},{n:"Vault"},{n:"ingress"}].map(s=><div key={s.n} style={{display:"flex",alignItems:"center",gap:3,padding:"3px 6px"}}><Pip status="online" size={3}/><span style={{fontSize:10,color:"rgba(255,255,255,0.4)"}}>{s.n}</span></div>)}</div>
+        </div>
+      </div>
+    </div>
+  </div>;
+};
+
+// ═══════════ APP ═══════════
+const Tab=({active,label,count,onClick})=><button onClick={onClick} style={{background:"none",border:"none",color:active?"#e2e8f0":"rgba(255,255,255,0.22)",padding:"10px 0",marginRight:22,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:".1em",textTransform:"uppercase",borderBottom:active?"2px solid #818cf8":"2px solid transparent"}}>{label}{count!=null&&<span style={{marginLeft:4,fontSize:10,color:active?"#818cf8":"rgba(255,255,255,0.1)"}}>{count}</span>}</button>;
+
+const lck=(u,a)=>`hirdforge-chat-${u}-${a}`;const lsk=(u,a)=>`hirdforge-session-${u}-${a}`;
+const u2s=m=>({role:m.from==="kit"?"user":"assistant",content:m.text||"",timestamp:Date.now()});
+const s2u=(a,m,uname)=>{const u=m.role==="user";return{from:u?"kit":a,agent:u?{id:"kit",name:`${uname||'Sovereign'}`,initial:(uname||'S')[0]?.toUpperCase()||"S",status:"online"}:{id:a,name:a,initial:(a||"?")[0]?.toUpperCase()||"?",status:"online"},text:m.content||"",time:new Date(m.timestamp||Date.now()).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),streaming:false,toolCalls:[],toolResults:[]};};
+
+function App(){
+  const[tab,setTab]=useState("comms");const[sel,setSel]=useState(0);
+  const[ch,setCh]=useState([]);const[msg,setMsg]=useState("");const[tgt,setTgt]=useState("ragnar");const[busy,setBusy]=useState(false);
+  const[sidByA,setSidByA]=useState({});const[sItems,setSItems]=useState([]);const[toast,setToast]=useState("");
+  const[termOpen,setTermOpen]=useState(true);const[termH,setTermH]=useState(200);
+  const auth=useAuth();
+
+  const agents=usePoll('/api/v1/agents',FA,CFG.POLL);
+  const nodes=usePoll('/api/v1/cluster/nodes',FN,CFG.POLL*2);
+  const pods=usePoll('/api/v1/cluster/pods',[],CFG.POLL*2);
+  const commits=usePoll('/api/v1/gitea/commits',[],CFG.POLL*3);
+  const k8sEvents=usePoll('/api/v1/k8s/events',[],CFG.POLL*2);
+  const{ev:events,ok:wsOk}=useWS();
+  const{prs}=usePRs();const repos=useRepos();
+  const online=agents.filter(a=>a.status==="online").length;
+  const openPRCount=(prs||[]).filter(p=>p.state==='open').length;
+  const curSid=sidByA[tgt]||localStorage.getItem(lsk(auth.user,tgt))||`hirdforge-${tgt}-${Date.now()}`;
+
+  useEffect(()=>{if(!tgt)return;const r=localStorage.getItem(lck(auth.user,tgt));if(r){try{const p=JSON.parse(r);setCh(Array.isArray(p)?p.map(m=>s2u(tgt,m,auth.user)):[]);}catch{setCh([]);}}else setCh([]);
+    const sid=localStorage.getItem(lsk(auth.user,tgt));if(sid){setSidByA(p=>({...p,[tgt]:sid}));api(`/api/v1/sessions/${sid}`,null).then(s=>{if(s?.messages)setCh(s.messages.map(m=>s2u(tgt,m,auth.user)));});}
+  },[tgt,auth.user]);
+  useEffect(()=>{if(tgt)localStorage.setItem(lck(auth.user,tgt),JSON.stringify(ch.map(u2s)));},[ch,tgt,auth.user]);
+  useEffect(()=>{if(tgt&&sidByA[tgt])localStorage.setItem(lsk(auth.user,tgt),sidByA[tgt]);},[sidByA,tgt,auth.user]);
+  useEffect(()=>{let m=true;const go=async()=>{const a=await api('/api/v1/sessions',[]);if(m&&Array.isArray(a))setSItems(a.filter(s=>s.agent===tgt));};go();const id=setInterval(go,5000);return()=>{m=false;clearInterval(id);};},[tgt,busy]);
+
+  const setCurSid=s=>setSidByA(p=>({...p,[tgt]:s}));
+  const loadSess=async s=>{const d=await api(`/api/v1/sessions/${s}`,null);if(d?.messages){setCurSid(s);setCh(d.messages.map(m=>s2u(tgt,m,auth.user)));}};
+  const newConv=()=>{setCurSid(`hirdforge-${tgt}-${Date.now()}`);setCh([]);};
+  const clearH=()=>{setCh([]);localStorage.removeItem(lck(auth.user,tgt));};
+  const eStop=async()=>{await apiPost('/api/v1/agents/stop-all');setBusy(false);setCh(p=>{if(!p.length)return p;const u=[...p];const l={...u[u.length-1]};if(l.streaming){l.streaming=false;l.text=(l.text?l.text+"\n":"")+"[Stopped by Sovereign]";u[u.length-1]=l;}return u;});setToast("All agents stopped");setTimeout(()=>setToast(""),1800);};
+
+  return<div className="app">
+    <div className="header">
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <div style={{display:"flex",alignItems:"center",gap:7}}><div style={{width:8,height:8,background:"#818cf8",boxShadow:"0 0 12px rgba(129,140,248,0.5)",borderRadius:1}}/><span style={{fontSize:14,fontWeight:800,letterSpacing:".18em",color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>HIRDFORGE</span></div>
+        <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/><span style={{fontSize:10,color:"rgba(255,255,255,0.18)",letterSpacing:".1em"}}>VALHALLA CLUSTER</span>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:14}}>
+        {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=><div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:"rgba(255,255,255,0.22)"}}><Pip status={x.s} size={4}/><span>{x.l}</span></div>)}
+        {openPRCount>0&&<button onClick={()=>{setTab('realm');}} style={{display:"flex",alignItems:"center",gap:4,padding:"3px 8px",background:"rgba(251,191,36,0.08)",border:"1px solid rgba(251,191,36,0.25)",borderRadius:3,fontSize:10,fontWeight:700,color:"#fbbf24",fontFamily:"'IBM Plex Mono',monospace",animation:"forge-glow 2s ease infinite"}} title="Open pull requests awaiting review">⚔ {openPRCount} PR{openPRCount>1?'s':''}</button>}
+        <button onClick={eStop} title="Emergency Stop" style={{width:24,height:24,borderRadius:"50%",border:"1px solid rgba(239,68,68,0.5)",background:"rgba(239,68,68,0.1)",color:"#ef4444",fontWeight:900,fontSize:9,boxShadow:busy?"0 0 10px rgba(239,68,68,0.3)":"none"}}>■</button>
+        <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <Pip status="online" size={4}/>
+          <span style={{fontSize:11,color:"#10b981",fontWeight:700}}>{auth.user}</span>
+          <Badge text={auth.role} color="#10b981"/>
+          {auth.authenticated&&<button onClick={logout} title="Sign out" style={{background:"none",border:"1px solid rgba(255,255,255,0.06)",color:"rgba(255,255,255,0.2)",fontSize:9,padding:"2px 6px",fontFamily:"'IBM Plex Mono',monospace",borderRadius:2}}>⏻</button>}
+        </div>
+        <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/><span style={{fontSize:12,fontFamily:"'Space Grotesk',sans-serif"}}><span style={{color:"#34d399",fontWeight:700}}>{online}</span><span style={{color:"rgba(255,255,255,0.12)"}}> / {agents.length}</span></span>
+      </div>
+    </div>
+    <div className="tabs">
+      <Tab active={tab==="comms"} label="Comms" count={events.length} onClick={()=>setTab("comms")}/>
+      <Tab active={tab==="fleet"} label="Warriors" count={agents.length} onClick={()=>setTab("fleet")}/>
+      <Tab active={tab==="realm"} label="Realm" onClick={()=>setTab("realm")}/>
+      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6}}>
+        <button onClick={()=>setTermOpen(!termOpen)} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",background:termOpen?"rgba(34,211,238,0.06)":"transparent",border:`1px solid ${termOpen?"rgba(34,211,238,0.15)":"rgba(255,255,255,0.05)"}`,borderRadius:3,fontSize:9,fontWeight:700,color:termOpen?"#22d3ee":"rgba(255,255,255,0.25)",letterSpacing:".06em",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ TERMINAL</button>
+      </div>
+    </div>
+    <div className="body">
+      <div className="tab-content">
+        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsOk} chatHistory={ch} setChatHistory={setCh} msg={msg} setMsg={setMsg} target={tgt} setTarget={setTgt} sending={busy} setSending={setBusy} sessionId={curSid} setSessionId={setCurSid} sessionItems={sItems} onLoadSession={loadSess} onNewConversation={newConv} onClearHistory={clearH} onEmergencyStop={eStop} auth={auth}/>}
+        {tab==="fleet"&&<FleetView agents={agents} selected={sel} setSelected={setSel}/>}
+        {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} prs={prs} repos={repos}/>}
+      </div>
+      {termOpen&&<div className="terminal-wrapper" style={{height:termH}}>
+        <div className="terminal-header" onClick={()=>setTermOpen(false)}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:9,fontWeight:700,color:"#22d3ee",letterSpacing:".1em"}}>⚡ FORGE TERMINAL</span><span style={{fontSize:9,color:"rgba(255,255,255,0.12)"}}>forge@valhalla</span></div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:9,color:"rgba(255,255,255,0.12)"}}>@{tgt}</span><span style={{fontSize:11,color:"rgba(255,255,255,0.2)",cursor:"pointer"}}>×</span></div>
+        </div>
+        <ForgeTerminal agents={agents} pods={pods} nodes={nodes} commits={commits} k8sEvents={k8sEvents} target={tgt}/>
+      </div>}
+    </div>
+    <div className="status-bar">
+      <div style={{display:"flex",gap:14}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
+      <div style={{display:"flex",gap:14}}><span>WS: <span style={{color:wsOk?"#34d399":"#ef4444"}}>{wsOk?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.08)"}}>v1.0.0</span></div>
+    </div>
+    {toast&&<div style={{position:"fixed",top:52,right:20,padding:"6px 12px",background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.35)",color:"#ef4444",fontSize:11,fontWeight:700,zIndex:20000,borderRadius:3}}>{toast}</div>}
+  </div>;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>
