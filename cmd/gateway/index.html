@@ -187,6 +187,7 @@ const FA=[
   {id:"ivar",name:"Ivar the Branchless",role:"Code Reviewer",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"I"},
   {id:"orm",name:"Orm the Scribe",role:"Documentation",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"O"},
   {id:"val",name:"Val Kyrie",role:"Operations",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"V"},
+  {id:"freya",name:"Freya",role:"Oracle / Sage",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"F"},
 ];
 const FN=[{name:"node-cp-1",ip:"203.0.113.26",role:"Control+Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},{name:"node-worker-1",ip:"203.0.113.27",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},{name:"node-worker-2",ip:"203.0.113.28",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0}];
 
@@ -209,7 +210,7 @@ function usePoll(path,fb,iv){
   },[path]);return d;
 }
 function useWS(){const[ev,setEv]=useState([]);const[ok,setOk]=useState(false);
-  useEffect(()=>{if(CFG.MOCK)return;const u=CFG.WS||`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;let ws,d=3e3;const go=()=>{ws=new WebSocket(u);ws.onopen=()=>{setOk(true);d=3e3};ws.onclose=()=>{setOk(false);d=Math.min(d*2,3e4);setTimeout(go,d)};ws.onmessage=e=>{try{setEv(p=>[JSON.parse(e.data),...p].slice(0,100))}catch{}};};go();return()=>ws?.close();},[]);return{ev,ok};
+  useEffect(()=>{if(CFG.MOCK)return;const u=CFG.WS||`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;let ws,d=3e3;const go=()=>{ws=new WebSocket(u);ws.onopen=()=>{setOk(true);d=3e3};ws.onclose=()=>{setOk(false);d=Math.min(d*2,3e4);setTimeout(go,d)};ws.onmessage=e=>{try{const d=JSON.parse(e.data);if(!d.timestamp)d.timestamp=new Date().toISOString();setEv(p=>[d,...p].slice(0,100))}catch{}};};go();return()=>ws?.close();},[]);return{ev,ok};
 }
 
 // ═══════════ AUTH ═══════════
@@ -289,8 +290,8 @@ const Badge=({text,color="rgba(255,255,255,0.4)"})=><span className="badge" styl
 const Btn=({label,icon,color="#818cf8",onClick,disabled,small})=><button onClick={onClick} disabled={disabled} style={{padding:small?"3px 7px":"5px 10px",fontSize:small?8:9,fontWeight:700,letterSpacing:".06em",background:`${color}10`,border:`1px solid ${color}22`,color:disabled?`${color}40`:color,textTransform:"uppercase",fontFamily:"'IBM Plex Mono',monospace",opacity:disabled?.5:1,display:"inline-flex",alignItems:"center",gap:3,borderRadius:3}}>{icon&&<span style={{fontSize:small?9:10}}>{icon}</span>}{label}</button>;
 
 const fUp=s=>s<=0?"—":`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
-const fT=ts=>{try{return new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch{return ts;}};
-const fAgo=ts=>{try{const s=(Date.now()-new Date(ts).getTime())/1000;if(s<60)return`${Math.floor(s)}s`;if(s<3600)return`${Math.floor(s/60)}m`;if(s<86400)return`${Math.floor(s/3600)}h`;return`${Math.floor(s/86400)}d`;}catch{return"—";}};
+const fT=ts=>{if(!ts)return'—';try{const d=new Date(ts);if(isNaN(d.getTime()))return'—';return d.toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});}catch{return'—';}};
+const fAgo=ts=>{if(!ts)return'—';try{const d=new Date(ts);if(isNaN(d.getTime()))return'—';const s=(Date.now()-d.getTime())/1000;if(s<0)return'now';if(s<60)return`${Math.floor(s)}s`;if(s<3600)return`${Math.floor(s/60)}m`;if(s<86400)return`${Math.floor(s/3600)}h`;return`${Math.floor(s/86400)}d`;}catch{return'—';}};
 
 // ═══════════ TERMINAL ═══════════
 const HELP=`  HIRDFORGE FORGE TERMINAL — v1.0
