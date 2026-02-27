@@ -1972,7 +1972,7 @@ func main() {
 				}
 			}
 			if result.Error != "" {
-				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error})
+				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error, "output": result.Output})
 			} else {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
 			}

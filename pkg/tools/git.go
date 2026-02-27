@@ -88,7 +88,15 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 	cmdArgs = append(cmdArgs, cloneURL, repoDir)
 
 	if res := runGit(t.WorkDir, cmdArgs, 120*time.Second); res.Error != "" {
-		return res
+		// If directory exists but clone failed (stale/corrupt workspace), remove and retry once
+		if _, statErr := os.Stat(repoDir); statErr == nil {
+			_ = os.RemoveAll(repoDir)
+			if res2 := runGit(t.WorkDir, cmdArgs, 120*time.Second); res2.Error != "" {
+				return res2
+			}
+		} else {
+			return res
+		}
 	}
 
 	runGit(repoDir, []string{"git", "config", "user.email", "agent@valhalla.local"}, 5*time.Second)
