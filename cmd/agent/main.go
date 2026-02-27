@@ -26,6 +26,7 @@ import (
 	"time"
 
 	mcppkg "github.com/kitporath/project_valhalla/pkg/mcp"
+	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
 	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
 )
 
@@ -285,6 +286,10 @@ type (
 		Content   string `json:"content"`
 		SessionID string `json:"session_id"`
 	}
+	taskSendRequest struct {
+		Content string `json:"content"`
+		From    string `json:"from"`
+	}
 	sseChunk struct {
 		Type      string      `json:"type"`
 		Content   string      `json:"content,omitempty"`
@@ -325,7 +330,8 @@ Preserve decisions, concrete outputs, file names, commands, and unresolved follo
 Do not add new facts. Keep it short and useful for future continuation.`
 
 type delegateTool struct {
-	peers map[string]string
+	peers     map[string]string
+	agentName string
 }
 
 func (t *delegateTool) Name() string { return "delegate" }
@@ -353,25 +359,25 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 		sort.Strings(names)
 		return toolpkg.ToolResult{Error: fmt.Sprintf("unknown agent: %s. Available: %s", agent, strings.Join(names, ", "))}
 	}
-	resp, err := callPeerAgentTask(agent, peerURL, task)
+	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, task)
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
 	return toolpkg.ToolResult{Output: resp}
 }
 
-func callPeerAgentTask(agentName, peerURL, task string) (string, error) {
+func sendPeerAgentTask(agentName, peerURL, from, task string) (string, error) {
 	logJSON("info", "delegating", map[string]interface{}{"target_agent": agentName})
-	body, _ := json.Marshal(map[string]string{
-		"content":    task,
-		"session_id": fmt.Sprintf("delegate-%x", rand.Int63()),
+	body, _ := json.Marshal(taskSendRequest{
+		Content: task,
+		From:    from,
 	})
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(peerURL, "/")+"/message", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(peerURL, "/")+"/tasks/send", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 300 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -381,40 +387,17 @@ func callPeerAgentTask(agentName, peerURL, task string) (string, error) {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", fmt.Errorf("peer returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
-	var full strings.Builder
-	reader := bufio.NewReader(resp.Body)
-	for {
-		line, err := reader.ReadString('\n')
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return "", err
-		}
-		line = strings.TrimRight(line, "\r\n")
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-		payload := line[6:]
-		if payload == "[DONE]" {
-			break
-		}
-		var evt struct {
-			Type    string `json:"type"`
-			Content string `json:"content"`
-			Done    bool   `json:"done"`
-		}
-		if err := json.Unmarshal([]byte(payload), &evt); err != nil {
-			continue
-		}
-		if evt.Type == "content" {
-			full.WriteString(stripThinkTags(evt.Content))
-		}
-		if evt.Done {
-			break
-		}
+	var out struct {
+		ID     string `json:"id"`
+		Status string `json:"status"`
 	}
-	return full.String(), nil
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if out.ID == "" {
+		return "", fmt.Errorf("peer returned empty task id")
+	}
+	return fmt.Sprintf("Task submitted to %s: %s", agentName, out.ID), nil
 }
 
 type broadcastTool struct {
@@ -454,7 +437,7 @@ func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult 
 		wg.Add(1)
 		go func(peerName string) {
 			defer wg.Done()
-			resp, err := callPeerAgentTask(peerName, t.peers[peerName], task)
+			resp, err := sendPeerAgentTask(peerName, t.peers[peerName], "broadcast", task)
 			results <- out{name: peerName, resp: resp, err: err}
 		}(name)
 	}
@@ -475,6 +458,47 @@ func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult 
 		}
 	}
 	return toolpkg.ToolResult{Output: b.String()}
+}
+
+type taskStatusTool struct {
+	peers map[string]string
+}
+
+func (t *taskStatusTool) Name() string { return "task_status" }
+func (t *taskStatusTool) Description() string {
+	return "Check the status of an async delegated task on a peer agent."
+}
+func (t *taskStatusTool) Parameters() map[string]string {
+	return map[string]string{
+		"agent":   "Name of the agent running the task",
+		"task_id": "Task ID returned by delegate",
+	}
+}
+func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	agent, _ := args["agent"].(string)
+	taskID, _ := args["task_id"].(string)
+	if strings.TrimSpace(agent) == "" || strings.TrimSpace(taskID) == "" {
+		return toolpkg.ToolResult{Error: "agent and task_id are required"}
+	}
+	peerURL, ok := t.peers[agent]
+	if !ok {
+		return toolpkg.ToolResult{Error: "unknown agent: " + agent}
+	}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(peerURL, "/")+"/tasks/"+url.PathEscape(taskID), nil)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return toolpkg.ToolResult{Error: strings.TrimSpace(string(body))}
+	}
+	return toolpkg.ToolResult{Output: strings.TrimSpace(string(body))}
 }
 
 type recallTool struct {
@@ -1510,6 +1534,10 @@ func validateGiteaHMAC(secret string, body []byte, provided string) bool {
 	return hmac.Equal([]byte(strings.ToLower(expected)), []byte(strings.ToLower(provided)))
 }
 
+func newTaskID() string {
+	return fmt.Sprintf("task-%08x", rand.Uint32())
+}
+
 func statusPayload() map[string]interface{} {
 	return map[string]interface{}{
 		"status":          "ready",
@@ -1682,10 +1710,14 @@ func main() {
 	if agentName == "" {
 		agentName = "valhalla-agent"
 	}
+	taskStore := taskspkg.NewStore()
+	var taskCancelMu sync.Mutex
+	taskCancels := map[string]context.CancelFunc{}
 
 	reg := toolpkg.NewRegistry()
-	delegateExec := &delegateTool{peers: peers}
+	delegateExec := &delegateTool{peers: peers, agentName: agentName}
 	broadcastExec := &broadcastTool{peers: peers}
+	taskStatusExec := &taskStatusTool{peers: peers}
 	recallExec := &recallTool{memoryURL: *memoryURL, agentName: agentName}
 	rememberExec := &rememberTool{memoryURL: *memoryURL, agentName: agentName}
 	enabled := map[string]bool{}
@@ -1723,6 +1755,7 @@ func main() {
 	}
 	if enabled["delegate"] || len(peers) > 0 {
 		reg.Register(delegateExec)
+		reg.Register(taskStatusExec)
 	}
 	if enabled["broadcast"] || len(peers) > 0 {
 		reg.Register(broadcastExec)
@@ -1764,6 +1797,270 @@ func main() {
 	toolDefs := buildToolDefs(reg)
 	enabledTools = reg.List()
 	modelName = *model
+
+	emitNoop := func(sseChunk) bool { return true }
+	processConversation := func(ctx context.Context, sessionID, content string, emit func(sseChunk) bool, logTool func(taskspkg.ToolLog)) (string, error) {
+		if emit == nil {
+			emit = emitNoop
+		}
+
+		sessionsMu.Lock()
+		history := append([]message(nil), sessions[sessionID]...)
+		firstMessage := !seenSessions[sessionID]
+		if firstMessage {
+			seenSessions[sessionID] = true
+		}
+		sessionsMu.Unlock()
+
+		history = compactHistory(sessionID, history, *maxContext, *compactionThreshold, *compactionBatch, *inferenceURL, *model, *apiKey, *memoryURL, agentName)
+		sessionsMu.Lock()
+		sessions[sessionID] = append([]message(nil), history...)
+		sessionsMu.Unlock()
+
+		bootstrapContext := ""
+		if firstMessage {
+			if persona != nil {
+				if err := syncPersonaRepo(persona.URL, persona.Root); err != nil {
+					logJSON("warn", "persona repo refresh failed", map[string]interface{}{"error": err.Error()})
+				}
+			}
+			bootstrapContext = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, persona)
+		}
+		systemContent := soul
+		if strings.TrimSpace(bootstrapContext) != "" {
+			systemContent = soul + "\n\n" + bootstrapContext
+		}
+		messages := []message{{Role: "system", Content: systemContent}}
+		messages = append(messages, history...)
+		messages = append(messages, message{Role: "user", Content: content})
+
+		executeOneToolCall := func(tc toolCall) toolpkg.ToolResult {
+			atomic.AddInt64(&toolCalls, 1)
+			atomic.AddInt64(&metricsToolCallsTotal, 1)
+			incToolMetric(tc.Function.Name)
+			args := map[string]interface{}{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				args = map[string]interface{}{"_raw": tc.Function.Arguments}
+			}
+			logJSON("info", "tool called", map[string]interface{}{"tool": tc.Function.Name})
+			if !emit(sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false}) {
+				return toolpkg.ToolResult{Error: "stream closed"}
+			}
+			result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
+			switch tc.Function.Name {
+			case "delegate":
+				result = delegateExec.Execute(args)
+			case "broadcast":
+				result = broadcastExec.Execute(args)
+			default:
+				if t, ok := reg.Get(tc.Function.Name); ok {
+					result = t.Execute(args)
+				}
+			}
+			if result.Error != "" {
+				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error, "output": result.Output})
+			} else {
+				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
+			}
+			if logTool != nil {
+				inputBytes, _ := json.Marshal(args)
+				out := result.Output
+				if result.Error != "" {
+					if out != "" {
+						out = result.Error + "\n" + out
+					} else {
+						out = result.Error
+					}
+				}
+				logTool(taskspkg.ToolLog{Name: tc.Function.Name, Input: string(inputBytes), Output: out})
+			}
+			maybeRememberAction(*memoryURL, agentName, sessionID, tc.Function.Name, args, result)
+			if !emit(sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false}) {
+				return result
+			}
+			toolContent := result.Output
+			if result.Error != "" {
+				if toolContent != "" {
+					toolContent = result.Error + "\n" + toolContent
+				} else {
+					toolContent = result.Error
+				}
+			}
+			if !strings.HasPrefix(tc.ID, "xml_") && !strings.HasPrefix(tc.ID, "mm_") {
+				messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
+			}
+			return result
+		}
+
+		executeToolCalls := func(calls []toolCall) {
+			for _, tc := range calls {
+				_ = executeOneToolCall(tc)
+			}
+		}
+
+		for i := 0; i < 10; i++ {
+			resp, err := callOllamaNonStreamingWithContext(ctx, messages, toolDefs, *inferenceURL, *model, *apiKey)
+			if err != nil {
+				return "", err
+			}
+			if len(resp.Choices) == 0 {
+				break
+			}
+			assistant := resp.Choices[0].Message
+			if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<minimax:tool_call>") {
+				mmCalls, cleaned := parseMiniMaxToolCalls(assistant.Content)
+				if len(mmCalls) > 0 {
+					assistant.ToolCalls = mmCalls
+					assistant.Content = cleaned
+				}
+			}
+			if len(assistant.ToolCalls) == 0 {
+				break
+			}
+			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
+			executeToolCalls(assistant.ToolCalls)
+			if i == 19 {
+				_ = emit(sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
+			}
+		}
+
+		var full strings.Builder
+		hadXMLToolCalls := false
+		var xmlToolResults []string
+		insideThink := false
+		for chunk := range streamOllamaWithContext(ctx, messages, nil, *inferenceURL, *model, *apiKey) {
+			cleaned := ""
+			combined := chunk
+			if insideThink {
+				if idx := strings.Index(combined, "</think>"); idx >= 0 {
+					insideThink = false
+					combined = combined[idx+len("</think>"):]
+				} else {
+					continue
+				}
+			}
+			if idx := strings.Index(combined, "<think>"); idx >= 0 {
+				cleaned = combined[:idx]
+				insideThink = true
+				if end := strings.Index(combined[idx:], "</think>"); end >= 0 {
+					insideThink = false
+					cleaned += combined[idx+end+len("</think>"):]
+				}
+			} else {
+				cleaned = combined
+			}
+			cleaned = orphanThinkRe.ReplaceAllString(cleaned, "")
+			if cleaned == "" {
+				continue
+			}
+			cleanedChunk, xmlResults := extractAndExecuteXMLToolCalls(cleaned, func(tc toolCall) ToolResult {
+				result := executeOneToolCall(tc)
+				out := result.Output
+				if result.Error != "" {
+					out = "ERROR: " + result.Error
+				}
+				if len(out) > 500 {
+					out = out[:500] + "...[truncated]"
+				}
+				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+				return result
+			})
+			if len(xmlResults) > 0 {
+				hadXMLToolCalls = true
+			}
+			if cleanedChunk == "" {
+				continue
+			}
+			full.WriteString(cleanedChunk)
+			if !emit(sseChunk{Type: "content", Content: cleanedChunk, Done: false}) {
+				return full.String(), context.Canceled
+			}
+		}
+		finalContent := full.String()
+		if strings.Contains(finalContent, "<minimax:tool_call>") {
+			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
+				result := executeOneToolCall(tc)
+				out := result.Output
+				if result.Error != "" {
+					out = "ERROR: " + result.Error
+				}
+				if len(out) > 500 {
+					out = out[:500] + "...[truncated]"
+				}
+				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+				return result
+			})
+			if len(postResults) > 0 {
+				hadXMLToolCalls = true
+				full.Reset()
+				full.WriteString(cleanedFinal)
+				if !emit(sseChunk{Type: "replace", Content: cleanedFinal, Done: false}) {
+					return cleanedFinal, context.Canceled
+				}
+			}
+		}
+		cleaned := strings.TrimSpace(full.String())
+		if cleaned != "" {
+			messages = append(messages, message{Role: "assistant", Content: cleaned})
+		}
+		if hadXMLToolCalls && len(xmlToolResults) > 0 {
+			resultMsg := "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
+			messages = append(messages, message{Role: "user", Content: resultMsg})
+			for i := 0; i < 3; i++ {
+				resp, err := callOllamaNonStreamingWithContext(ctx, messages, toolDefs, *inferenceURL, *model, *apiKey)
+				if err != nil {
+					return cleaned, err
+				}
+				if len(resp.Choices) == 0 {
+					break
+				}
+				assistant := resp.Choices[0].Message
+				assistant.Content = stripThinkTags(assistant.Content)
+				if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<minimax:tool_call>") {
+					mmCalls, mmCleaned := parseMiniMaxToolCalls(assistant.Content)
+					if len(mmCalls) > 0 {
+						assistant.ToolCalls = mmCalls
+						assistant.Content = mmCleaned
+					}
+				}
+				if len(assistant.ToolCalls) > 0 {
+					messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
+					executeToolCalls(assistant.ToolCalls)
+					continue
+				}
+				chunkContent, xmlResults := extractAndExecuteXMLToolCalls(assistant.Content, func(tc toolCall) ToolResult {
+					result := executeOneToolCall(tc)
+					out := result.Output
+					if result.Error != "" {
+						out = "ERROR: " + result.Error
+					}
+					if len(out) > 500 {
+						out = out[:500] + "...[truncated]"
+					}
+					xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+					return result
+				})
+				if chunkContent != "" {
+					full.WriteString(chunkContent)
+					if !emit(sseChunk{Type: "content", Content: chunkContent, Done: false}) {
+						return full.String(), context.Canceled
+					}
+					messages = append(messages, message{Role: "assistant", Content: chunkContent})
+				}
+				if len(xmlResults) == 0 {
+					break
+				}
+				resultMsg = "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
+				messages = append(messages, message{Role: "user", Content: resultMsg})
+			}
+			cleaned = strings.TrimSpace(full.String())
+		}
+
+		sessionsMu.Lock()
+		sessions[sessionID] = append(sessions[sessionID], message{Role: "user", Content: content}, message{Role: "assistant", Content: cleaned})
+		sessionsMu.Unlock()
+		return cleaned, nil
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1912,34 +2209,6 @@ func main() {
 			sessionID = fmt.Sprintf("%x", rand.Int63())
 		}
 
-		sessionsMu.Lock()
-		history := append([]message(nil), sessions[sessionID]...)
-		firstMessage := !seenSessions[sessionID]
-		if firstMessage {
-			seenSessions[sessionID] = true
-		}
-		sessionsMu.Unlock()
-		history = compactHistory(sessionID, history, *maxContext, *compactionThreshold, *compactionBatch, *inferenceURL, *model, *apiKey, *memoryURL, agentName)
-		sessionsMu.Lock()
-		sessions[sessionID] = append([]message(nil), history...)
-		sessionsMu.Unlock()
-		bootstrapContext := ""
-		if firstMessage {
-			if persona != nil {
-				if err := syncPersonaRepo(persona.URL, persona.Root); err != nil {
-					logJSON("warn", "persona repo refresh failed", map[string]interface{}{"error": err.Error()})
-				}
-			}
-			bootstrapContext = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, persona)
-		}
-		systemContent := soul
-		if strings.TrimSpace(bootstrapContext) != "" {
-			systemContent = soul + "\n\n" + bootstrapContext
-		}
-		messages := []message{{Role: "system", Content: systemContent}}
-		messages = append(messages, history...)
-		messages = append(messages, message{Role: "user", Content: req.Content})
-
 		flusher, ok := w.(http.Flusher)
 		if !ok {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -1949,224 +2218,137 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		executeOneToolCall := func(tc toolCall) toolpkg.ToolResult {
-			atomic.AddInt64(&toolCalls, 1)
-			atomic.AddInt64(&metricsToolCallsTotal, 1)
-			incToolMetric(tc.Function.Name)
-			args := map[string]interface{}{}
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-				args = map[string]interface{}{"_raw": tc.Function.Arguments}
-			}
-			logJSON("info", "tool called", map[string]interface{}{"tool": tc.Function.Name})
-			writeSSE(w, sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false})
+		emit := func(chunk sseChunk) bool {
+			writeSSE(w, chunk)
 			flusher.Flush()
-			result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
-			switch tc.Function.Name {
-			case "delegate":
-				result = delegateExec.Execute(args)
-			case "broadcast":
-				result = broadcastExec.Execute(args)
-			default:
-				if t, ok := reg.Get(tc.Function.Name); ok {
-					result = t.Execute(args)
-				}
-			}
-			if result.Error != "" {
-				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error, "output": result.Output})
-			} else {
-				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
-			}
-			maybeRememberAction(*memoryURL, agentName, sessionID, tc.Function.Name, args, result)
-			writeSSE(w, sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false})
-			flusher.Flush()
-			toolContent := result.Output
-			if result.Error != "" {
-				if toolContent != "" {
-					toolContent = result.Error + "\n" + toolContent
-				} else {
-					toolContent = result.Error
-				}
-			}
-			if !strings.HasPrefix(tc.ID, "xml_") && !strings.HasPrefix(tc.ID, "mm_") {
-				messages = append(messages, message{Role: "tool", ToolCallID: tc.ID, Content: toolContent})
-			}
-			return result
+			return true
 		}
-
-		executeToolCalls := func(calls []toolCall) {
-			for _, tc := range calls {
-				_ = executeOneToolCall(tc)
-			}
+		if _, err := processConversation(r.Context(), sessionID, req.Content, emit, nil); err != nil {
+			incError("message processing failed", err, nil)
+			writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
 		}
-
-		for i := 0; i < 10; i++ {
-			resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
-			if err != nil {
-				incError("inference non-streaming failed", err, nil)
-				writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
-				writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
-				flusher.Flush()
-				return
-			}
-			if len(resp.Choices) == 0 {
-				break
-			}
-			assistant := resp.Choices[0].Message
-			if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<minimax:tool_call>") {
-				mmCalls, cleaned := parseMiniMaxToolCalls(assistant.Content)
-				if len(mmCalls) > 0 {
-					assistant.ToolCalls = mmCalls
-					assistant.Content = cleaned
-				}
-			}
-			if len(assistant.ToolCalls) == 0 {
-				break
-			}
-			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
-			executeToolCalls(assistant.ToolCalls)
-			if i == 19 {
-				writeSSE(w, sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
-			}
-		}
-
-		var full strings.Builder
-		hadXMLToolCalls := false
-		var xmlToolResults []string
-		insideThink := false
-		for chunk := range streamOllama(messages, nil, *inferenceURL, *model, *apiKey) {
-			// Process chunk character by character for think tag boundaries
-			cleaned := ""
-			combined := chunk
-			if insideThink {
-				if idx := strings.Index(combined, "</think>"); idx >= 0 {
-					insideThink = false
-					combined = combined[idx+len("</think>"):]
-				} else {
-					continue // still inside think block, skip entire chunk
-				}
-			}
-			if idx := strings.Index(combined, "<think>"); idx >= 0 {
-				cleaned = combined[:idx]
-				insideThink = true
-				if end := strings.Index(combined[idx:], "</think>"); end >= 0 {
-					insideThink = false
-					cleaned += combined[idx+end+len("</think>"):]
-				}
-			} else {
-				cleaned = combined
-			}
-			// Also strip orphan tags
-			cleaned = orphanThinkRe.ReplaceAllString(cleaned, "")
-			sanitized := cleaned
-			if sanitized == "" {
-				continue
-			}
-			cleanedChunk, xmlResults := extractAndExecuteXMLToolCalls(sanitized, func(tc toolCall) ToolResult {
-				result := executeOneToolCall(tc)
-				out := result.Output
-				if result.Error != "" {
-					out = "ERROR: " + result.Error
-				}
-				if len(out) > 500 {
-					out = out[:500] + "...[truncated]"
-				}
-				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
-				return result
-			})
-			if len(xmlResults) > 0 {
-				hadXMLToolCalls = true
-			}
-			if cleanedChunk == "" {
-				continue
-			}
-			full.WriteString(cleanedChunk)
-			writeSSE(w, sseChunk{Type: "content", Content: cleanedChunk, Done: false})
-			flusher.Flush()
-		}
-		finalContent := full.String()
-		if strings.Contains(finalContent, "<minimax:tool_call>") {
-			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
-				result := executeOneToolCall(tc)
-				out := result.Output
-				if result.Error != "" {
-					out = "ERROR: " + result.Error
-				}
-				if len(out) > 500 {
-					out = out[:500] + "...[truncated]"
-				}
-				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
-				return result
-			})
-			if len(postResults) > 0 {
-				hadXMLToolCalls = true
-				full.Reset()
-				full.WriteString(cleanedFinal)
-				writeSSE(w, sseChunk{Type: "replace", Content: cleanedFinal, Done: false})
-				flusher.Flush()
-			}
-		}
-		cleaned := strings.TrimSpace(full.String())
-		if cleaned != "" {
-			messages = append(messages, message{Role: "assistant", Content: cleaned})
-		}
-		if hadXMLToolCalls && len(xmlToolResults) > 0 {
-			resultMsg := "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
-			messages = append(messages, message{Role: "user", Content: resultMsg})
-			for i := 0; i < 3; i++ {
-				resp, err := callOllamaNonStreaming(messages, toolDefs, *inferenceURL, *model, *apiKey)
-				if err != nil {
-					incError("inference continuation after xml tool calls failed", err, nil)
-					break
-				}
-				if len(resp.Choices) == 0 {
-					break
-				}
-				assistant := resp.Choices[0].Message
-				assistant.Content = stripThinkTags(assistant.Content)
-				if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<minimax:tool_call>") {
-					mmCalls, mmCleaned := parseMiniMaxToolCalls(assistant.Content)
-					if len(mmCalls) > 0 {
-						assistant.ToolCalls = mmCalls
-						assistant.Content = mmCleaned
-					}
-				}
-				if len(assistant.ToolCalls) > 0 {
-					messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
-					executeToolCalls(assistant.ToolCalls)
-					continue
-				}
-				chunkContent, xmlResults := extractAndExecuteXMLToolCalls(assistant.Content, func(tc toolCall) ToolResult {
-					result := executeOneToolCall(tc)
-					out := result.Output
-					if result.Error != "" {
-						out = "ERROR: " + result.Error
-					}
-					if len(out) > 500 {
-						out = out[:500] + "...[truncated]"
-					}
-					xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
-					return result
-				})
-				// chunkContent = strings.TrimSpace(chunkContent) // removed: strips OpenAI token spacing
-				if chunkContent != "" {
-					full.WriteString(chunkContent)
-					writeSSE(w, sseChunk{Type: "content", Content: chunkContent, Done: false})
-					flusher.Flush()
-					messages = append(messages, message{Role: "assistant", Content: chunkContent})
-				}
-				if len(xmlResults) == 0 {
-					break
-				}
-				resultMsg = "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
-				messages = append(messages, message{Role: "user", Content: resultMsg})
-			}
-			cleaned = strings.TrimSpace(full.String())
-		}
-		sessionsMu.Lock()
-		sessions[sessionID] = append(sessions[sessionID], message{Role: "user", Content: req.Content}, message{Role: "assistant", Content: cleaned})
-		sessionsMu.Unlock()
 		writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
 		flusher.Flush()
+	})
+	mux.HandleFunc("/tasks/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req taskSendRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Content) == "" {
+			http.Error(w, "content is required", http.StatusBadRequest)
+			return
+		}
+		task := taskStore.Create(taskspkg.Task{
+			ID:      newTaskID(),
+			Agent:   agentName,
+			From:    strings.TrimSpace(req.From),
+			Content: req.Content,
+			Status:  "submitted",
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		taskCancelMu.Lock()
+		taskCancels[task.ID] = cancel
+		taskCancelMu.Unlock()
+		go func(taskID string, content string) {
+			defer func() {
+				taskCancelMu.Lock()
+				delete(taskCancels, taskID)
+				taskCancelMu.Unlock()
+			}()
+			current, ok := taskStore.Get(taskID)
+			if !ok {
+				return
+			}
+			current.Status = "working"
+			current.Error = ""
+			taskStore.Update(current)
+			appendToolLog := func(log taskspkg.ToolLog) {
+				cur, ok := taskStore.Get(taskID)
+				if !ok {
+					return
+				}
+				cur.Tools = append(cur.Tools, log)
+				taskStore.Update(cur)
+			}
+			result, err := processConversation(ctx, taskID, content, nil, appendToolLog)
+			cur, ok := taskStore.Get(taskID)
+			if !ok {
+				return
+			}
+			if ctx.Err() == context.Canceled {
+				cur.Status = "failed"
+				cur.Error = "cancelled"
+				taskStore.Update(cur)
+				return
+			}
+			if err != nil {
+				cur.Status = "failed"
+				cur.Error = err.Error()
+				taskStore.Update(cur)
+				return
+			}
+			cur.Status = "completed"
+			cur.Result = result
+			cur.Error = ""
+			taskStore.Update(cur)
+		}(task.ID, req.Content)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": task.ID, "status": task.Status})
+	})
+	mux.HandleFunc("/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		agentFilter := strings.TrimSpace(r.URL.Query().Get("agent"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(taskStore.List(agentFilter, status))
+	})
+	mux.HandleFunc("/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/tasks/")
+		if strings.HasSuffix(path, "/cancel") {
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			taskID := strings.Trim(strings.TrimSuffix(path, "/cancel"), "/")
+			task, ok := taskStore.Get(taskID)
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			task.Status = "failed"
+			task.Error = "cancelled"
+			taskStore.Update(task)
+			taskCancelMu.Lock()
+			cancel := taskCancels[taskID]
+			taskCancelMu.Unlock()
+			if cancel != nil {
+				cancel()
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": taskID, "status": "failed"})
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		taskID := strings.Trim(path, "/")
+		task, ok := taskStore.Get(taskID)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(task)
 	})
 
 	addr := ":" + *port

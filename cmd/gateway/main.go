@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
 )
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
@@ -137,6 +139,23 @@ type messageReq struct {
 	Agent     string `json:"agent"`
 	Content   string `json:"content"`
 	SessionID string `json:"session_id"`
+}
+
+type dispatchReq struct {
+	Agent   string `json:"agent"`
+	Content string `json:"content"`
+	From    string `json:"from"`
+}
+
+type taskSendRequest struct {
+	Content string `json:"content"`
+	From    string `json:"from"`
+}
+
+type dispatchResp struct {
+	Agent  string `json:"agent"`
+	TaskID string `json:"task_id"`
+	Error  string `json:"error,omitempty"`
 }
 
 type agentHealthResponse struct {
@@ -1606,6 +1625,155 @@ func main() {
 			DefaultBranch: asString(repo["default_branch"]),
 		}
 		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("/api/v1/dispatch", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var in []dispatchReq
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		out := make([]dispatchResp, len(in))
+		var wg sync.WaitGroup
+		for i := range in {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				reqItem := in[idx]
+				out[idx].Agent = reqItem.Agent
+				agent, ok := gw.getAgent(reqItem.Agent)
+				if !ok {
+					out[idx].Error = "unknown agent"
+					return
+				}
+				body, _ := json.Marshal(taskSendRequest{Content: reqItem.Content, From: reqItem.From})
+				req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(agent.URL, "/")+"/tasks/send", bytes.NewReader(body))
+				if err != nil {
+					out[idx].Error = "failed to create upstream request"
+					return
+				}
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := proxyClient.Do(req)
+				if err != nil {
+					out[idx].Error = "upstream request failed"
+					return
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+					out[idx].Error = strings.TrimSpace(string(b))
+					return
+				}
+				var tr struct {
+					ID string `json:"id"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+					out[idx].Error = "invalid upstream response"
+					return
+				}
+				out[idx].TaskID = tr.ID
+			}(i)
+		}
+		wg.Wait()
+		writeJSON(w, http.StatusOK, out)
+	})
+	mux.HandleFunc("/api/v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		from := strings.TrimSpace(r.URL.Query().Get("from"))
+		agentFilter := strings.TrimSpace(r.URL.Query().Get("agent"))
+		agentsToQuery := gw.snapshotAgents()
+		tasksOut := make([]taskspkg.Task, 0)
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		for _, a := range agentsToQuery {
+			if agentFilter != "" && a.Name != agentFilter {
+				continue
+			}
+			wg.Add(1)
+			go func(agent Agent) {
+				defer wg.Done()
+				u := strings.TrimRight(agent.URL, "/") + "/tasks"
+				params := url.Values{}
+				if status != "" {
+					params.Set("status", status)
+				}
+				if agentFilter != "" {
+					params.Set("agent", agentFilter)
+				}
+				if q := params.Encode(); q != "" {
+					u += "?" + q
+				}
+				req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+				if err != nil {
+					return
+				}
+				resp, err := proxyClient.Do(req)
+				if err != nil {
+					return
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					return
+				}
+				var tasks []taskspkg.Task
+				if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+					return
+				}
+				if from != "" {
+					filtered := tasks[:0]
+					for _, t := range tasks {
+						if t.From == from {
+							filtered = append(filtered, t)
+						}
+					}
+					tasks = filtered
+				}
+				mu.Lock()
+				tasksOut = append(tasksOut, tasks...)
+				mu.Unlock()
+			}(a)
+		}
+		wg.Wait()
+		sort.Slice(tasksOut, func(i, j int) bool { return tasksOut[i].CreatedAt.After(tasksOut[j].CreatedAt) })
+		writeJSON(w, http.StatusOK, tasksOut)
+	})
+	mux.HandleFunc("/api/v1/tasks/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		taskID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/tasks/"), "/")
+		if taskID == "" || strings.Contains(taskID, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		for _, agent := range gw.snapshotAgents() {
+			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, strings.TrimRight(agent.URL, "/")+"/tasks/"+url.PathEscape(taskID), nil)
+			if err != nil {
+				continue
+			}
+			resp, err := proxyClient.Do(req)
+			if err != nil {
+				continue
+			}
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				continue
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(body)
+			return
+		}
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
 	})
 	mux.HandleFunc("/api/v1/message", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
