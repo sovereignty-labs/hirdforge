@@ -268,7 +268,7 @@ type (
 	}
 	responsesRequest struct {
 		Model  string             `json:"model"`
-		Input  []message          `json:"input"`
+		Input  []interface{}      `json:"input"`
 		Stream bool               `json:"stream"`
 		Tools  []responsesToolDef `json:"tools,omitempty"`
 	}
@@ -902,6 +902,36 @@ func convertToolDefsForResponses(defs []toolDef) []responsesToolDef {
 	return out
 }
 
+func convertMessagesForResponses(msgs []message) []interface{} {
+	out := make([]interface{}, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			if strings.TrimSpace(m.Content) != "" {
+				out = append(out, map[string]string{"role": "assistant", "content": m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				out = append(out, map[string]string{
+					"type":      "function_call",
+					"call_id":   tc.ID,
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				})
+			}
+			continue
+		}
+		if m.Role == "tool" {
+			out = append(out, map[string]string{
+				"type":    "function_call_output",
+				"call_id": m.ToolCallID,
+				"output":  m.Content,
+			})
+			continue
+		}
+		out = append(out, map[string]string{"role": m.Role, "content": m.Content})
+	}
+	return out
+}
+
 func useResponsesAPI(model string) bool {
 	return strings.Contains(strings.ToLower(model), "codex")
 }
@@ -952,7 +982,7 @@ func callChatCompletionsNonStreamingWithContext(ctx context.Context, messages []
 
 func callResponsesNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/responses"
-	body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: false, Tools: convertToolDefsForResponses(defs)})
+	body, err := json.Marshal(responsesRequest{Model: model, Input: convertMessagesForResponses(messages), Stream: false, Tools: convertToolDefsForResponses(defs)})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -1095,7 +1125,7 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 	go func() {
 		defer close(chunks)
 		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/responses"
-		body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: true, Tools: convertToolDefsForResponses(defs)})
+		body, err := json.Marshal(responsesRequest{Model: model, Input: convertMessagesForResponses(messages), Stream: true, Tools: convertToolDefsForResponses(defs)})
 		if err != nil {
 			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
 			return
