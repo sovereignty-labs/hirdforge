@@ -1216,11 +1216,27 @@ func main() {
 		}
 	})
 	mux.HandleFunc("/api/v1/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, gw.eventsNewest())
+		case http.MethodPost:
+			var in struct {
+				Type    string `json:"type"`
+				Agent   string `json:"agent"`
+				Message string `json:"message"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
+				return
+			}
+			if in.Type == "" {
+				in.Type = "task"
+			}
+			gw.addEvent(in.Type, in.Agent, in.Message)
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-		writeJSON(w, http.StatusOK, gw.eventsNewest())
 	})
 	mux.HandleFunc("/api/v1/cluster/pods", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
