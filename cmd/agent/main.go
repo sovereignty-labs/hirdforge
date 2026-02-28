@@ -266,12 +266,23 @@ type (
 		Stream   bool      `json:"stream"`
 		Tools    []toolDef `json:"tools,omitempty"`
 	}
+	responsesRequest struct {
+		Model  string    `json:"model"`
+		Input  []message `json:"input"`
+		Stream bool      `json:"stream"`
+		Tools  []toolDef `json:"tools,omitempty"`
+	}
 	streamChunk struct {
 		Choices []struct {
 			Delta struct {
 				Content string `json:"content"`
 			} `json:"delta"`
 		} `json:"choices"`
+	}
+	inferenceStreamEvent struct {
+		Content   string
+		ToolCalls []toolCall
+		Err       error
 	}
 	chatResponse struct {
 		Choices []struct {
@@ -281,6 +292,22 @@ type (
 				ToolCalls []toolCall `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
+	}
+	responsesOutputText struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	responsesOutputItem struct {
+		ID        string                `json:"id"`
+		Type      string                `json:"type"`
+		Role      string                `json:"role"`
+		Name      string                `json:"name"`
+		CallID    string                `json:"call_id"`
+		Arguments string                `json:"arguments"`
+		Content   []responsesOutputText `json:"content"`
+	}
+	responsesResponse struct {
+		Output []responsesOutputItem `json:"output"`
 	}
 	messageRequest struct {
 		Content   string `json:"content"`
@@ -856,11 +883,22 @@ func buildToolDefs(reg *toolpkg.Registry) []toolDef {
 	return defs
 }
 
+func useResponsesAPI(model string) bool {
+	return strings.Contains(strings.ToLower(model), "codex")
+}
+
 func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	return callOllamaNonStreamingWithContext(context.Background(), messages, defs, inferenceURL, model, apiKey)
 }
 
 func callOllamaNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
+	if useResponsesAPI(model) {
+		return callResponsesNonStreamingWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
+	}
+	return callChatCompletionsNonStreamingWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
+}
+
+func callChatCompletionsNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/chat/completions"
 	body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Stream: false, Tools: defs})
 	if err != nil {
@@ -893,23 +931,98 @@ func callOllamaNonStreamingWithContext(ctx context.Context, messages []message, 
 	return out, nil
 }
 
-func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan string {
+func callResponsesNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
+	endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/responses"
+	body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: false, Tools: defs})
+	if err != nil {
+		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return chatResponse{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return chatResponse{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return chatResponse{}, fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var out responsesResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return chatResponse{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+	var normalized chatResponse
+	normalized.Choices = append(normalized.Choices, struct {
+		Message struct {
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []toolCall `json:"tool_calls"`
+		} `json:"message"`
+	}{})
+	msg := &normalized.Choices[0].Message
+	msg.Role = "assistant"
+	var content strings.Builder
+	for i, item := range out.Output {
+		switch item.Type {
+		case "message":
+			for _, part := range item.Content {
+				if part.Type == "output_text" {
+					content.WriteString(part.Text)
+				}
+			}
+		case "function_call":
+			callID := strings.TrimSpace(item.CallID)
+			if callID == "" {
+				callID = strings.TrimSpace(item.ID)
+			}
+			if callID == "" {
+				callID = fmt.Sprintf("responses_%d", i)
+			}
+			msg.ToolCalls = append(msg.ToolCalls, toolCall{
+				ID:   callID,
+				Type: "function",
+				Function: toolCallFunction{
+					Name:      strings.TrimSpace(item.Name),
+					Arguments: strings.TrimSpace(item.Arguments),
+				},
+			})
+		}
+	}
+	msg.Content = stripThinkTags(content.String())
+	return normalized, nil
+}
+
+func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
 	return streamOllamaWithContext(context.Background(), messages, defs, inferenceURL, model, apiKey)
 }
 
-func streamOllamaWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan string {
-	chunks := make(chan string)
+func streamOllamaWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
+	if useResponsesAPI(model) {
+		return streamResponsesWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
+	}
+	return streamChatCompletionsWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
+}
+
+func streamChatCompletionsWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
+	chunks := make(chan inferenceStreamEvent)
 	go func() {
 		defer close(chunks)
 		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/chat/completions"
 		body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Stream: true, Tools: defs})
 		if err != nil {
-			chunks <- "failed to marshal request: " + err.Error()
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
 			return
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
-			chunks <- "failed to create request: " + err.Error()
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)}
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -918,13 +1031,13 @@ func streamOllamaWithContext(ctx context.Context, messages []message, defs []too
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			chunks <- "request failed: " + err.Error()
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)}
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			chunks <- fmt.Sprintf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
 			return
 		}
 		reader := bufio.NewReader(resp.Body)
@@ -934,7 +1047,7 @@ func streamOllamaWithContext(ctx context.Context, messages []message, defs []too
 				break
 			}
 			if err != nil {
-				chunks <- "failed reading stream: " + err.Error()
+				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)}
 				return
 			}
 			line = strings.TrimRight(line, "\r\n")
@@ -947,11 +1060,193 @@ func streamOllamaWithContext(ctx context.Context, messages []message, defs []too
 			}
 			var chunk streamChunk
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-				chunks <- "failed to parse chunk: " + err.Error()
+				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)}
 				return
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				chunks <- chunk.Choices[0].Delta.Content
+				chunks <- inferenceStreamEvent{Content: chunk.Choices[0].Delta.Content}
+			}
+		}
+	}()
+	return chunks
+}
+
+func streamResponsesWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
+	chunks := make(chan inferenceStreamEvent)
+	go func() {
+		defer close(chunks)
+		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/responses"
+		body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: true, Tools: defs})
+		if err != nil {
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
+			return
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)}
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
+			return
+		}
+		type pendingCall struct {
+			id   string
+			name string
+			args strings.Builder
+		}
+		pending := map[string]*pendingCall{}
+		finalizePending := func() {
+			keys := make([]string, 0, len(pending))
+			for k := range pending {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				p := pending[k]
+				if strings.TrimSpace(p.name) == "" {
+					continue
+				}
+				argText := strings.TrimSpace(p.args.String())
+				if argText == "" {
+					argText = "{}"
+				}
+				chunks <- inferenceStreamEvent{ToolCalls: []toolCall{{
+					ID:   p.id,
+					Type: "function",
+					Function: toolCallFunction{
+						Name:      p.name,
+						Arguments: argText,
+					},
+				}}}
+			}
+			clear(pending)
+		}
+		reader := bufio.NewReader(resp.Body)
+		var eventName string
+		var dataLines []string
+		flush := func() error {
+			if eventName == "" && len(dataLines) == 0 {
+				return nil
+			}
+			data := strings.Join(dataLines, "\n")
+			switch eventName {
+			case "response.output_text.delta":
+				var payload struct {
+					Delta string `json:"delta"`
+				}
+				if err := json.Unmarshal([]byte(data), &payload); err != nil {
+					return err
+				}
+				if payload.Delta != "" {
+					chunks <- inferenceStreamEvent{Content: payload.Delta}
+				}
+			case "response.output_item.added", "response.output_item.done":
+				var payload struct {
+					Item responsesOutputItem `json:"item"`
+				}
+				if err := json.Unmarshal([]byte(data), &payload); err == nil {
+					if payload.Item.Type == "function_call" {
+						key := strings.TrimSpace(payload.Item.CallID)
+						if key == "" {
+							key = strings.TrimSpace(payload.Item.ID)
+						}
+						if key == "" {
+							key = payload.Item.Name
+						}
+						pc := pending[key]
+						if pc == nil {
+							pc = &pendingCall{id: key}
+							pending[key] = pc
+						}
+						if strings.TrimSpace(payload.Item.CallID) != "" {
+							pc.id = strings.TrimSpace(payload.Item.CallID)
+						}
+						if strings.TrimSpace(payload.Item.Name) != "" {
+							pc.name = strings.TrimSpace(payload.Item.Name)
+						}
+						if strings.TrimSpace(payload.Item.Arguments) != "" {
+							pc.args.Reset()
+							pc.args.WriteString(strings.TrimSpace(payload.Item.Arguments))
+						}
+					}
+				}
+			case "response.function_call_arguments.delta":
+				var payload struct {
+					Delta  string `json:"delta"`
+					ItemID string `json:"item_id"`
+					CallID string `json:"call_id"`
+					Name   string `json:"name"`
+				}
+				if err := json.Unmarshal([]byte(data), &payload); err != nil {
+					return err
+				}
+				key := strings.TrimSpace(payload.CallID)
+				if key == "" {
+					key = strings.TrimSpace(payload.ItemID)
+				}
+				if key == "" {
+					key = strings.TrimSpace(payload.Name)
+				}
+				if key == "" {
+					key = fmt.Sprintf("responses_%d", len(pending))
+				}
+				pc := pending[key]
+				if pc == nil {
+					pc = &pendingCall{id: key}
+					pending[key] = pc
+				}
+				if strings.TrimSpace(payload.CallID) != "" {
+					pc.id = strings.TrimSpace(payload.CallID)
+				}
+				if strings.TrimSpace(payload.Name) != "" {
+					pc.name = strings.TrimSpace(payload.Name)
+				}
+				pc.args.WriteString(payload.Delta)
+			case "response.function_call_arguments.done":
+				finalizePending()
+			case "response.completed":
+				finalizePending()
+			}
+			eventName = ""
+			dataLines = nil
+			return nil
+		}
+		for {
+			line, err := reader.ReadString('\n')
+			if err == io.EOF {
+				_ = flush()
+				break
+			}
+			if err != nil {
+				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)}
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				if err := flush(); err != nil {
+					chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)}
+					return
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "event:") {
+				eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				continue
+			}
+			if strings.HasPrefix(line, "data:") {
+				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 			}
 		}
 	}()
@@ -1973,7 +2268,31 @@ func main() {
 		hadXMLToolCalls := false
 		var xmlToolResults []string
 		insideThink := false
-		for chunk := range streamOllamaWithContext(ctx, messages, nil, *inferenceURL, *model, *apiKey) {
+		for evt := range streamOllamaWithContext(ctx, messages, nil, *inferenceURL, *model, *apiKey) {
+			if evt.Err != nil {
+				errText := evt.Err.Error()
+				full.WriteString(errText)
+				if !emit(sseChunk{Type: "content", Content: errText, Done: false}) {
+					return full.String(), context.Canceled
+				}
+				break
+			}
+			if len(evt.ToolCalls) > 0 {
+				hadXMLToolCalls = true
+				for _, tc := range evt.ToolCalls {
+					result := executeOneToolCall(tc)
+					out := result.Output
+					if result.Error != "" {
+						out = "ERROR: " + result.Error
+					}
+					if len(out) > 500 {
+						out = out[:500] + "...[truncated]"
+					}
+					xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+				}
+				continue
+			}
+			chunk := evt.Content
 			cleaned := ""
 			combined := chunk
 			if insideThink {
