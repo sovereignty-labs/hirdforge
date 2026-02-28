@@ -8,7 +8,9 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-agent ./cmd/agent/
 
 # Runtime stage
 FROM alpine:3.20
-RUN apk add --no-cache git curl jq && adduser -D -u 1000 warrior
+RUN apk add --no-cache git curl jq python3 && adduser -D -u 1000 warrior
+COPY scripts/apply_patch.py /usr/local/bin/apply_patch
+RUN chmod +x /usr/local/bin/apply_patch
 COPY --from=build /valhalla-agent /usr/local/bin/valhalla-agent
 USER warrior
 WORKDIR /workspace
