@@ -267,10 +267,16 @@ type (
 		Tools    []toolDef `json:"tools,omitempty"`
 	}
 	responsesRequest struct {
-		Model  string    `json:"model"`
-		Input  []message `json:"input"`
-		Stream bool      `json:"stream"`
-		Tools  []toolDef `json:"tools,omitempty"`
+		Model  string             `json:"model"`
+		Input  []message          `json:"input"`
+		Stream bool               `json:"stream"`
+		Tools  []responsesToolDef `json:"tools,omitempty"`
+	}
+	responsesToolDef struct {
+		Type        string      `json:"type"`
+		Name        string      `json:"name"`
+		Description string      `json:"description"`
+		Parameters  interface{} `json:"parameters,omitempty"`
 	}
 	streamChunk struct {
 		Choices []struct {
@@ -883,6 +889,19 @@ func buildToolDefs(reg *toolpkg.Registry) []toolDef {
 	return defs
 }
 
+func convertToolDefsForResponses(defs []toolDef) []responsesToolDef {
+	out := make([]responsesToolDef, len(defs))
+	for i, d := range defs {
+		out[i] = responsesToolDef{
+			Type:        d.Type,
+			Name:        d.Function.Name,
+			Description: d.Function.Description,
+			Parameters:  d.Function.Parameters,
+		}
+	}
+	return out
+}
+
 func useResponsesAPI(model string) bool {
 	return strings.Contains(strings.ToLower(model), "codex")
 }
@@ -933,7 +952,7 @@ func callChatCompletionsNonStreamingWithContext(ctx context.Context, messages []
 
 func callResponsesNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/responses"
-	body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: false, Tools: defs})
+	body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: false, Tools: convertToolDefsForResponses(defs)})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -1076,7 +1095,7 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 	go func() {
 		defer close(chunks)
 		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/responses"
-		body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: true, Tools: defs})
+		body, err := json.Marshal(responsesRequest{Model: model, Input: messages, Stream: true, Tools: convertToolDefsForResponses(defs)})
 		if err != nil {
 			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
 			return
