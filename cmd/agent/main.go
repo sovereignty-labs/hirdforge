@@ -498,7 +498,26 @@ func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return toolpkg.ToolResult{Error: strings.TrimSpace(string(body))}
 	}
-	return toolpkg.ToolResult{Output: strings.TrimSpace(string(body))}
+	var taskResp struct {
+		Status string `json:"status"`
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &taskResp); err != nil {
+		return toolpkg.ToolResult{Output: strings.TrimSpace(string(body))}
+	}
+	trimmed := map[string]string{
+		"status": strings.TrimSpace(taskResp.Status),
+		"result": strings.TrimSpace(taskResp.Result),
+	}
+	if trimmed["result"] == "" && strings.TrimSpace(taskResp.Error) != "" {
+		trimmed["result"] = strings.TrimSpace(taskResp.Error)
+	}
+	out, err := json.Marshal(trimmed)
+	if err != nil {
+		return toolpkg.ToolResult{Output: strings.TrimSpace(string(body))}
+	}
+	return toolpkg.ToolResult{Output: string(out)}
 }
 
 type recallTool struct {
