@@ -19,7 +19,7 @@ type GiteaAPITool struct {
 func NewGiteaAPITool(giteaURL, token string) *GiteaAPITool {
 	return &GiteaAPITool{
 		GiteaURL: strings.TrimRight(giteaURL, "/"),
-		Token:    token,
+		Token:    resolveGiteaToken(token),
 		Client:   &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -96,6 +96,7 @@ func (t *GiteaAPITool) apiRequest(method, path string, body interface{}) ([]byte
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	t.Token = resolveGiteaToken(t.Token)
 	if t.Token != "" {
 		req.Header.Set("Authorization", "token "+t.Token)
 	}
