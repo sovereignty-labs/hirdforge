@@ -1538,6 +1538,31 @@ func newTaskID() string {
 	return fmt.Sprintf("task-%08x", rand.Uint32())
 }
 
+func notifyGateway(gatewayURL, eventType, agentName, message string) {
+	if gatewayURL == "" {
+		return
+	}
+	go func() {
+		body, _ := json.Marshal(map[string]string{
+			"type":    eventType,
+			"agent":   agentName,
+			"message": message,
+		})
+		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/api/v1/events", bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			logJSON("warn", "gateway notify failed", map[string]interface{}{"error": err.Error()})
+			return
+		}
+		_ = resp.Body.Close()
+	}()
+}
+
 func statusPayload() map[string]interface{} {
 	return map[string]interface{}{
 		"status":          "ready",
@@ -1645,6 +1670,7 @@ func main() {
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
 	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
+	gatewayURL := flag.String("gateway-url", "", "Gateway URL for event notifications (optional)")
 	agentNameFlag := flag.String("agent-name", "", "agent name override (defaults to soul filename)")
 	personaRepoFlag := flag.String("persona-repo", "", "git URL of persona repository")
 	toolsFile := flag.String("tools-file", "/etc/valhalla/tools.md", "path to tools context file")
@@ -2268,6 +2294,7 @@ func main() {
 			current.Status = "working"
 			current.Error = ""
 			taskStore.Update(current)
+			notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("started task %s (from %s)", current.ID, current.From))
 			appendToolLog := func(log taskspkg.ToolLog) {
 				cur, ok := taskStore.Get(taskID)
 				if !ok {
@@ -2285,18 +2312,25 @@ func main() {
 				cur.Status = "failed"
 				cur.Error = "cancelled"
 				taskStore.Update(cur)
+				notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("cancelled task %s (from %s)", cur.ID, cur.From))
 				return
 			}
 			if err != nil {
 				cur.Status = "failed"
 				cur.Error = err.Error()
 				taskStore.Update(cur)
+				notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("failed task %s (from %s): %s", cur.ID, cur.From, cur.Error))
 				return
 			}
 			cur.Status = "completed"
 			cur.Result = result
 			cur.Error = ""
 			taskStore.Update(cur)
+			summary := cur.Result
+			if len(summary) > 200 {
+				summary = summary[:200] + "..."
+			}
+			notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("completed task %s (from %s): %s", cur.ID, cur.From, summary))
 		}(task.ID, req.Content)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": task.ID, "status": task.Status})
