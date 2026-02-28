@@ -254,6 +254,7 @@ func (g *gateway) addEvent(eventType, agent, summary string) {
 	g.broadcastEvent(e)
 	if structured, ok := parseTaskSocketEvent(e); ok {
 		g.broadcastPayload(structured)
+		go g.notifyDelegatingAgent(structured)
 	}
 }
 
@@ -338,6 +339,51 @@ func parseTaskSocketEvent(e Event) (taskSocketEvent, bool) {
 		}, true
 	}
 	return taskSocketEvent{}, false
+}
+
+func (g *gateway) notifyDelegatingAgent(evt taskSocketEvent) {
+	delegatedBy := strings.TrimSpace(evt.DelegatedBy)
+	if delegatedBy == "" {
+		return
+	}
+	agent, ok := g.getAgent(delegatedBy)
+	if !ok {
+		log.Printf("task callback: unknown delegating agent %q for task %s", delegatedBy, evt.TaskID)
+		return
+	}
+	content := ""
+	switch evt.Type {
+	case "task_complete":
+		content = fmt.Sprintf("[Task Complete] %s finished task %s: %s", evt.Agent, evt.TaskID, evt.Result)
+	case "task_failed":
+		content = fmt.Sprintf("[Task Failed] %s failed task %s: %s", evt.Agent, evt.TaskID, evt.Error)
+	default:
+		return
+	}
+	body, err := json.Marshal(map[string]string{
+		"content":    content,
+		"session_id": "task-callbacks",
+	})
+	if err != nil {
+		return
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("task callback: build request failed for %s: %v", delegatedBy, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("task callback: post to %s failed: %v", delegatedBy, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		log.Printf("task callback: post to %s returned %d: %s", delegatedBy, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
 }
 
 func readWSFrame(r io.Reader) (opcode byte, payload []byte, err error) {
