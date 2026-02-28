@@ -188,6 +188,8 @@ type gateway struct {
 	wsMu           sync.Mutex
 	wsConns        []*wsClient
 	sessionStore   *sessionStore
+	lastSessionMu  sync.RWMutex
+	lastSession    map[string]string
 	arMu           sync.RWMutex
 	activeRequests map[string]*ActiveRequest
 }
@@ -360,9 +362,15 @@ func (g *gateway) notifyDelegatingAgent(evt taskSocketEvent) {
 	default:
 		return
 	}
+	sessionID := "task-callbacks"
+	g.lastSessionMu.RLock()
+	if last := strings.TrimSpace(g.lastSession[delegatedBy]); last != "" {
+		sessionID = last
+	}
+	g.lastSessionMu.RUnlock()
 	body, err := json.Marshal(map[string]string{
 		"content":    content,
-		"session_id": "task-callbacks",
+		"session_id": sessionID,
 	})
 	if err != nil {
 		return
@@ -1043,6 +1051,7 @@ func main() {
 		eventCap:       200,
 		k8s:            initK8s(),
 		sessionStore:   newSessionStore(),
+		lastSession:    map[string]string{},
 		activeRequests: map[string]*ActiveRequest{},
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
@@ -1909,6 +1918,9 @@ func main() {
 		if sessionID == "" {
 			sessionID = fmt.Sprintf("hirdforge-%s-%d", in.Agent, time.Now().UnixNano())
 		}
+		gw.lastSessionMu.Lock()
+		gw.lastSession[in.Agent] = sessionID
+		gw.lastSessionMu.Unlock()
 		gw.addEvent("message", in.Agent, fmt.Sprintf("Message sent to %s", in.Agent))
 
 		ctx, cancel := context.WithCancel(r.Context())
