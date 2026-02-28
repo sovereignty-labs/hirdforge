@@ -585,48 +585,114 @@ const FleetView=({agents,selected,setSelected})=>{const a=agents[selected]||agen
 };
 
 // ═══════════ SETTINGS VIEW (Agent Config Cards) ═══════════
-// Phase 1: Read-only agent configuration viewer
 const SettingsView=({agents})=>{
-  // Helper: get agent color, fallback to deterministic hash-based color
+  const defaultSettings={ "callbacks.enabled":true, "callbacks.session_routing":"active", "delegation.timeout_seconds":120, "ui.theme":"dark" };
+  const[platform,setPlatform]=useState(defaultSettings);
+  const[platformLoading,setPlatformLoading]=useState(true);
+  const[platformSaving,setPlatformSaving]=useState(false);
+  const[platformSaved,setPlatformSaved]=useState(false);
+  const[platformError,setPlatformError]=useState("");
+  const[editing,setEditing]=useState({});
+  const[forms,setForms]=useState({});
+  const[applyState,setApplyState]=useState({});
+
   const getAgentColor=(agentId)=>{
     if(C[agentId])return C[agentId];
-    // Deterministic fallback: hash the agent ID to get a color
     let hash=0;
     for(let i=0;i<agentId.length;i++)hash=agentId.charCodeAt(i)+((hash<<5)-hash);
     const colors=['#818cf8','#f472b6','#34d399','#fbbf24','#22d3ee','#c084fc','#f59e0b','#ef4444'];
     return colors[Math.abs(hash)%colors.length];
   };
 
-  // Helper: render a value or "Not configured" if missing
-  const renderValue=(value,isMissingOk=false)=>{
-    if(value===null||value===undefined||value===''||(Array.isArray(value)&&value.length===0)){
-      return <span className="agent-card-value missing">Not configured</span>;
-    }
-    if(typeof value==='boolean'){
-      return <span className="agent-card-value" style={{color:value?'#34d399':'#ef4444'}}>{value?'Yes':'No'}</span>;
-    }
+  const renderValue=value=>{
+    if(value===null||value===undefined||value===''||(Array.isArray(value)&&value.length===0))return <span className="agent-card-value missing">Not configured</span>;
     return <span className="agent-card-value">{String(value)}</span>;
   };
 
-  // Helper: render chips/badges for arrays
   const renderChips=(items,color)=>{
-    if(!items||!Array.isArray(items)||items.length===0){
-      return <span className="agent-card-value missing">Not configured</span>;
+    if(!items||!Array.isArray(items)||items.length===0)return <span className="agent-card-value missing">Not configured</span>;
+    return <div className="agent-card-chips">{items.map((item,i)=>{const label=typeof item==='string'?item:(item.name||item.id||JSON.stringify(item).slice(0,20));return <Badge key={i} text={label} color={color||"rgba(255,255,255,0.3)"} />;})}</div>;
+  };
+
+  const inputStyle={width:"100%",background:"rgba(5,8,18,0.68)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:6,color:"#e2e8f0",padding:"8px 10px",fontSize:11,fontFamily:"'IBM Plex Mono',monospace",outline:"none",boxShadow:"inset 0 1px 0 rgba(255,255,255,0.02)"};
+  const labelStyle={display:"block",fontSize:9,color:"rgba(255,255,255,0.18)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4};
+  const fieldBox={display:"flex",flexDirection:"column",gap:4};
+
+  useEffect(()=>{let live=true;(async()=>{setPlatformLoading(true);setPlatformError("");try{const r=await fetch('/api/v1/settings');if(!r.ok)throw new Error(`HTTP ${r.status}`);const d=await r.json();if(live)setPlatform({...defaultSettings,...d});}catch(e){if(live)setPlatformError(e.message||'Failed to load settings');}finally{if(live)setPlatformLoading(false);}})();return()=>{live=false;};},[]);
+
+  const setField=(agentId,key,value)=>setForms(p=>({...p,[agentId]:{...(p[agentId]||{}),[key]:value}}));
+  const startEdit=agent=>setEditing(p=>({...p,[agent.id]:true}))||setForms(p=>({...p,[agent.id]:{model:agent.model||"",inference_url:agent.inference_url||agent.backend||"",tools:Array.isArray(agent.tools)?agent.tools.join(','):(agent.tools||""),peers:Array.isArray(agent.peers)?agent.peers.join(','):(agent.peers||"")}}));
+  const cancelEdit=agentId=>{setEditing(p=>({...p,[agentId]:false}));setApplyState(p=>({...p,[agentId]:{}}));};
+
+  const savePlatform=async()=>{setPlatformSaving(true);setPlatformSaved(false);setPlatformError("");try{const r=await fetch('/api/v1/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(platform)});if(!r.ok){const t=await r.text();throw new Error(t||`HTTP ${r.status}`);}const d=await r.json();setPlatform({...defaultSettings,...d});setPlatformSaved(true);setTimeout(()=>setPlatformSaved(false),1800);}catch(e){setPlatformError(e.message||'Save failed');}finally{setPlatformSaving(false);}};
+
+  const applyAgent=async agent=>{
+    const form=forms[agent.id]||{};
+    const payload={};
+    if((form.model||"").trim()!==String(agent.model||"").trim()&&(form.model||"").trim()!=="")payload.model=form.model.trim();
+    if((form.inference_url||"").trim()!==String(agent.inference_url||agent.backend||"").trim()&&(form.inference_url||"").trim()!=="")payload.inference_url=form.inference_url.trim();
+    if((form.tools||"").trim()!==((Array.isArray(agent.tools)?agent.tools.join(','):(agent.tools||""))).trim())payload.tools=form.tools.trim();
+    if((form.peers||"").trim()!==((Array.isArray(agent.peers)?agent.peers.join(','):(agent.peers||""))).trim())payload.peers=form.peers.trim();
+    if(Object.keys(payload).length===0){setApplyState(p=>({...p,[agent.id]:{error:"No changes to apply"}}));return;}
+    setApplyState(p=>({...p,[agent.id]:{loading:true,error:"",pr_url:""}}));
+    try{
+      const r=await fetch(`/api/v1/agents/${agent.id}/configure`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok)throw new Error(d.error||`HTTP ${r.status}`);
+      setApplyState(p=>({...p,[agent.id]:{loading:false,error:"",pr_url:d.pr_url||""}}));
+    }catch(e){
+      setApplyState(p=>({...p,[agent.id]:{loading:false,error:e.message||'Apply failed',pr_url:""}}));
     }
-    return <div className="agent-card-chips">{items.map((item,i)=>{
-      const label=typeof item==='string'?item:(item.name||item.id||JSON.stringify(item).slice(0,20));
-      return <Badge key={i} text={label} color={color||"rgba(255,255,255,0.3)"} />;
-    })}</div>;
   };
 
   return<div className="settings">
     <div className="settings-header">
-      <div className="settings-title">⚙ Agent Configuration</div>
-      <div className="settings-subtitle">Read-only view of agent settings from /api/v1/agents</div>
+      <div className="settings-title">⚙ Settings</div>
+      <div className="settings-subtitle">Runtime platform controls and GitOps-backed agent configuration changes.</div>
     </div>
+
+    <div className="glass" style={{padding:"14px 16px",marginBottom:14,border:"1px solid rgba(255,255,255,0.05)"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+        <div>
+          <div style={{fontSize:13,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>Platform Settings</div>
+          <div style={{fontSize:10,color:"rgba(255,255,255,0.24)"}}>Live runtime settings applied without restart.</div>
+        </div>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          {platformSaved&&<Badge text="Saved" color="#34d399"/>}
+          <Btn label={platformSaving?"Saving":"Save"} icon="⤴" color="#34d399" onClick={savePlatform} disabled={platformLoading||platformSaving} />
+        </div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1.1fr 1fr 1fr",gap:10}}>
+        <div className="glass" style={{padding:"10px 12px",background:"rgba(255,255,255,0.015)"}}>
+          <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
+            <input type="checkbox" checked={!!platform["callbacks.enabled"]} onChange={e=>setPlatform(p=>({...p,"callbacks.enabled":e.target.checked}))}/>
+            <div>
+              <div style={{fontSize:11,fontWeight:700,color:"#e2e8f0"}}>Task Callbacks</div>
+              <div style={{fontSize:10,color:"rgba(255,255,255,0.22)"}}>Enable task completion pushbacks to delegating agents.</div>
+            </div>
+          </label>
+        </div>
+        <div style={fieldBox}>
+          <label style={labelStyle}>Callback Routing</label>
+          <select value={platform["callbacks.session_routing"]||"active"} onChange={e=>setPlatform(p=>({...p,"callbacks.session_routing":e.target.value}))} style={inputStyle}>
+            <option value="active">active</option>
+            <option value="dedicated">dedicated</option>
+          </select>
+        </div>
+        <div style={fieldBox}>
+          <label style={labelStyle}>Delegation Timeout (s)</label>
+          <input type="number" min="1" value={platform["delegation.timeout_seconds"]??120} onChange={e=>setPlatform(p=>({...p,"delegation.timeout_seconds":Number(e.target.value||120)}))} style={inputStyle}/>
+        </div>
+      </div>
+      {platformError&&<div style={{marginTop:10,fontSize:10,color:"#fca5a5"}}>{platformError}</div>}
+    </div>
+
     <div className="settings-grid">
       {agents.map(agent=>{
         const agentColor=getAgentColor(agent.id);
+        const isEditing=!!editing[agent.id];
+        const form=forms[agent.id]||{};
+        const state=applyState[agent.id]||{};
         return <div key={agent.id} className="agent-card" style={{borderLeft:`3px solid ${agentColor}`}}>
           <div className="agent-card-header">
             <Av agent={{...agent,initial:agent.name?.[0]||agent.id?.[0]}} size={28}/>
@@ -634,39 +700,31 @@ const SettingsView=({agents})=>{
               <div style={{fontSize:13,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.name}</div>
               <div style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{agent.role}</div>
             </div>
-            <Badge text={agent.status} color={sc(agent.status)} style={{marginLeft:'auto'}}/>
+            <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6}}>
+              <Badge text={agent.status} color={sc(agent.status)}/>
+              {!isEditing?<Btn label="Edit" icon="✎" color={agentColor} small onClick={()=>startEdit(agent)}/>:<Btn label="Cancel" icon="×" color="#6b7280" small onClick={()=>cancelEdit(agent.id)}/>}
+            </div>
           </div>
           <div className="agent-card-body">
-            {/* Core Configuration */}
-            <div className="agent-card-row">
-              <span className="agent-card-label">Model</span>
-              {renderValue(agent.model)}
-            </div>
-            <div className="agent-card-row">
-              <span className="agent-card-label">Inference URL</span>
-              {renderValue(agent.inference_url||agent.backend)}
-            </div>
-            <div className="agent-card-row">
-              <span className="agent-card-label">Memory URL</span>
-              {renderValue(agent.memory_url)}
-            </div>
-
-            {/* Tools */}
-            {(agent.tools||agent.tools?.length>0)&&<div className="agent-card-section">
-              <div className="agent-card-section-title">Tools</div>
-              {renderChips(agent.tools,agentColor)}
-            </div>}
-
-            {/* Peers */}
-            {(agent.peers||agent.peers?.length>0)&&<div className="agent-card-section">
-              <div className="agent-card-section-title">Peers</div>
-              {renderChips(agent.peers,'#c084fc')}
-            </div>}
-
-            {/* MCP Servers */}
-            {(agent.mcp_servers||agent.mcp||[]).length>0&&<div className="agent-card-section">
-              <div className="agent-card-section-title">MCP Servers</div>
-              {renderChips(agent.mcp_servers||agent.mcp,'#22d3ee')}
+            {!isEditing&&<>
+              <div className="agent-card-row"><span className="agent-card-label">Model</span>{renderValue(agent.model)}</div>
+              <div className="agent-card-row"><span className="agent-card-label">Inference URL</span>{renderValue(agent.inference_url||agent.backend)}</div>
+              <div className="agent-card-row"><span className="agent-card-label">Memory URL</span>{renderValue(agent.memory_url)}</div>
+              <div className="agent-card-section"><div className="agent-card-section-title">Tools</div>{renderChips(agent.tools,agentColor)}</div>
+              <div className="agent-card-section"><div className="agent-card-section-title">Peers</div>{renderChips(agent.peers,'#c084fc')}</div>
+              {(agent.mcp_servers||agent.mcp||[]).length>0&&<div className="agent-card-section"><div className="agent-card-section-title">MCP Servers</div>{renderChips(agent.mcp_servers||agent.mcp,'#22d3ee')}</div>}
+            </>}
+            {isEditing&&<div style={{display:"grid",gap:10}}>
+              <div style={fieldBox}><label style={labelStyle}>Model</label><input value={form.model||""} onChange={e=>setField(agent.id,"model",e.target.value)} style={inputStyle} placeholder="gpt-4o-mini"/></div>
+              <div style={fieldBox}><label style={labelStyle}>Inference URL</label><input value={form.inference_url||""} onChange={e=>setField(agent.id,"inference_url",e.target.value)} style={inputStyle} placeholder="https://api.openai.com"/></div>
+              <div style={fieldBox}><label style={labelStyle}>Tools</label><input value={form.tools||""} onChange={e=>setField(agent.id,"tools",e.target.value)} style={inputStyle} placeholder="exec,read,write"/></div>
+              <div style={fieldBox}><label style={labelStyle}>Peers</label><input value={form.peers||""} onChange={e=>setField(agent.id,"peers",e.target.value)} style={inputStyle} placeholder="chuck=http://chuck...,knut=http://knut..."/></div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginTop:2}}>
+                <Btn label={state.loading?"Applying":"Apply"} icon="↗" color="#34d399" onClick={()=>applyAgent(agent)} disabled={!!state.loading}/>
+                <Btn label="Cancel" icon="×" color="#6b7280" onClick={()=>cancelEdit(agent.id)}/>
+                {state.pr_url&&<><Badge text="PR Created" color="#34d399"/><a href={state.pr_url} target="_blank" rel="noreferrer" style={{fontSize:10,color:"#86efac",textDecoration:"underline"}}>{state.pr_url}</a></>}
+              </div>
+              {state.error&&<div style={{fontSize:10,color:"#fca5a5"}}>{state.error}</div>}
             </div>}
           </div>
         </div>;
