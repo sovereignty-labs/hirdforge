@@ -145,6 +145,21 @@ type giteaRepoListItem struct {
 	HTMLURL     string `json:"html_url"`
 }
 
+type agentConfigureRequest struct {
+	Model        string      `json:"model"`
+	InferenceURL string      `json:"inference_url"`
+	Tools        interface{} `json:"tools"`
+	Peers        interface{} `json:"peers"`
+}
+
+type giteaContentResponse struct {
+	Type     string `json:"type"`
+	Encoding string `json:"encoding"`
+	Content  string `json:"content"`
+	SHA      string `json:"sha"`
+	Path     string `json:"path"`
+}
+
 type messageReq struct {
 	Agent     string `json:"agent"`
 	Content   string `json:"content"`
@@ -188,10 +203,79 @@ type gateway struct {
 	wsMu           sync.Mutex
 	wsConns        []*wsClient
 	sessionStore   *sessionStore
+	settings       *settingsStore
 	lastSessionMu  sync.RWMutex
 	lastSession    map[string]string
 	arMu           sync.RWMutex
 	activeRequests map[string]*ActiveRequest
+}
+
+type settingsStore struct {
+	mu   sync.RWMutex
+	data map[string]interface{}
+}
+
+func newSettingsStore() *settingsStore {
+	return &settingsStore{
+		data: map[string]interface{}{
+			"callbacks.enabled":          true,
+			"callbacks.session_routing":  "active",
+			"delegation.timeout_seconds": 120,
+			"ui.theme":                   "dark",
+		},
+	}
+}
+
+func (s *settingsStore) All() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]interface{}, len(s.data))
+	for k, v := range s.data {
+		out[k] = v
+	}
+	return out
+}
+
+func (s *settingsStore) SetBulk(in map[string]interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range in {
+		s.data[k] = v
+	}
+}
+
+func (s *settingsStore) Set(key string, value interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data[key] = value
+}
+
+func (s *settingsStore) GetBool(key string, fallback bool) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.data[key]
+	if !ok {
+		return fallback
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return fallback
+	}
+	return b
+}
+
+func (s *settingsStore) GetString(key, fallback string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.data[key]
+	if !ok {
+		return fallback
+	}
+	str, ok := v.(string)
+	if !ok || strings.TrimSpace(str) == "" {
+		return fallback
+	}
+	return str
 }
 
 var (
@@ -344,6 +428,9 @@ func parseTaskSocketEvent(e Event) (taskSocketEvent, bool) {
 }
 
 func (g *gateway) notifyDelegatingAgent(evt taskSocketEvent) {
+	if g.settings != nil && !g.settings.GetBool("callbacks.enabled", true) {
+		return
+	}
 	delegatedBy := strings.TrimSpace(evt.DelegatedBy)
 	if delegatedBy == "" {
 		return
@@ -363,11 +450,13 @@ func (g *gateway) notifyDelegatingAgent(evt taskSocketEvent) {
 		return
 	}
 	sessionID := "task-callbacks"
-	g.lastSessionMu.RLock()
-	if last := strings.TrimSpace(g.lastSession[delegatedBy]); last != "" {
-		sessionID = last
+	if g.settings == nil || g.settings.GetString("callbacks.session_routing", "active") == "active" {
+		g.lastSessionMu.RLock()
+		if last := strings.TrimSpace(g.lastSession[delegatedBy]); last != "" {
+			sessionID = last
+		}
+		g.lastSessionMu.RUnlock()
 	}
-	g.lastSessionMu.RUnlock()
 	body, err := json.Marshal(map[string]string{
 		"content":    content,
 		"session_id": sessionID,
@@ -972,6 +1061,179 @@ func giteaGetJSONWithStatus(client *http.Client, baseURL, token, path string, ou
 	return resp.StatusCode, body, nil
 }
 
+func resolveGatewayGiteaToken(flagToken string) string {
+	flagToken = strings.TrimSpace(flagToken)
+	if flagToken != "" {
+		return flagToken
+	}
+	if data, err := os.ReadFile("/vault/secrets/gitea-token"); err == nil {
+		if token := strings.TrimSpace(string(data)); token != "" {
+			return token
+		}
+	}
+	return strings.TrimSpace(os.Getenv("GITEA_TOKEN"))
+}
+
+func shellQuoteSingle(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func normalizeAgentConfigValue(v interface{}) (string, bool) {
+	switch x := v.(type) {
+	case nil:
+		return "", false
+	case string:
+		return strings.TrimSpace(x), strings.TrimSpace(x) != ""
+	case []interface{}:
+		parts := make([]string, 0, len(x))
+		for _, item := range x {
+			if s := strings.TrimSpace(fmt.Sprint(item)); s != "" {
+				parts = append(parts, s)
+			}
+		}
+		return strings.Join(parts, ","), len(parts) > 0
+	default:
+		s := strings.TrimSpace(fmt.Sprint(x))
+		return s, s != ""
+	}
+}
+
+func updateAgentDeploymentArgs(content string, req agentConfigureRequest) (string, []string, error) {
+	fields := []string{}
+	updated := content
+	apply := func(flagName, value, label string) error {
+		pattern := regexp.MustCompile(regexp.QuoteMeta(flagName) + `(?:=|\s+)(?:"[^"]*"|'[^']*'|[^\s"']+)`)
+		replacement := flagName + "=" + shellQuoteSingle(value)
+		if !pattern.MatchString(updated) {
+			return fmt.Errorf("flag %s not found in deployment args", flagName)
+		}
+		updated = pattern.ReplaceAllString(updated, replacement)
+		fields = append(fields, label)
+		return nil
+	}
+	if value := strings.TrimSpace(req.Model); value != "" {
+		if err := apply("--model", value, "model"); err != nil {
+			return "", nil, err
+		}
+	}
+	if value := strings.TrimSpace(req.InferenceURL); value != "" {
+		if err := apply("--inference-url", value, "inference_url"); err != nil {
+			return "", nil, err
+		}
+	}
+	if value, ok := normalizeAgentConfigValue(req.Tools); ok {
+		if err := apply("--tools", value, "tools"); err != nil {
+			return "", nil, err
+		}
+	}
+	if value, ok := normalizeAgentConfigValue(req.Peers); ok {
+		if err := apply("--peers", value, "peers"); err != nil {
+			return "", nil, err
+		}
+	}
+	if len(fields) == 0 {
+		return "", nil, fmt.Errorf("no supported fields provided")
+	}
+	return updated, fields, nil
+}
+
+func createGitOpsAgentConfigPR(client *http.Client, baseURL, token, agentName string, req agentConfigureRequest) (string, error) {
+	const repoFullName = "kit/valhalla-infra"
+	manifestPath := fmt.Sprintf("infrastructure/valhalla/deployment-%s.yaml", agentName)
+
+	var contentResp giteaContentResponse
+	status, body, err := giteaGetJSONWithStatus(client, baseURL, token, fmt.Sprintf("/api/v1/repos/%s/contents/%s?ref=main", repoFullName, url.PathEscape(manifestPath)), &contentResp)
+	if err != nil {
+		return "", fmt.Errorf("fetch manifest: %w", err)
+	}
+	if status < 200 || status >= 300 {
+		return "", fmt.Errorf("fetch manifest: %s", strings.TrimSpace(string(body)))
+	}
+	if contentResp.Encoding != "base64" {
+		return "", fmt.Errorf("unsupported content encoding: %s", contentResp.Encoding)
+	}
+	rawContent, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(contentResp.Content, "\n", ""))
+	if err != nil {
+		return "", fmt.Errorf("decode manifest: %w", err)
+	}
+	updatedContent, fields, err := updateAgentDeploymentArgs(string(rawContent), req)
+	if err != nil {
+		return "", err
+	}
+
+	branch := fmt.Sprintf("settings/%s-%d", agentName, time.Now().Unix())
+	branchBody, _ := json.Marshal(map[string]string{
+		"new_branch_name": branch,
+		"old_ref_name":    "main",
+	})
+	resp, err := giteaRequest(client, http.MethodPost, baseURL, token, fmt.Sprintf("/api/v1/repos/%s/branches", repoFullName), bytes.NewReader(branchBody))
+	if err != nil {
+		return "", fmt.Errorf("create branch: %w", err)
+	}
+	branchRespBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("create branch: %s", strings.TrimSpace(string(branchRespBody)))
+	}
+
+	updateBody, _ := json.Marshal(map[string]interface{}{
+		"branch":  branch,
+		"content": base64.StdEncoding.EncodeToString([]byte(updatedContent)),
+		"message": fmt.Sprintf("settings: update %s config (%s)", agentName, strings.Join(fields, ", ")),
+		"sha":     contentResp.SHA,
+		"author": map[string]string{
+			"name":  "Hirdforge Gateway",
+			"email": "gateway@valhalla.local",
+		},
+		"committer": map[string]string{
+			"name":  "Hirdforge Gateway",
+			"email": "gateway@valhalla.local",
+		},
+	})
+	resp, err = giteaRequest(client, http.MethodPut, baseURL, token, fmt.Sprintf("/api/v1/repos/%s/contents/%s", repoFullName, url.PathEscape(manifestPath)), bytes.NewReader(updateBody))
+	if err != nil {
+		return "", fmt.Errorf("commit manifest: %w", err)
+	}
+	updateRespBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("commit manifest: %s", strings.TrimSpace(string(updateRespBody)))
+	}
+
+	prBody, _ := json.Marshal(map[string]string{
+		"base":  "main",
+		"head":  branch,
+		"title": fmt.Sprintf("settings: update %s config (%s)", agentName, strings.Join(fields, ", ")),
+		"body":  fmt.Sprintf("Automated agent configuration update for `%s`.\n\nChanged fields: %s", agentName, strings.Join(fields, ", ")),
+	})
+	resp, err = giteaRequest(client, http.MethodPost, baseURL, token, fmt.Sprintf("/api/v1/repos/%s/pulls", repoFullName), bytes.NewReader(prBody))
+	if err != nil {
+		return "", fmt.Errorf("create PR: %w", err)
+	}
+	prRespBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("create PR: %s", strings.TrimSpace(string(prRespBody)))
+	}
+	var pr struct {
+		HTMLURL string `json:"html_url"`
+		URL     string `json:"url"`
+	}
+	if err := json.Unmarshal(prRespBody, &pr); err != nil {
+		return "", fmt.Errorf("parse PR response: %w", err)
+	}
+	if strings.TrimSpace(pr.HTMLURL) != "" {
+		return pr.HTMLURL, nil
+	}
+	if strings.TrimSpace(pr.URL) != "" {
+		return pr.URL, nil
+	}
+	return "", fmt.Errorf("create PR: missing PR URL in response")
+}
+
 func truncateRunes(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -1051,6 +1313,7 @@ func main() {
 		eventCap:       200,
 		k8s:            initK8s(),
 		sessionStore:   newSessionStore(),
+		settings:       newSettingsStore(),
 		lastSession:    map[string]string{},
 		activeRequests: map[string]*ActiveRequest{},
 	}
@@ -1203,6 +1466,41 @@ func main() {
 	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
 		switch {
+		case strings.HasSuffix(path, "/configure"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/configure")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			var in agentConfigureRequest
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+				return
+			}
+			if strings.TrimSpace(*giteaURL) == "" {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "missing Gitea URL"})
+				return
+			}
+			token := resolveGatewayGiteaToken(*giteaToken)
+			if token == "" {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "missing Gitea token"})
+				return
+			}
+			prURL, err := createGitOpsAgentConfigPR(giteaClient, *giteaURL, token, name, in)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "pr_url": prURL})
 		case strings.HasSuffix(path, "/files"):
 			if r.Method != http.MethodGet {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1341,6 +1639,45 @@ func main() {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, gw.settings.All())
+		case http.MethodPut:
+			var in map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+				return
+			}
+			gw.settings.SetBulk(in)
+			writeJSON(w, http.StatusOK, gw.settings.All())
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/settings/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		key := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/settings/"), "/")
+		if key == "" || strings.Contains(key, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		var raw interface{}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		if wrapped, ok := raw.(map[string]interface{}); ok {
+			if value, exists := wrapped["value"]; exists && len(wrapped) == 1 {
+				raw = value
+			}
+		}
+		gw.settings.Set(key, raw)
+		writeJSON(w, http.StatusOK, gw.settings.All())
 	})
 	mux.HandleFunc("/api/v1/cluster/pods", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
