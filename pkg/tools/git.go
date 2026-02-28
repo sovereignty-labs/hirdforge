@@ -34,7 +34,7 @@ type GitCloneTool struct {
 }
 
 func NewGitCloneTool(workDir, giteaURL, token string) *GitCloneTool {
-	return &GitCloneTool{WorkDir: workDir, GiteaURL: giteaURL, Token: token}
+	return &GitCloneTool{WorkDir: workDir, GiteaURL: giteaURL, Token: resolveGiteaToken(token)}
 }
 
 func (t *GitCloneTool) Name() string { return "git-clone" }
@@ -106,6 +106,7 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 }
 
 func (t *GitCloneTool) buildURL(repo string) string {
+	t.Token = resolveGiteaToken(t.Token)
 	base := strings.TrimRight(t.GiteaURL, "/")
 	owner := "gitea_admin"
 	name := repo
@@ -132,7 +133,7 @@ type GitCommitTool struct {
 }
 
 func NewGitCommitTool(workDir, giteaURL, token string) *GitCommitTool {
-	return &GitCommitTool{WorkDir: workDir, GiteaURL: giteaURL, Token: token}
+	return &GitCommitTool{WorkDir: workDir, GiteaURL: giteaURL, Token: resolveGiteaToken(token)}
 }
 
 func (t *GitCommitTool) Name() string { return "git-commit" }
@@ -211,6 +212,7 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 }
 
 func (t *GitCommitTool) buildPushURL(repo string) string {
+	t.Token = resolveGiteaToken(t.Token)
 	base := strings.TrimRight(t.GiteaURL, "/")
 	owner := "gitea_admin"
 	name := repo
