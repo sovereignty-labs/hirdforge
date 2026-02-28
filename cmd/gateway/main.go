@@ -51,6 +51,16 @@ type Event struct {
 	Summary string `json:"summary"`
 }
 
+type taskSocketEvent struct {
+	Type        string `json:"type"`
+	Agent       string `json:"agent"`
+	DelegatedBy string `json:"delegated_by"`
+	TaskID      string `json:"task_id"`
+	Result      string `json:"result,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Timestamp   string `json:"timestamp"`
+}
+
 type PodInfo struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
@@ -182,6 +192,11 @@ type gateway struct {
 	activeRequests map[string]*ActiveRequest
 }
 
+var (
+	taskCompleteRE = regexp.MustCompile(`^completed task (task-[a-f0-9]+) \(from ([^)]+)\):\s*(.*)$`)
+	taskFailedRE   = regexp.MustCompile(`^failed task (task-[a-f0-9]+) \(from ([^)]+)\):\s*(.*)$`)
+)
+
 type wsClient struct {
 	conn net.Conn
 	r    io.Reader
@@ -237,6 +252,9 @@ func (g *gateway) addEvent(eventType, agent, summary string) {
 	}
 	g.eventMu.Unlock()
 	g.broadcastEvent(e)
+	if structured, ok := parseTaskSocketEvent(e); ok {
+		g.broadcastPayload(structured)
+	}
 }
 
 func writeWSFrame(conn net.Conn, opcode byte, payload []byte) error {
@@ -276,7 +294,11 @@ func (g *gateway) removeWSConn(target *wsClient) {
 }
 
 func (g *gateway) broadcastEvent(e Event) {
-	payload, err := json.Marshal(e)
+	g.broadcastPayload(e)
+}
+
+func (g *gateway) broadcastPayload(v interface{}) {
+	payload, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
@@ -289,6 +311,33 @@ func (g *gateway) broadcastEvent(e Event) {
 			g.removeWSConn(c)
 		}
 	}
+}
+
+func parseTaskSocketEvent(e Event) (taskSocketEvent, bool) {
+	if e.Type != "task" {
+		return taskSocketEvent{}, false
+	}
+	if matches := taskCompleteRE.FindStringSubmatch(e.Summary); len(matches) == 4 {
+		return taskSocketEvent{
+			Type:        "task_complete",
+			Agent:       e.Agent,
+			DelegatedBy: strings.TrimSpace(matches[2]),
+			TaskID:      matches[1],
+			Result:      strings.TrimSpace(matches[3]),
+			Timestamp:   e.Time,
+		}, true
+	}
+	if matches := taskFailedRE.FindStringSubmatch(e.Summary); len(matches) == 4 {
+		return taskSocketEvent{
+			Type:        "task_failed",
+			Agent:       e.Agent,
+			DelegatedBy: strings.TrimSpace(matches[2]),
+			TaskID:      matches[1],
+			Error:       strings.TrimSpace(matches[3]),
+			Timestamp:   e.Time,
+		}, true
+	}
+	return taskSocketEvent{}, false
 }
 
 func readWSFrame(r io.Reader) (opcode byte, payload []byte, err error) {

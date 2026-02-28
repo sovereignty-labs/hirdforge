@@ -469,6 +469,15 @@ const LogModal=({pod,onClose})=>{const[logs,setLogs]=useState("Loading...");cons
 
 // ═══════════ CHAT BUBBLE ═══════════
 const ChatBubble=({msg})=>{const self=msg.from==="kit";const c=C[msg.from]||"#818cf8";const tc=(msg.toolCalls||[]).length>0||(msg.toolResults||[]).length>0;
+  if(msg.kind==="notification"){const accent=C[msg.noticeAgent]||c;const ok=msg.noticeLevel!=="error";
+    return<div className="msg notice"><div className="msg-body" style={{marginLeft:32}}>
+      <div className="msg-meta"><span style={{fontSize:10,fontWeight:700,color:accent,letterSpacing:".06em",textTransform:"uppercase"}}>{ok?"Task Complete":"Task Failed"}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.18)"}}>{msg.time}</span></div>
+      <div className="msg-bubble" style={{background:ok?"rgba(16,185,129,0.06)":"rgba(239,68,68,0.08)",borderColor:ok?"rgba(16,185,129,0.16)":"rgba(239,68,68,0.18)",padding:"10px 12px"}}>
+        <div style={{position:"absolute",top:0,left:0,bottom:0,width:2,background:ok?"#10b981":"#ef4444",opacity:.55,borderRadius:1}}/>
+        <div style={{fontSize:11,color:ok?"#d1fae5":"#fecaca",lineHeight:1.5}}>{msg.text}</div>
+      </div>
+    </div></div>;
+  }
   return<div className={`msg${self?" self":""}`}><Av agent={msg.agent} size={24}/><div className="msg-body">
     <div className="msg-meta"><span style={{fontSize:11,fontWeight:700,color:c}}>{msg.agent.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.18)"}}>{msg.time}</span></div>
     <div className="msg-bubble" style={{borderColor:self?"rgba(16,185,129,0.1)":`${c}12`}}>
@@ -691,8 +700,8 @@ const RealmView=({agents,nodes,pods,commits,k8sEvents,prs,repos})=>{
 const Tab=({active,label,count,onClick})=><button onClick={onClick} style={{background:"none",border:"none",color:active?"#e2e8f0":"rgba(255,255,255,0.22)",padding:"10px 0",marginRight:22,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:".1em",textTransform:"uppercase",borderBottom:active?"2px solid #818cf8":"2px solid transparent"}}>{label}{count!=null&&<span style={{marginLeft:4,fontSize:10,color:active?"#818cf8":"rgba(255,255,255,0.1)"}}>{count}</span>}</button>;
 
 const lck=(u,a)=>`hirdforge-chat-${u}-${a}`;const lsk=(u,a)=>`hirdforge-session-${u}-${a}`;
-const u2s=m=>({role:m.from==="kit"?"user":"assistant",content:m.text||"",timestamp:Date.now()});
-const s2u=(a,m,uname)=>{const u=m.role==="user";return{from:u?"kit":a,agent:u?{id:"kit",name:`${uname||'Sovereign'}`,initial:(uname||'S')[0]?.toUpperCase()||"S",status:"online"}:{id:a,name:a,initial:(a||"?")[0]?.toUpperCase()||"?",status:"online"},text:m.content||"",time:new Date(m.timestamp||Date.now()).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),streaming:false,toolCalls:[],toolResults:[]};};
+const u2s=m=>({role:m.from==="kit"?"user":"assistant",content:m.text||"",timestamp:m.timestamp||Date.now(),kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent});
+const s2u=(a,m,uname)=>{const u=m.role==="user";const aid=u?"kit":(m.noticeAgent||a);return{from:u?"kit":a,agent:u?{id:"kit",name:`${uname||'Sovereign'}`,initial:(uname||'S')[0]?.toUpperCase()||"S",status:"online"}:{id:aid,name:aid,initial:(aid||"?")[0]?.toUpperCase()||"?",status:"online"},text:m.content||"",time:new Date(m.timestamp||Date.now()).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:m.timestamp||Date.now(),streaming:false,toolCalls:[],toolResults:[],kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent};};
 
 function App(){
   const[tab,setTab]=useState("comms");const[sel,setSel]=useState(0);
@@ -718,6 +727,19 @@ function App(){
   useEffect(()=>{if(tgt)localStorage.setItem(lck(auth.user,tgt),JSON.stringify(ch.map(u2s)));},[ch,tgt,auth.user]);
   useEffect(()=>{if(tgt&&sidByA[tgt])localStorage.setItem(lsk(auth.user,tgt),sidByA[tgt]);},[sidByA,tgt,auth.user]);
   useEffect(()=>{let m=true;const go=async()=>{const a=await api('/api/v1/sessions',[]);if(m&&Array.isArray(a))setSItems(a.filter(s=>s.agent===tgt));};go();const id=setInterval(go,5000);return()=>{m=false;clearInterval(id);};},[tgt,busy]);
+  useEffect(()=>{const e=events[0];if(!e||!e.delegated_by)return;if(e.type!=="task_complete"&&e.type!=="task_failed")return;
+    const owner=e.delegated_by;const completing=(e.agent||"system").toLowerCase();const ts=Date.parse(e.timestamp||"")||Date.now();
+    const cap=completing.charAt(0).toUpperCase()+completing.slice(1);
+    const text=e.type==="task_complete"?`✅ ${cap} completed task: ${e.result||"(no result)"}`:`❌ ${cap} failed task: ${e.error||"unknown error"}`;
+    const entry={from:owner,agent:{id:completing,name:cap,initial:cap.charAt(0),status:"online"},text,time:new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:ts,streaming:false,toolCalls:[],toolResults:[],kind:"notification",noticeLevel:e.type==="task_complete"?"success":"error",noticeAgent:completing};
+    const key=lck(auth.user,owner);
+    let existing=[];try{const raw=localStorage.getItem(key);if(raw){const parsed=JSON.parse(raw);if(Array.isArray(parsed))existing=parsed;}}catch{}
+    const serialized=u2s(entry);
+    const already=existing.some(m=>m.kind==="notification"&&m.noticeAgent===serialized.noticeAgent&&m.timestamp===serialized.timestamp&&m.content===serialized.content);
+    if(already)return;
+    localStorage.setItem(key,JSON.stringify([...existing,serialized]));
+    if(owner===tgt)setCh(p=>[...p,entry]);
+  },[events,tgt,auth.user]);
 
   const setCurSid=s=>setSidByA(p=>({...p,[tgt]:s}));
   const loadSess=async s=>{const d=await api(`/api/v1/sessions/${s}`,null);if(d?.messages){setCurSid(s);setCh(d.messages.map(m=>s2u(tgt,m,auth.user)));}};
