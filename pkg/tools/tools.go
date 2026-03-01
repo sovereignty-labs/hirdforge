@@ -17,6 +17,12 @@ type Tool interface {
 	Execute(args map[string]interface{}) ToolResult
 }
 
+// Verifier is an optional interface for tools that can independently confirm
+// their reported result after execution.
+type Verifier interface {
+	Verify(args map[string]interface{}, result ToolResult) error
+}
+
 // Registry stores named tools.
 type Registry struct {
 	tools map[string]Tool
@@ -39,6 +45,19 @@ func (r *Registry) Register(t Tool) {
 func (r *Registry) Get(name string) (Tool, bool) {
 	t, ok := r.tools[name]
 	return t, ok
+}
+
+// VerifyResult runs post-execution verification when the tool opts in.
+func (r *Registry) VerifyResult(name string, args map[string]interface{}, result ToolResult) error {
+	t, ok := r.tools[name]
+	if !ok {
+		return nil
+	}
+	v, ok := t.(Verifier)
+	if !ok {
+		return nil
+	}
+	return v.Verify(args, result)
 }
 
 // List returns sorted tool names.
