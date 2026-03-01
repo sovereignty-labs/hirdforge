@@ -27,6 +27,7 @@ import (
 	"time"
 
 	mcppkg "github.com/kitporath/project_valhalla/pkg/mcp"
+	tasklifepkg "github.com/kitporath/project_valhalla/pkg/tasklife"
 	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
 	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
 )
@@ -368,8 +369,15 @@ Preserve decisions, concrete outputs, file names, commands, and unresolved follo
 Do not add new facts. Keep it short and useful for future continuation.`
 
 type delegateTool struct {
-	peers     map[string]string
-	agentName string
+	peers               map[string]string
+	agentName           string
+	giteaURL            string
+	maxDelegationTokens int
+	gates               []string
+}
+
+type peerHealthResponse struct {
+	Model string `json:"model"`
 }
 
 func (t *delegateTool) Name() string { return "delegate" }
@@ -388,6 +396,7 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	if strings.TrimSpace(agent) == "" || strings.TrimSpace(task) == "" {
 		return toolpkg.ToolResult{Error: "agent and task are required"}
 	}
+	taskID, _ := args["_task_id"].(string)
 	peerURL, ok := t.peers[agent]
 	if !ok {
 		names := make([]string, 0, len(t.peers))
@@ -397,11 +406,77 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 		sort.Strings(names)
 		return toolpkg.ToolResult{Error: fmt.Sprintf("unknown agent: %s. Available: %s", agent, strings.Join(names, ", "))}
 	}
-	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, task)
+	formatted, err := t.prepareDelegation(peerURL, task, taskID)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, formatted)
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
 	return toolpkg.ToolResult{Output: resp}
+}
+
+func (t *delegateTool) prepareDelegation(peerURL, task, taskID string) (string, error) {
+	parsed, err := tasklifepkg.ValidateDelegation(task)
+	if err != nil {
+		return "", fmt.Errorf("invalid delegation format: %w", err)
+	}
+	targetModel := fetchPeerModel(peerURL)
+	formatted := tasklifepkg.OptimizeDelegation(targetModel, parsed)
+	tier := tasklifepkg.ModelTiers[strings.ToLower(strings.TrimSpace(targetModel))]
+	if t.maxDelegationTokens > 0 && tier == tasklifepkg.TierCommand {
+		formatted = tasklifepkg.FormatDelegation(parsed, t.maxDelegationTokens)
+	}
+	if t.maxDelegationTokens > 0 && tier == tasklifepkg.TierStrike && t.maxDelegationTokens < 500 {
+		formatted = tasklifepkg.FormatDelegation(tasklifepkg.DelegationFormat{
+			Task:     parsed.Task,
+			Steps:    parsed.Steps,
+			DoneWhen: parsed.DoneWhen,
+		}, t.maxDelegationTokens)
+	}
+	gates := "none"
+	if len(t.gates) > 0 {
+		gates = strings.Join(t.gates, ", ")
+	}
+	cloneURL := strings.TrimRight(t.giteaURL, "/")
+	if cloneURL == "" {
+		cloneURL = "unknown"
+	}
+	gitIdentity := fmt.Sprintf("%s <agent@valhalla.local>", t.agentName)
+	footer := fmt.Sprintf(
+		"\n\nFROM: %s\nTASK_ID: %s\nGATES: %s\nGIT_IDENTITY: %s\nCLONE_URL: %s",
+		t.agentName,
+		strings.TrimSpace(taskID),
+		gates,
+		gitIdentity,
+		cloneURL,
+	)
+	return formatted + footer, nil
+}
+
+func fetchPeerModel(peerURL string) string {
+	if strings.TrimSpace(peerURL) == "" {
+		return ""
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(peerURL, "/")+"/health", nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var out peerHealthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Model)
 }
 
 func sendPeerAgentTask(agentName, peerURL, from, task string) (string, error) {
@@ -1824,6 +1899,22 @@ func mostCommonValue(values []string) string {
 	return best
 }
 
+func recallTimestamp(meta map[string]interface{}) time.Time {
+	if meta == nil {
+		return time.Time{}
+	}
+	raw, _ := meta["timestamp"].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts.UTC()
+}
+
 type soulSection struct {
 	Heading string
 	Body    string
@@ -2039,42 +2130,56 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 		}
 	}
 
-	memories := recallMemories(memoryURL, map[string]interface{}{
-		"agent": agentName,
-		"query": "tool_failure retry_exhausted",
-		"limit": 20,
-	}, 3*time.Second)
-	if len(memories) == 0 {
-		return
-	}
-
+	triggerTool := ""
+	triggerCount := 0
 	failuresByTool := map[string][]string{}
 	failureTextsByTool := map[string][]string{}
 	recoveriesByTool := map[string][]string{}
-	for _, memory := range memories {
-		text := memory.Text
-		if toolName, failureType, errText, ok := parseToolFailureMemory(text); ok {
-			if failureType == "" || failureType == "retry_exhausted" {
-				failuresByTool[toolName] = append(failuresByTool[toolName], errText)
-				failureTextsByTool[toolName] = append(failureTextsByTool[toolName], text)
-			}
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	for _, toolName := range []string{"git-clone", "read", "write", "git-commit", "gitea"} {
+		memories := recallMemories(memoryURL, map[string]interface{}{
+			"agent":  agentName,
+			"query":  toolName,
+			"limit":  20,
+			"filter": map[string]interface{}{"type": "tool_failure", "tool": toolName},
+		}, 3*time.Second)
+		if len(memories) == 0 {
 			continue
 		}
-		if toolName, ok := parseToolRecoveryMemory(text); ok {
-			recoveriesByTool[toolName] = append(recoveriesByTool[toolName], text)
+		recentCount := 0
+		for _, memory := range memories {
+			text := memory.Text
+			ts := recallTimestamp(memory.Metadata)
+			if ts.IsZero() || ts.Before(cutoff) {
+				continue
+			}
+			failureTool, failureType, errText, ok := parseToolFailureMemory(text)
+			if !ok || failureTool != toolName {
+				continue
+			}
+			if failureType != "" && failureType != "retry_exhausted" {
+				continue
+			}
+			recentCount++
+			failuresByTool[toolName] = append(failuresByTool[toolName], errText)
+			failureTextsByTool[toolName] = append(failureTextsByTool[toolName], text)
 		}
-	}
-
-	triggerTool := ""
-	triggerCount := 0
-	for toolName, failures := range failureTextsByTool {
-		if len(failures) >= 3 && len(failures) > triggerCount {
+		if recentCount >= 3 && recentCount > triggerCount {
 			triggerTool = toolName
-			triggerCount = len(failures)
+			triggerCount = recentCount
 		}
 	}
 	if triggerTool == "" {
 		return
+	}
+	for _, memory := range recallMemories(memoryURL, map[string]interface{}{
+		"agent": agentName,
+		"query": triggerTool,
+		"limit": 20,
+	}, 3*time.Second) {
+		if toolName, ok := parseToolRecoveryMemory(memory.Text); ok && toolName == triggerTool {
+			recoveriesByTool[toolName] = append(recoveriesByTool[toolName], memory.Text)
+		}
 	}
 	if !selfImprovementAllowed(agentName, now) {
 		return
@@ -2590,6 +2695,32 @@ func newTaskID() string {
 	return fmt.Sprintf("task-%08x", rand.Uint32())
 }
 
+func taskNudgeCount(record tasklifepkg.TaskRecord) int {
+	count := 0
+	for _, state := range record.History {
+		if state == tasklifepkg.StateNudged {
+			count++
+		}
+	}
+	return count
+}
+
+func sovereignStateEnabled(enabled map[string]bool, state tasklifepkg.TaskState) bool {
+	if len(enabled) == 0 {
+		return false
+	}
+	switch state {
+	case tasklifepkg.StateCompleted:
+		return enabled["completed"]
+	case tasklifepkg.StateNudged:
+		return enabled["nudged"]
+	case tasklifepkg.StateFailedNoPR:
+		return enabled["failed"]
+	default:
+		return false
+	}
+}
+
 func notifyGateway(gatewayURL, eventType, agentName, message string) {
 	if gatewayURL == "" {
 		return
@@ -2725,6 +2856,11 @@ func main() {
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
 	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
 	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
+	requirePRPattern := flag.String("require-pr-pattern", "", "Regex pattern required in async task completion responses; empty disables the gate")
+	completionMaxNudges := flag.Int("completion-max-nudges", 3, "Maximum completion gate nudges before failing a task")
+	maxDelegationTokens := flag.Int("max-delegation-tokens", 500, "Maximum delegation message token budget before trimming optional sections")
+	sovereignNotifyURL := flag.String("sovereign-notify-url", "", "Gateway URL for sovereign task notifications; empty disables sovereign reporting")
+	sovereignNotifyOn := flag.String("sovereign-notify-on", "completed,failed,nudged", "Comma-separated sovereign notification states")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
 	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
@@ -2749,6 +2885,11 @@ func main() {
 			os.Exit(1)
 		}
 		os.Exit(0)
+	}
+	if strings.TrimSpace(*requirePRPattern) != "" {
+		if _, err := regexp.Compile(*requirePRPattern); err != nil {
+			die("invalid --require-pr-pattern", err)
+		}
 	}
 
 	if err := os.MkdirAll(*workspace, 0755); err != nil {
@@ -2798,11 +2939,29 @@ func main() {
 		agentName = "valhalla-agent"
 	}
 	taskStore := taskspkg.NewStore()
+	taskTracker := tasklifepkg.NewTaskTracker()
+	sovereignStates := map[string]bool{}
+	for _, state := range strings.Split(*sovereignNotifyOn, ",") {
+		if state = strings.ToLower(strings.TrimSpace(state)); state != "" {
+			sovereignStates[state] = true
+		}
+	}
+	sovereignReporter := tasklifepkg.NewSovereignReporter(*sovereignNotifyURL, agentName, strings.TrimSpace(*sovereignNotifyURL) != "")
 	var taskCancelMu sync.Mutex
 	taskCancels := map[string]context.CancelFunc{}
+	delegationGates := []string{}
+	if strings.TrimSpace(*requirePRPattern) != "" {
+		delegationGates = append(delegationGates, "require_pr_pattern="+strings.TrimSpace(*requirePRPattern))
+	}
 
 	reg := toolpkg.NewRegistry()
-	delegateExec := &delegateTool{peers: peers, agentName: agentName}
+	delegateExec := &delegateTool{
+		peers:               peers,
+		agentName:           agentName,
+		giteaURL:            *giteaURL,
+		maxDelegationTokens: *maxDelegationTokens,
+		gates:               delegationGates,
+	}
 	broadcastExec := &broadcastTool{peers: peers}
 	taskStatusExec := &taskStatusTool{peers: peers}
 	recallExec := &recallTool{memoryURL: *memoryURL, agentName: agentName}
@@ -2958,6 +3117,7 @@ func main() {
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
 				switch tc.Function.Name {
 				case "delegate":
+					args["_task_id"] = sessionID
 					result = delegateExec.Execute(args)
 				case "broadcast":
 					result = broadcastExec.Execute(args)
@@ -3442,10 +3602,35 @@ func main() {
 			if !ok {
 				return
 			}
+			trackerKey := agentName + ":" + current.ID
+			if _, err := taskTracker.Dispatch(trackerKey, trackerKey); err != nil {
+				current.Status = "failed"
+				current.Error = "completion_tracker_init_failed"
+				taskStore.Update(current)
+				notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("failed task %s (from %s): %s", current.ID, current.From, current.Error))
+				return
+			}
 			current.Status = "working"
 			current.Error = ""
 			taskStore.Update(current)
 			notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("started task %s (from %s)", current.ID, current.From))
+			reportTrackedState := func(record tasklifepkg.TaskRecord) {
+				if !sovereignStateEnabled(sovereignStates, record.State) {
+					return
+				}
+				resultText := record.Result
+				if record.State == tasklifepkg.StateNudged {
+					resultText = record.Nudge
+				}
+				sovereignReporter.Report(tasklifepkg.TaskEvent{
+					From:      current.From,
+					TaskID:    current.ID,
+					Agent:     agentName,
+					State:     record.State,
+					Result:    resultText,
+					Timestamp: record.UpdatedAt,
+				})
+			}
 			appendToolLog := func(log taskspkg.ToolLog) {
 				cur, ok := taskStore.Get(taskID)
 				if !ok {
@@ -3454,7 +3639,57 @@ func main() {
 				cur.Tools = append(cur.Tools, log)
 				taskStore.Update(cur)
 			}
-			result, err := processConversation(ctx, taskID, content, nil, appendToolLog)
+			pendingContent := content
+			var result string
+			var err error
+			completionGates := []tasklifepkg.CompletionGate(nil)
+			if strings.TrimSpace(*requirePRPattern) != "" {
+				completionGates = []tasklifepkg.CompletionGate{{
+					Name:    "pr_url",
+					Pattern: *requirePRPattern,
+					Nudge:   fmt.Sprintf("Your completion message must include a PR reference matching %q. Reply with an updated completion message that includes it.", *requirePRPattern),
+				}}
+			}
+			for {
+				result, err = processConversation(ctx, taskID, pendingContent, nil, appendToolLog)
+				if err != nil || len(completionGates) == 0 {
+					break
+				}
+				gateResult, gateErr := tasklifepkg.CheckCompletionGates(result, completionGates)
+				if gateErr != nil {
+					err = fmt.Errorf("completion gate check failed: %w", gateErr)
+					break
+				}
+				if gateResult.Passed {
+					if record, completeErr := taskTracker.Complete(trackerKey, result, true); completeErr == nil {
+						reportTrackedState(record)
+					}
+					break
+				}
+				record, ok := taskTracker.Task(trackerKey)
+				if !ok {
+					err = fmt.Errorf("completion tracker missing for task %s", taskID)
+					break
+				}
+				if taskNudgeCount(record) >= *completionMaxNudges {
+					if failedRecord, completeErr := taskTracker.Complete(trackerKey, "no_pr_url", false); completeErr == nil {
+						reportTrackedState(failedRecord)
+					}
+					err = fmt.Errorf("no_pr_url")
+					break
+				}
+				nudge := "Completion requirements were not met."
+				if len(gateResult.Nudges) > 0 {
+					nudge = strings.Join(gateResult.Nudges, "\n")
+				}
+				if nudgedRecord, nudgeErr := taskTracker.Nudge(trackerKey, nudge); nudgeErr != nil {
+					err = fmt.Errorf("completion tracker nudge failed: %w", nudgeErr)
+					break
+				} else {
+					reportTrackedState(nudgedRecord)
+				}
+				pendingContent = nudge
+			}
 			cur, ok := taskStore.Get(taskID)
 			if !ok {
 				return
@@ -3472,6 +3707,11 @@ func main() {
 				taskStore.Update(cur)
 				notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("failed task %s (from %s): %s", cur.ID, cur.From, cur.Error))
 				return
+			}
+			if len(completionGates) == 0 {
+				if record, completeErr := taskTracker.Complete(trackerKey, result, true); completeErr == nil {
+					reportTrackedState(record)
+				}
 			}
 			cur.Status = "completed"
 			cur.Result = result
