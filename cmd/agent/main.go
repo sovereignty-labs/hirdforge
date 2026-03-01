@@ -354,6 +354,7 @@ var (
 	metricsToolCallsTotal     int64
 	metricsErrorsTotal        int64
 	metricsStallsTotal        int64
+	metricsCompactionsTotal   int64
 	metricsActiveRequests     int64
 	metricsLastRequestDurBits uint64
 	toolMetricMu              sync.Mutex
@@ -1823,6 +1824,191 @@ func mostCommonValue(values []string) string {
 	return best
 }
 
+type soulSection struct {
+	Heading string
+	Body    string
+	Raw     string
+	Learned bool
+	Tool    string
+}
+
+func parseLearnedToolFromHeading(heading string) string {
+	heading = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(heading), "## Learned:"))
+	if heading == "" {
+		return ""
+	}
+	fields := strings.Fields(heading)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func parseSoulSections(content string) []soulSection {
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return nil
+	}
+	sections := make([]soulSection, 0)
+	current := make([]string, 0)
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		raw := strings.TrimSpace(strings.Join(current, "\n"))
+		if raw == "" {
+			current = current[:0]
+			return
+		}
+		heading := ""
+		if idx := strings.IndexByte(raw, '\n'); idx >= 0 {
+			heading = strings.TrimSpace(raw[:idx])
+		} else {
+			heading = strings.TrimSpace(raw)
+		}
+		body := ""
+		if idx := strings.IndexByte(raw, '\n'); idx >= 0 {
+			body = strings.TrimSpace(raw[idx+1:])
+		}
+		learned := strings.HasPrefix(heading, "## Learned:")
+		sections = append(sections, soulSection{
+			Heading: heading,
+			Body:    body,
+			Raw:     raw,
+			Learned: learned,
+			Tool:    parseLearnedToolFromHeading(heading),
+		})
+		current = current[:0]
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, "## ") && len(current) > 0 {
+			flush()
+		}
+		current = append(current, line)
+	}
+	flush()
+	return sections
+}
+
+func renderSoulSections(sections []soulSection) string {
+	parts := make([]string, 0, len(sections))
+	for _, sec := range sections {
+		raw := strings.TrimSpace(sec.Raw)
+		if raw == "" {
+			continue
+		}
+		parts = append(parts, raw)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n") + "\n"
+}
+
+func countSoulLines(content string) int {
+	trimmed := strings.TrimRight(content, "\n")
+	if trimmed == "" {
+		return 0
+	}
+	return len(strings.Split(trimmed, "\n"))
+}
+
+func compactSoul(agentName, content string, maxLines int) string {
+	if maxLines <= 0 || countSoulLines(content) <= maxLines {
+		return content
+	}
+
+	sections := parseSoulSections(content)
+	if len(sections) == 0 {
+		return content
+	}
+
+	type learnedGroup struct {
+		latestIdx int
+		heading   string
+		bodies    []string
+		titles    []string
+	}
+	groups := map[string]*learnedGroup{}
+	skipIdx := map[int]bool{}
+	for idx, sec := range sections {
+		if !sec.Learned || sec.Tool == "" {
+			continue
+		}
+		group, ok := groups[sec.Tool]
+		if !ok {
+			groups[sec.Tool] = &learnedGroup{
+				latestIdx: idx,
+				heading:   sec.Heading,
+				bodies:    []string{sec.Body},
+				titles:    []string{sec.Heading},
+			}
+			continue
+		}
+		log.Printf("[COMPACTION] agent=%s removed learned section: %s", agentName, sec.Heading)
+		skipIdx[idx] = true
+		group.latestIdx = idx
+		group.heading = sec.Heading
+		group.bodies = append(group.bodies, sec.Body)
+		group.titles = append(group.titles, sec.Heading)
+	}
+	for tool, group := range groups {
+		if len(group.bodies) < 2 {
+			continue
+		}
+		latest := sections[group.latestIdx]
+		combinedBodies := make([]string, 0, len(group.bodies))
+		for _, body := range group.bodies {
+			body = strings.TrimSpace(body)
+			if body != "" {
+				combinedBodies = append(combinedBodies, body)
+			}
+		}
+		latest.Heading = group.heading
+		latest.Body = strings.Join(combinedBodies, "\n")
+		if latest.Body != "" {
+			latest.Raw = latest.Heading + "\n" + latest.Body
+		} else {
+			latest.Raw = latest.Heading
+		}
+		sections[group.latestIdx] = latest
+		_ = tool
+	}
+
+	compacted := make([]soulSection, 0, len(sections))
+	for idx, sec := range sections {
+		if skipIdx[idx] {
+			continue
+		}
+		compacted = append(compacted, sec)
+	}
+
+	rendered := renderSoulSections(compacted)
+	if countSoulLines(rendered) <= maxLines {
+		return rendered
+	}
+
+	for countSoulLines(rendered) > maxLines {
+		removeIdx := -1
+		removeHeading := ""
+		for idx, sec := range compacted {
+			if sec.Learned {
+				removeIdx = idx
+				removeHeading = sec.Heading
+				break
+			}
+		}
+		if removeIdx < 0 {
+			break
+		}
+		log.Printf("[COMPACTION] agent=%s removed learned section: %s", agentName, removeHeading)
+		compacted = append(compacted[:removeIdx], compacted[removeIdx+1:]...)
+		rendered = renderSoulSections(compacted)
+	}
+
+	return rendered
+}
+
 func executeRegistryTool(reg *toolpkg.Registry, name string, args map[string]interface{}) toolpkg.ToolResult {
 	t, ok := reg.Get(name)
 	if !ok {
@@ -1838,7 +2024,7 @@ func executeRegistryTool(reg *toolpkg.Registry, name string, args map[string]int
 	return result
 }
 
-func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Registry) {
+func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Registry, soulMaxLines int) {
 	now := time.Now().UTC()
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || reg == nil {
 		return
@@ -1933,6 +2119,13 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 	}
 	amendment := strings.Join(amendmentLines, "\n")
 	updatedSoul := strings.TrimRight(soulRes.Output, "\n") + "\n\n" + amendment + "\n"
+	if countSoulLines(updatedSoul) > soulMaxLines {
+		compactedSoul := compactSoul(agentName, updatedSoul, soulMaxLines)
+		if compactedSoul != updatedSoul {
+			atomic.AddInt64(&metricsCompactionsTotal, 1)
+			updatedSoul = compactedSoul
+		}
+	}
 
 	writeRes := executeRegistryTool(reg, "write", map[string]interface{}{
 		"path":    soulRelPath,
@@ -2507,6 +2700,9 @@ func metricsText() string {
 	b.WriteString("# HELP valhalla_agent_stalls_total Total inference stalls detected\n")
 	b.WriteString("# TYPE valhalla_agent_stalls_total counter\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_stalls_total %d\n", atomic.LoadInt64(&metricsStallsTotal)))
+	b.WriteString("# HELP valhalla_agent_compactions_total Total SOUL compactions performed\n")
+	b.WriteString("# TYPE valhalla_agent_compactions_total counter\n")
+	b.WriteString(fmt.Sprintf("valhalla_agent_compactions_total %d\n", atomic.LoadInt64(&metricsCompactionsTotal)))
 	b.WriteString("# HELP valhalla_agent_uptime_seconds Agent uptime in seconds\n")
 	b.WriteString("# TYPE valhalla_agent_uptime_seconds gauge\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_uptime_seconds %d\n", int(time.Since(startTime).Seconds())))
@@ -2540,6 +2736,7 @@ func main() {
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
 	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
 	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
+	soulMaxLines := flag.Int("soul-max-lines", 80, "maximum number of lines allowed in a SOUL file")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for /webhook/gitea")
 	mcpServers := flag.String("mcp-servers", "", "Comma-separated MCP server URLs")
@@ -2701,7 +2898,7 @@ func main() {
 			if !hadToolCalls {
 				return
 			}
-			go checkSelfImprovementTrigger(*memoryURL, agentName, reg)
+			go checkSelfImprovementTrigger(*memoryURL, agentName, reg, *soulMaxLines)
 		}()
 
 		sessionsMu.Lock()
