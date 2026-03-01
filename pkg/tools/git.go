@@ -215,6 +215,40 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 	return ToolResult{Output: fmt.Sprintf("committed and pushed to %s: %s", target, message)}
 }
 
+func (t *GitCommitTool) Verify(args map[string]interface{}, result ToolResult) error {
+	if result.Error != "" || strings.TrimSpace(result.Output) == "no changes to commit" {
+		return nil
+	}
+
+	repo, ok := args["repo"].(string)
+	if !ok || repo == "" {
+		return fmt.Errorf("git verification failed: repo is required")
+	}
+	branch, _ := args["branch"].(string)
+
+	repoDir := filepath.Join(t.WorkDir, repo)
+	if branch == "" {
+		headRes := runGit(repoDir, []string{"git", "rev-parse", "--abbrev-ref", "HEAD"}, 10*time.Second)
+		if headRes.Error != "" {
+			return fmt.Errorf("git verification failed: resolve branch: %s", headRes.Error)
+		}
+		branch = strings.TrimSpace(headRes.Output)
+	}
+	if branch == "" {
+		return fmt.Errorf("git verification failed: branch is empty")
+	}
+
+	remoteRes := runGit(repoDir, []string{"git", "ls-remote", "--heads", "origin", branch}, 30*time.Second)
+	if remoteRes.Error != "" {
+		return fmt.Errorf("git verification failed: %s", remoteRes.Error)
+	}
+	if strings.TrimSpace(remoteRes.Output) == "" {
+		return fmt.Errorf("git verification failed: branch %s not found on origin", branch)
+	}
+
+	return nil
+}
+
 func (t *GitCommitTool) buildPushURL(repo string) string {
 	t.Token = resolveGiteaToken(t.Token)
 	base := strings.TrimRight(t.GiteaURL, "/")

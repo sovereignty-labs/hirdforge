@@ -122,3 +122,29 @@ func (t *WriteTool) Execute(args map[string]interface{}) ToolResult {
 	}
 	return ToolResult{Output: fmt.Sprintf("wrote %d bytes to %s", len(content), path)}
 }
+
+func (t *WriteTool) Verify(args map[string]interface{}, result ToolResult) error {
+	if result.Error != "" {
+		return nil
+	}
+
+	path, ok := args["path"].(string)
+	if !ok || path == "" {
+		return fmt.Errorf("write verification failed: path is required")
+	}
+
+	absPath, err := resolvePath(t.WorkDir, path)
+	if err != nil {
+		return fmt.Errorf("write verification failed: %w", err)
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return fmt.Errorf("write verification failed: %w", err)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("write verification failed: file %s is empty", path)
+	}
+
+	return nil
+}
