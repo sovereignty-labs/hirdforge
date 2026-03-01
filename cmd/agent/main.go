@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"math"
 	"math/rand"
 	"net/http"
@@ -2042,6 +2043,7 @@ func main() {
 	toolsFile := flag.String("tools-file", "/etc/valhalla/tools.md", "path to tools context file")
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
+	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for /webhook/gitea")
 	mcpServers := flag.String("mcp-servers", "", "Comma-separated MCP server URLs")
@@ -2226,6 +2228,15 @@ func main() {
 		messages = append(messages, history...)
 		messages = append(messages, message{Role: "user", Content: content})
 
+		shouldRetryTool := func(name string) bool {
+			switch name {
+			case "delegate", "broadcast", "recall", "remember", "task_status":
+				return false
+			default:
+				return true
+			}
+		}
+
 		executeOneToolCall := func(tc toolCall) toolpkg.ToolResult {
 			atomic.AddInt64(&toolCalls, 1)
 			atomic.AddInt64(&metricsToolCallsTotal, 1)
@@ -2238,21 +2249,37 @@ func main() {
 			if !emit(sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false}) {
 				return toolpkg.ToolResult{Error: "stream closed"}
 			}
-			result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
-			switch tc.Function.Name {
-			case "delegate":
-				result = delegateExec.Execute(args)
-			case "broadcast":
-				result = broadcastExec.Execute(args)
-			default:
-				if t, ok := reg.Get(tc.Function.Name); ok {
-					result = t.Execute(args)
+
+			runToolAttempt := func() toolpkg.ToolResult {
+				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
+				switch tc.Function.Name {
+				case "delegate":
+					result = delegateExec.Execute(args)
+				case "broadcast":
+					result = broadcastExec.Execute(args)
+				default:
+					if t, ok := reg.Get(tc.Function.Name); ok {
+						result = t.Execute(args)
+					}
 				}
+				if verifyErr := reg.VerifyResult(tc.Function.Name, args, result); verifyErr != nil {
+					result = toolpkg.ToolResult{
+						Output: result.Output,
+						Error:  "verification failed: " + verifyErr.Error(),
+					}
+				}
+				return result
 			}
-			if verifyErr := reg.VerifyResult(tc.Function.Name, args, result); verifyErr != nil {
-				result = toolpkg.ToolResult{
-					Output: result.Output,
-					Error:  "verification failed: " + verifyErr.Error(),
+
+			result := runToolAttempt()
+			if result.Error != "" && *maxToolRetries > 0 && shouldRetryTool(tc.Function.Name) {
+				for attempt := 1; attempt <= *maxToolRetries; attempt++ {
+					log.Printf("[RETRY] tool=%s attempt=%d err=%s", tc.Function.Name, attempt, result.Error)
+					time.Sleep(2 * time.Second)
+					result = runToolAttempt()
+					if result.Error == "" {
+						break
+					}
 				}
 			}
 			if result.Error != "" {
