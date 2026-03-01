@@ -357,6 +357,8 @@ var (
 	metricsLastRequestDurBits uint64
 	toolMetricMu              sync.Mutex
 	metricsToolCallsByTool    = map[string]*int64{}
+	selfImproveMu             sync.Mutex
+	selfImproveLastRun        = map[string]time.Time{}
 )
 
 const compactionSystemPrompt = `You are a context compactor. Summarize the provided conversation segment into concise, factual bullet points.
@@ -1665,6 +1667,296 @@ func fetchRecentToolLessons(memoryURL, agentName string) string {
 		strings.Join(lessons, "\n") + "\n</lessons>"
 }
 
+type recalledMemory struct {
+	Text     string
+	Metadata map[string]interface{}
+}
+
+func recallMemories(memoryURL string, payload map[string]interface{}, timeout time.Duration) []recalledMemory {
+	if strings.TrimSpace(memoryURL) == "" {
+		return nil
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/api/v1/recall", bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+
+	type recallItem struct {
+		Content  string                 `json:"content"`
+		Text     string                 `json:"text"`
+		Metadata map[string]interface{} `json:"metadata"`
+	}
+	var out struct {
+		Results  []recallItem `json:"results"`
+		Memories []recallItem `json:"memories"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil
+	}
+
+	items := out.Results
+	if len(items) == 0 {
+		items = out.Memories
+	}
+	memories := make([]recalledMemory, 0, len(items))
+	for _, item := range items {
+		text := strings.TrimSpace(item.Content)
+		if text == "" {
+			text = strings.TrimSpace(item.Text)
+		}
+		if text == "" {
+			continue
+		}
+		memories = append(memories, recalledMemory{
+			Text:     text,
+			Metadata: item.Metadata,
+		})
+	}
+	return memories
+}
+
+func selfImprovementAllowed(agentName string, now time.Time) bool {
+	if strings.TrimSpace(agentName) == "" {
+		return false
+	}
+	selfImproveMu.Lock()
+	defer selfImproveMu.Unlock()
+	last := selfImproveLastRun[agentName]
+	if !last.IsZero() && now.Sub(last) < time.Hour {
+		return false
+	}
+	return true
+}
+
+func markSelfImprovementTriggered(agentName string, now time.Time) {
+	if strings.TrimSpace(agentName) == "" {
+		return
+	}
+	selfImproveMu.Lock()
+	selfImproveLastRun[agentName] = now
+	selfImproveMu.Unlock()
+}
+
+func parseToolFailureMemory(text string) (toolName, failureType, errText string, ok bool) {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "[FAILURE:") {
+		if end := strings.Index(text, "]"); end > len("[FAILURE:") {
+			failureType = text[len("[FAILURE:"):end]
+		}
+	}
+	toolMatch := regexp.MustCompile(`\btool=([^ ]+)`).FindStringSubmatch(text)
+	if len(toolMatch) < 2 {
+		return "", "", "", false
+	}
+	toolName = strings.TrimSpace(toolMatch[1])
+	if toolName == "" {
+		return "", "", "", false
+	}
+	if idx := strings.Index(text, " error="); idx >= 0 {
+		errText = strings.TrimSpace(text[idx+len(" error="):])
+	}
+	return toolName, failureType, errText, true
+}
+
+func parseToolRecoveryMemory(text string) (toolName string, ok bool) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "[RECOVERY") {
+		return "", false
+	}
+	toolMatch := regexp.MustCompile(`\btool=([^ ]+)`).FindStringSubmatch(text)
+	if len(toolMatch) < 2 {
+		return "", false
+	}
+	toolName = strings.TrimSpace(toolMatch[1])
+	return toolName, toolName != ""
+}
+
+func mostCommonValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	counts := make(map[string]int, len(values))
+	best := values[0]
+	bestCount := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		counts[value]++
+		if counts[value] > bestCount {
+			best = value
+			bestCount = counts[value]
+		}
+	}
+	return best
+}
+
+func executeRegistryTool(reg *toolpkg.Registry, name string, args map[string]interface{}) toolpkg.ToolResult {
+	t, ok := reg.Get(name)
+	if !ok {
+		return toolpkg.ToolResult{Error: "tool not registered: " + name}
+	}
+	result := t.Execute(args)
+	if verifyErr := reg.VerifyResult(name, args, result); verifyErr != nil {
+		result = toolpkg.ToolResult{
+			Output: result.Output,
+			Error:  "verification failed: " + verifyErr.Error(),
+		}
+	}
+	return result
+}
+
+func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Registry) {
+	now := time.Now().UTC()
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || reg == nil {
+		return
+	}
+	if !selfImprovementAllowed(agentName, now) {
+		return
+	}
+	for _, toolName := range []string{"git-clone", "read", "write", "git-commit", "gitea"} {
+		if _, ok := reg.Get(toolName); !ok {
+			logJSON("warn", "self improvement skipped; required tool missing", map[string]interface{}{"tool": toolName, "agent": agentName})
+			return
+		}
+	}
+
+	memories := recallMemories(memoryURL, map[string]interface{}{
+		"agent": agentName,
+		"query": "tool_failure retry_exhausted",
+		"top_k": 20,
+	}, 3*time.Second)
+	if len(memories) == 0 {
+		return
+	}
+
+	failuresByTool := map[string][]string{}
+	failureTextsByTool := map[string][]string{}
+	recoveriesByTool := map[string][]string{}
+	for _, memory := range memories {
+		text := memory.Text
+		if toolName, failureType, errText, ok := parseToolFailureMemory(text); ok {
+			if failureType == "" || failureType == "retry_exhausted" {
+				failuresByTool[toolName] = append(failuresByTool[toolName], errText)
+				failureTextsByTool[toolName] = append(failureTextsByTool[toolName], text)
+			}
+			continue
+		}
+		if toolName, ok := parseToolRecoveryMemory(text); ok {
+			recoveriesByTool[toolName] = append(recoveriesByTool[toolName], text)
+		}
+	}
+
+	triggerTool := ""
+	triggerCount := 0
+	for toolName, failures := range failureTextsByTool {
+		if len(failures) >= 3 && len(failures) > triggerCount {
+			triggerTool = toolName
+			triggerCount = len(failures)
+		}
+	}
+	if triggerTool == "" {
+		return
+	}
+	if !selfImprovementAllowed(agentName, now) {
+		return
+	}
+	markSelfImprovementTriggered(agentName, now)
+
+	commonErr := mostCommonValue(failuresByTool[triggerTool])
+	if commonErr == "" {
+		commonErr = "repeated operational failure"
+	}
+	recoveryHint := ""
+	if recoveries := recoveriesByTool[triggerTool]; len(recoveries) > 0 {
+		recoveryHint = recoveries[0]
+	}
+
+	repoSlug := "kit/hirdforge-personas"
+	repoDir := "hirdforge-personas"
+	soulRelPath := filepath.ToSlash(filepath.Join(repoDir, agentName, "soul.md"))
+	readRes := executeRegistryTool(reg, "git-clone", map[string]interface{}{"repo": repoSlug})
+	if readRes.Error != "" {
+		logJSON("warn", "self improvement clone failed", map[string]interface{}{"agent": agentName, "error": readRes.Error})
+		return
+	}
+	soulRes := executeRegistryTool(reg, "read", map[string]interface{}{"path": soulRelPath})
+	if soulRes.Error != "" {
+		logJSON("warn", "self improvement read failed", map[string]interface{}{"agent": agentName, "path": soulRelPath, "error": soulRes.Error})
+		return
+	}
+
+	shortDescription := fmt.Sprintf("%s failure guard for %s", triggerTool, agentName)
+	heading := "## Learned: " + shortDescription
+	if strings.Contains(soulRes.Output, heading) {
+		return
+	}
+
+	amendmentLines := []string{
+		heading,
+		fmt.Sprintf("Repeated failures with `%s` were observed. Most common error: %s. Before declaring success, verify prerequisites and confirm the expected side effect.", triggerTool, commonErr),
+	}
+	if recoveryHint != "" {
+		amendmentLines = append(amendmentLines, "Known recovery signal: "+recoveryHint)
+	}
+	amendment := strings.Join(amendmentLines, "\n")
+	updatedSoul := strings.TrimRight(soulRes.Output, "\n") + "\n\n" + amendment + "\n"
+
+	writeRes := executeRegistryTool(reg, "write", map[string]interface{}{
+		"path":    soulRelPath,
+		"content": updatedSoul,
+	})
+	if writeRes.Error != "" {
+		logJSON("warn", "self improvement write failed", map[string]interface{}{"agent": agentName, "path": soulRelPath, "error": writeRes.Error})
+		return
+	}
+
+	branch := fmt.Sprintf("%s/self-improvement-%s", agentName, now.Format("20060102-150405"))
+	commitMsg := fmt.Sprintf("soul: %s learned %s", agentName, shortDescription)
+	commitRes := executeRegistryTool(reg, "git-commit", map[string]interface{}{
+		"repo":    repoDir,
+		"message": commitMsg,
+		"branch":  branch,
+	})
+	if commitRes.Error != "" {
+		logJSON("warn", "self improvement commit failed", map[string]interface{}{"agent": agentName, "error": commitRes.Error})
+		return
+	}
+
+	failures := failureTextsByTool[triggerTool]
+	if len(failures) > 5 {
+		failures = failures[:5]
+	}
+	prBody := "Triggered by repeated recent failures:\n\n- " + strings.Join(failures, "\n- ")
+	if recoveryHint != "" {
+		prBody += "\n\nRecovery observed:\n- " + recoveryHint
+	}
+	prRes := executeRegistryTool(reg, "gitea", map[string]interface{}{
+		"action": "create-pr",
+		"repo":   repoSlug,
+		"title":  fmt.Sprintf("soul: %s learned — %s", agentName, shortDescription),
+		"body":   prBody,
+		"head":   branch,
+		"base":   "main",
+	})
+	if prRes.Error != "" {
+		logJSON("warn", "self improvement PR failed", map[string]interface{}{"agent": agentName, "error": prRes.Error})
+		return
+	}
+	logJSON("info", "self improvement PR created", map[string]interface{}{"agent": agentName, "tool": triggerTool, "branch": branch})
+}
+
 func summarizeForCompaction(ctx context.Context, segment []message, inferenceURL, model, apiKey string) (string, error) {
 	var transcript strings.Builder
 	for _, m := range segment {
@@ -2376,6 +2668,13 @@ func main() {
 		if emit == nil {
 			emit = emitNoop
 		}
+		hadToolCalls := false
+		defer func() {
+			if !hadToolCalls {
+				return
+			}
+			go checkSelfImprovementTrigger(*memoryURL, agentName, reg)
+		}()
 
 		sessionsMu.Lock()
 		history := append([]message(nil), sessions[sessionID]...)
@@ -2420,6 +2719,7 @@ func main() {
 			atomic.AddInt64(&toolCalls, 1)
 			atomic.AddInt64(&metricsToolCallsTotal, 1)
 			incToolMetric(tc.Function.Name)
+			hadToolCalls = true
 			args := map[string]interface{}{}
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 				args = map[string]interface{}{"_raw": tc.Function.Arguments}
