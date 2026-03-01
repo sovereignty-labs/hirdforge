@@ -2249,6 +2249,12 @@ func main() {
 					result = t.Execute(args)
 				}
 			}
+			if verifyErr := reg.VerifyResult(tc.Function.Name, args, result); verifyErr != nil {
+				result = toolpkg.ToolResult{
+					Output: result.Output,
+					Error:  "verification failed: " + verifyErr.Error(),
+				}
+			}
 			if result.Error != "" {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error, "output": result.Output})
 			} else {

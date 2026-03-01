@@ -283,6 +283,63 @@ func (t *GiteaAPITool) createPR(owner, repo string, args map[string]interface{})
 	return ToolResult{Output: fmt.Sprintf("created PR #%d: %s\n%s", int(num), title, url)}
 }
 
+func (t *GiteaAPITool) Verify(args map[string]interface{}, result ToolResult) error {
+	if result.Error != "" {
+		return nil
+	}
+
+	action, _ := args["action"].(string)
+	if action != "create-pr" {
+		return nil
+	}
+
+	repoArg, _ := args["repo"].(string)
+	if repoArg == "" {
+		return fmt.Errorf("gitea verification failed: repo is required")
+	}
+	title, _ := args["title"].(string)
+	head, _ := args["head"].(string)
+	base, _ := args["base"].(string)
+	if base == "" {
+		base = "main"
+	}
+
+	owner, repo := t.parseRepo(repoArg)
+	resp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/pulls?state=open&limit=1&sort=newest", owner, repo), nil)
+	if err != nil {
+		return fmt.Errorf("gitea verification failed: %w", err)
+	}
+	if status >= 400 {
+		return fmt.Errorf("gitea verification failed: HTTP %d: %s", status, string(resp))
+	}
+
+	var pulls []map[string]interface{}
+	if err := json.Unmarshal(resp, &pulls); err != nil {
+		return fmt.Errorf("gitea verification failed: decode response: %w", err)
+	}
+	if len(pulls) == 0 {
+		return fmt.Errorf("gitea verification failed: no open pull requests found after create-pr")
+	}
+
+	pr := pulls[0]
+	gotTitle, _ := pr["title"].(string)
+	if title != "" && gotTitle != title {
+		return fmt.Errorf("gitea verification failed: newest PR title mismatch: got %q", gotTitle)
+	}
+	if headRef, ok := pr["head"].(map[string]interface{}); ok {
+		if gotHead, _ := headRef["ref"].(string); head != "" && gotHead != head {
+			return fmt.Errorf("gitea verification failed: newest PR head mismatch: got %q", gotHead)
+		}
+	}
+	if baseRef, ok := pr["base"].(map[string]interface{}); ok {
+		if gotBase, _ := baseRef["ref"].(string); gotBase != base {
+			return fmt.Errorf("gitea verification failed: newest PR base mismatch: got %q", gotBase)
+		}
+	}
+
+	return nil
+}
+
 func (t *GiteaAPITool) extractNumber(v interface{}) int {
 	switch n := v.(type) {
 	case float64:
