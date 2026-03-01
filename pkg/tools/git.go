@@ -80,6 +80,10 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Output: fmt.Sprintf("updated %s in %s", repo, repoDir)}
 	}
 
+	if err := os.RemoveAll(repoDir); err != nil {
+		return ToolResult{Error: fmt.Sprintf("failed to clean workspace directory %s: %s", repoDir, err)}
+	}
+
 	cloneURL := t.buildURL(repo)
 	cmdArgs := []string{"git", "clone"}
 	if branch != "" {
