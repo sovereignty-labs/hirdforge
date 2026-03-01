@@ -932,6 +932,9 @@ func convertMessagesForResponses(msgs []message) []interface{} {
 	return out
 }
 
+// useResponsesAPI currently only matches model names that contain "codex".
+// That means models such as "o3" or "o4-mini" still bypass this logic even though
+// they should also use the Responses API.
 func useResponsesAPI(model string) bool {
 	return strings.Contains(strings.ToLower(model), "codex")
 }
