@@ -1479,12 +1479,12 @@ func dropOldestHistoryPairs(history []message, maxPairs int) []message {
 	return append([]message(nil), trimmed[1:]...)
 }
 
-func buildSessionBootstrapContext(memoryURL, agentName, toolsFile, playbookFile string, persona *personaRepo) string {
+func buildSessionBootstrapContext(memoryURL, agentName, toolsFile, playbookFile, soulContent string, persona *personaRepo) string {
 	var blocks []string
 	if b := fetchRecentMemoryBlocks(memoryURL, agentName); b != "" {
 		blocks = append(blocks, b)
 	}
-	if b := fetchRecentToolLessons(memoryURL, agentName); b != "" {
+	if b := fetchRecentToolLessons(memoryURL, agentName, soulContent); b != "" {
 		blocks = append(blocks, b)
 	}
 	if persona != nil {
@@ -1588,7 +1588,24 @@ func fetchRecentMemoryBlocks(memoryURL, agentName string) string {
 	return strings.Join(blocks, "\n\n")
 }
 
-func fetchRecentToolLessons(memoryURL, agentName string) string {
+func soulHasLearnedTool(soulContent, toolName string) bool {
+	if strings.TrimSpace(soulContent) == "" || strings.TrimSpace(toolName) == "" {
+		return false
+	}
+	needle := strings.ToLower(toolName)
+	for _, line := range strings.Split(soulContent, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "## Learned:") {
+			continue
+		}
+		if strings.Contains(strings.ToLower(line), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchRecentToolLessons(memoryURL, agentName, soulContent string) string {
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" {
 		return ""
 	}
@@ -1648,6 +1665,9 @@ func fetchRecentToolLessons(memoryURL, agentName string) string {
 			continue
 		}
 		if !strings.HasPrefix(text, "[FAILURE:") && !strings.HasPrefix(text, "[RECOVERY:") {
+			continue
+		}
+		if toolName, _, _, ok := parseToolFailureMemory(text); ok && soulHasLearnedTool(soulContent, toolName) {
 			continue
 		}
 		entryLen := len(text)
@@ -2704,7 +2724,7 @@ func main() {
 					logJSON("warn", "persona repo refresh failed", map[string]interface{}{"error": err.Error()})
 				}
 			}
-			bootstrapContext = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, persona)
+			bootstrapContext = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, soul, persona)
 		}
 		systemContent := soul
 		if strings.TrimSpace(bootstrapContext) != "" {
