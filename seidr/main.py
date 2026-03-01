@@ -6,6 +6,7 @@ No GPU required. Deploys on any Kubernetes cluster.
 import asyncio
 import os
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
@@ -20,6 +21,8 @@ CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 COLLECTION = os.getenv("COLLECTION_NAME", "valhalla_knowledge")
 MEMORY_TTL_HOURS = int(os.getenv("MEMORY_TTL_HOURS", "240"))
 MEMORY_TYPES = {"general", "failure", "recovery", "lesson", "fact", "observation"}
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "default")
+EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
 
 # --- Models ---
 class QueryRequest(BaseModel):
@@ -40,24 +43,79 @@ class RememberRequest(BaseModel):
 class IngestRequest(BaseModel):
     path: str = "/docs"
 
+class MigrateRequest(BaseModel):
+    delete_source: bool = False
+
+class ConsolidateRequest(BaseModel):
+    agent: str
+
 # --- App ---
 app = FastAPI(title="Seidr", description="Valhalla Knowledge Service")
 
 # ChromaDB's built-in embedding: all-MiniLM-L6-v2, CPU, ~80MB, auto-downloads
-embed_fn = embedding_functions.DefaultEmbeddingFunction()
+if EMBEDDING_MODEL != "default":
+    embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name=EMBEDDING_MODEL,
+        device=EMBEDDING_DEVICE,
+    )
+else:
+    embed_fn = embedding_functions.DefaultEmbeddingFunction()
 chroma_client = None
-collection = None
+collection_cache = {}
 
-def get_collection():
-    global chroma_client, collection
-    if collection is None:
+def get_client():
+    global chroma_client
+    if chroma_client is None:
         chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
-        collection = chroma_client.get_or_create_collection(
-            name=COLLECTION,
+    return chroma_client
+
+def collection_name_for_agent(agent: Optional[str]) -> str:
+    if not agent:
+        return COLLECTION
+    return f"{COLLECTION}_{agent}"
+
+def get_named_collection(name: str):
+    if name not in collection_cache:
+        collection_cache[name] = get_client().get_or_create_collection(
+            name=name,
             embedding_function=embed_fn,
             metadata={"hnsw:space": "cosine"}
         )
-    return collection
+    return collection_cache[name]
+
+def get_collection(agent: Optional[str] = None):
+    return get_named_collection(collection_name_for_agent(agent))
+
+def list_agent_collections() -> list[str]:
+    prefix = f"{COLLECTION}_"
+    names = set(collection_cache.keys())
+    try:
+        for item in get_client().list_collections():
+            if isinstance(item, str):
+                name = item
+            else:
+                name = getattr(item, "name", "")
+            if name.startswith(prefix):
+                names.add(name)
+    except Exception:
+        pass
+    return sorted(name for name in names if name.startswith(prefix))
+
+def list_all_collection_names() -> list[str]:
+    names = set(list_agent_collections())
+    try:
+        for item in get_client().list_collections():
+            if isinstance(item, str):
+                name = item
+            else:
+                name = getattr(item, "name", "")
+            if name == COLLECTION:
+                names.add(name)
+    except Exception:
+        pass
+    if COLLECTION in collection_cache:
+        names.add(COLLECTION)
+    return sorted(names)
 
 # --- BM25 Hybrid Search ---
 def bm25_search(query: str, documents: list[dict], k: int = 10) -> list[int]:
@@ -76,15 +134,10 @@ def bm25_search(query: str, documents: list[dict], k: int = 10) -> list[int]:
 
 def hybrid_search(query: str, limit: int = 5, agent: str = None, where: dict = None):
     """Combine vector similarity + BM25 keyword search."""
-    col = get_collection()
+    col = get_collection(agent)
 
     # Build filter
     search_where = where.copy() if where else None
-    if agent:
-        if search_where is None:
-            search_where = {"agent": agent}
-        else:
-            search_where["agent"] = agent
 
     # Vector search
     results = col.query(
@@ -142,16 +195,23 @@ def resolve_memory_type(req: RememberRequest) -> str:
     return req.type
 
 
-def prune_expired_memories() -> dict:
-    col = get_collection()
+def iter_collection_entries(col):
+    total = col.count()
+    if total == 0:
+        return []
+    results = col.get(limit=total, include=["documents", "metadatas"])
+    return list(zip(results.get("ids", []), results.get("documents", []), results.get("metadatas", [])))
+
+
+def prune_collection(name: str) -> dict:
+    col = get_named_collection(name)
     total = col.count()
     if total == 0:
         return {"pruned": 0, "remaining": 0}
 
-    results = col.get(limit=total, include=["metadatas"])
     cutoff = utcnow() - timedelta(hours=MEMORY_TTL_HOURS)
     pruned = 0
-    for doc_id, meta in zip(results.get("ids", []), results.get("metadatas", [])):
+    for doc_id, _, meta in iter_collection_entries(col):
         meta = meta or {}
         if meta.get("type") == "lesson":
             continue
@@ -169,14 +229,129 @@ def prune_expired_memories() -> dict:
     return {"pruned": pruned, "remaining": col.count()}
 
 
+def prune_expired_memories() -> dict:
+    pruned = 0
+    remaining = 0
+    for name in list_all_collection_names():
+        stats = prune_collection(name)
+        pruned += stats["pruned"]
+        remaining += stats["remaining"]
+    return {"pruned": pruned, "remaining": remaining}
+
+
+def split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    return [part.strip() for part in parts if part.strip()]
+
+
+def merge_cluster_documents(documents: list[str]) -> str:
+    seen = set()
+    merged = []
+    for document in documents:
+        for sentence in split_sentences(document):
+            if sentence not in seen:
+                seen.add(sentence)
+                merged.append(sentence)
+    if merged:
+        return " ".join(merged)
+    return "\n".join(dict.fromkeys(documents))
+
+
+def consolidate_agent_memories(agent: str) -> dict:
+    col = get_collection(agent)
+    entries = iter_collection_entries(col)
+    if not entries:
+        return {"agent": agent, "consolidated": 0, "remaining": 0}
+
+    by_type = {}
+    for doc_id, document, meta in entries:
+        meta = meta or {}
+        mem_type = meta.get("type", "general")
+        by_type.setdefault(mem_type, []).append((doc_id, document, meta))
+
+    consolidated = 0
+    for mem_type, items in by_type.items():
+        if len(items) < 3:
+            continue
+        parent = list(range(len(items)))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        for idx, (_, document, _) in enumerate(items):
+            results = col.query(
+                query_texts=[document],
+                n_results=len(items),
+                where={"type": mem_type},
+                include=["distances"],
+            )
+            ids = results.get("ids", [[]])[0]
+            distances = results.get("distances", [[]])[0]
+            id_to_idx = {item_id: i for i, (item_id, _, _) in enumerate(items)}
+            for match_id, distance in zip(ids, distances):
+                if match_id not in id_to_idx or match_id == items[idx][0]:
+                    continue
+                if distance < 0.15:
+                    union(idx, id_to_idx[match_id])
+
+        clusters = {}
+        for idx in range(len(items)):
+            clusters.setdefault(find(idx), []).append(idx)
+
+        for cluster_indices in clusters.values():
+            if len(cluster_indices) < 3:
+                continue
+            cluster_items = [items[i] for i in cluster_indices]
+            merged_content = merge_cluster_documents([doc for _, doc, _ in cluster_items])
+            timestamps = [
+                parse_timestamp((meta or {}).get("timestamp", ""))
+                for _, _, meta in cluster_items
+            ]
+            latest_idx = max(
+                range(len(cluster_items)),
+                key=lambda i: timestamps[i] or datetime.min.replace(tzinfo=timezone.utc),
+            )
+            latest_meta = dict(cluster_items[latest_idx][2] or {})
+            latest_meta["timestamp"] = (
+                timestamps[latest_idx] or utcnow()
+            ).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            latest_meta["consolidated_from"] = len(cluster_items)
+            tag_values = []
+            for _, _, meta in cluster_items:
+                tags = (meta or {}).get("tags", "")
+                if tags:
+                    tag_values.extend(tag.strip() for tag in tags.split(",") if tag.strip())
+            latest_meta["tags"] = ",".join(dict.fromkeys(tag_values))
+
+            old_ids = [doc_id for doc_id, _, _ in cluster_items]
+            new_id = f"{agent}-{int(time.time())}-consolidated-{os.urandom(4).hex()}"
+            col.delete(ids=old_ids)
+            col.add(documents=[merged_content], metadatas=[latest_meta], ids=[new_id])
+            consolidated += 1
+
+    return {"agent": agent, "consolidated": consolidated, "remaining": col.count()}
+
+
 # --- Endpoints ---
 
 @app.on_event("startup")
 async def startup_prune_task():
+    log("info", "embedding config", {"model": EMBEDDING_MODEL, "device": EMBEDDING_DEVICE})
     async def prune_loop():
         while True:
             try:
                 prune_expired_memories()
+                for name in list_agent_collections():
+                    agent = name[len(f"{COLLECTION}_"):]
+                    consolidate_agent_memories(agent)
             except Exception as e:
                 log("error", "memory prune failed", {"error": str(e)})
             await asyncio.sleep(6 * 60 * 60)
@@ -185,9 +360,8 @@ async def startup_prune_task():
 @app.get("/health")
 async def health():
     try:
-        col = get_collection()
-        count = col.count()
-        return {"status": "ok", "memories": count, "collection": COLLECTION}
+        count = sum(get_named_collection(name).count() for name in list_all_collection_names())
+        return {"status": "ok", "memories": count, "collections": list_all_collection_names()}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -206,12 +380,11 @@ async def query(req: QueryRequest):
 @app.post("/remember")
 async def remember(req: RememberRequest):
     """Store a new memory. Called by agent remember tool."""
-    col = get_collection()
+    col = get_collection(req.agent)
     memory_type = resolve_memory_type(req)
     duplicate_results = col.query(
         query_texts=[req.content],
         n_results=3,
-        where={"agent": req.agent},
         include=["metadatas", "distances"],
     )
     if duplicate_results.get("distances") and duplicate_results["distances"][0]:
@@ -245,44 +418,68 @@ async def remember(req: RememberRequest):
 @app.get("/memories")
 async def list_memories(agent: str = None, limit: int = 100, type: str = None):
     """List stored memories, optionally filtered by agent."""
-    col = get_collection()
-    where = {}
-    if agent:
-        where["agent"] = agent
-    if type:
-        where["type"] = type
-    if not where:
-        where = None
-    results = col.get(where=where, limit=limit, include=["documents", "metadatas"])
     memories = []
-    for doc, meta, doc_id in zip(results["documents"], results["metadatas"], results["ids"]):
-        memories.append({
-            "id": doc_id,
-            "content": doc,
-            "agent": meta.get("agent", ""),
-            "source": meta.get("source", ""),
-            "timestamp": meta.get("timestamp", ""),
-            "type": meta.get("type", "general"),
-            "tags": meta.get("tags", "").split(",") if meta.get("tags") else [],
-        })
+    names = [collection_name_for_agent(agent)] if agent else list_all_collection_names()
+    for name in names:
+        col = get_named_collection(name)
+        where = {"type": type} if type else None
+        results = col.get(where=where, limit=limit, include=["documents", "metadatas"])
+        for doc, meta, doc_id in zip(results["documents"], results["metadatas"], results["ids"]):
+            meta = meta or {}
+            memories.append({
+                "id": doc_id,
+                "content": doc,
+                "agent": meta.get("agent", ""),
+                "source": meta.get("source", ""),
+                "timestamp": meta.get("timestamp", ""),
+                "type": meta.get("type", "general"),
+                "tags": meta.get("tags", "").split(",") if meta.get("tags") else [],
+            })
+    memories.sort(key=lambda x: x["timestamp"], reverse=True)
+    memories = memories[:limit]
     return {"memories": memories, "count": len(memories)}
 
 @app.post("/prune")
 async def prune():
     return prune_expired_memories()
 
+@app.post("/migrate")
+async def migrate(req: MigrateRequest):
+    legacy_name = COLLECTION
+    legacy = get_named_collection(legacy_name)
+    if legacy.count() == 0:
+        return {"migrated": 0, "deleted": 0, "source": legacy_name}
+    migrated = 0
+    deleted = 0
+    entries = iter_collection_entries(legacy)
+    for doc_id, document, meta in entries:
+        meta = meta or {}
+        agent = meta.get("agent")
+        if not agent:
+            continue
+        get_collection(agent).upsert(documents=[document], metadatas=[meta], ids=[doc_id])
+        migrated += 1
+    if req.delete_source and entries:
+        legacy.delete(ids=[doc_id for doc_id, _, _ in entries])
+        deleted = len(entries)
+    return {"migrated": migrated, "deleted": deleted, "source": legacy_name}
+
+@app.post("/consolidate")
+async def consolidate(req: ConsolidateRequest):
+    return consolidate_agent_memories(req.agent)
+
 @app.delete("/memories/{memory_id}")
 async def delete_memory(memory_id: str):
     """Delete a specific memory."""
-    col = get_collection()
-    col.delete(ids=[memory_id])
+    for name in list_all_collection_names():
+        get_named_collection(name).delete(ids=[memory_id])
     return {"deleted": memory_id}
 
 @app.post("/ingest")
 async def ingest(req: IngestRequest):
     """Ingest markdown files from a directory into the knowledge base."""
     import glob
-    col = get_collection()
+    col = get_collection("ingest")
     files = glob.glob(os.path.join(req.path, "**/*.md"), recursive=True)
     total = 0
     for filepath in files:
