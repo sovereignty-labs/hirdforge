@@ -1481,6 +1481,9 @@ func buildSessionBootstrapContext(memoryURL, agentName, toolsFile, playbookFile 
 	if b := fetchRecentMemoryBlocks(memoryURL, agentName); b != "" {
 		blocks = append(blocks, b)
 	}
+	if b := fetchRecentToolLessons(memoryURL, agentName); b != "" {
+		blocks = append(blocks, b)
+	}
 	if persona != nil {
 		if b := loadPersonaSessionContext(persona); b != "" {
 			blocks = append(blocks, b)
@@ -1580,6 +1583,86 @@ func fetchRecentMemoryBlocks(memoryURL, agentName string) string {
 		blocks = append(blocks, b)
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+func fetchRecentToolLessons(memoryURL, agentName string) string {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" {
+		return ""
+	}
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"agent": agentName,
+		"query": "tool_failure",
+		"top_k": 5,
+	})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/api/v1/recall", bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+
+	var out struct {
+		Results []struct {
+			Content string `json:"content"`
+			Text    string `json:"text"`
+		} `json:"results"`
+		Memories []struct {
+			Content string `json:"content"`
+			Text    string `json:"text"`
+		} `json:"memories"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ""
+	}
+
+	rawItems := out.Results
+	if len(rawItems) == 0 {
+		rawItems = out.Memories
+	}
+	if len(rawItems) == 0 {
+		return ""
+	}
+
+	const maxLessonChars = 2000
+	lessons := make([]string, 0, len(rawItems))
+	totalChars := 0
+	for _, item := range rawItems {
+		text := strings.TrimSpace(item.Content)
+		if text == "" {
+			text = strings.TrimSpace(item.Text)
+		}
+		if text == "" {
+			continue
+		}
+		if !strings.HasPrefix(text, "[FAILURE:") && !strings.HasPrefix(text, "[RECOVERY:") {
+			continue
+		}
+		entryLen := len(text)
+		if len(lessons) > 0 {
+			entryLen++
+		}
+		if totalChars+entryLen > maxLessonChars {
+			break
+		}
+		lessons = append(lessons, text)
+		totalChars += entryLen
+	}
+	if len(lessons) == 0 {
+		return ""
+	}
+
+	return "## Recent Tool Lessons\nThe following are recent tool failures and recoveries from your past sessions. Use these to avoid repeating mistakes:\n<lessons>\n" +
+		strings.Join(lessons, "\n") + "\n</lessons>"
 }
 
 func summarizeForCompaction(ctx context.Context, segment []message, inferenceURL, model, apiKey string) (string, error) {
