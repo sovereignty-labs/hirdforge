@@ -69,10 +69,19 @@ def get_client():
         chroma_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
     return chroma_client
 
+def sanitize_agent_name(agent: str) -> str:
+    agent = (agent or "").lower()
+    agent = re.sub(r"[^a-z0-9]+", "_", agent)
+    agent = re.sub(r"_+", "_", agent).strip("_")
+    agent = agent[:50]
+    if len(agent) < 3:
+        agent = agent.ljust(3, "_")
+    return agent
+
 def collection_name_for_agent(agent: Optional[str]) -> str:
     if not agent:
         return COLLECTION
-    return f"{COLLECTION}_{agent}"
+    return f"{COLLECTION}_{sanitize_agent_name(agent)}"
 
 def get_named_collection(name: str):
     if name not in collection_cache:
