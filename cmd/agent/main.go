@@ -1613,9 +1613,9 @@ func fetchRecentToolLessons(memoryURL, agentName, soulContent string) string {
 	body, _ := json.Marshal(map[string]interface{}{
 		"agent": agentName,
 		"query": "tool_failure",
-		"top_k": 5,
+		"limit": 5,
 	})
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/api/v1/recall", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
 	if err != nil {
 		return ""
 	}
@@ -1698,7 +1698,7 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 		return nil
 	}
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/api/v1/recall", bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
 	if err != nil {
 		return nil
 	}
@@ -1856,7 +1856,7 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 	memories := recallMemories(memoryURL, map[string]interface{}{
 		"agent": agentName,
 		"query": "tool_failure retry_exhausted",
-		"top_k": 20,
+		"limit": 20,
 	}, 3*time.Second)
 	if len(memories) == 0 {
 		return
