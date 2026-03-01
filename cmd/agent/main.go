@@ -353,6 +353,7 @@ var (
 	metricsRequestsTotal      int64
 	metricsToolCallsTotal     int64
 	metricsErrorsTotal        int64
+	metricsStallsTotal        int64
 	metricsActiveRequests     int64
 	metricsLastRequestDurBits uint64
 	toolMetricMu              sync.Mutex
@@ -2483,6 +2484,9 @@ func metricsText() string {
 	b.WriteString("# HELP valhalla_agent_errors_total Total errors\n")
 	b.WriteString("# TYPE valhalla_agent_errors_total counter\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_errors_total %d\n", atomic.LoadInt64(&metricsErrorsTotal)))
+	b.WriteString("# HELP valhalla_agent_stalls_total Total inference stalls detected\n")
+	b.WriteString("# TYPE valhalla_agent_stalls_total counter\n")
+	b.WriteString(fmt.Sprintf("valhalla_agent_stalls_total %d\n", atomic.LoadInt64(&metricsStallsTotal)))
 	b.WriteString("# HELP valhalla_agent_uptime_seconds Agent uptime in seconds\n")
 	b.WriteString("# TYPE valhalla_agent_uptime_seconds gauge\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_uptime_seconds %d\n", int(time.Since(startTime).Seconds())))
@@ -2515,6 +2519,7 @@ func main() {
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
 	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
+	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for /webhook/gitea")
 	mcpServers := flag.String("mcp-servers", "", "Comma-separated MCP server URLs")
@@ -2668,6 +2673,9 @@ func main() {
 		if emit == nil {
 			emit = emitNoop
 		}
+		withInferenceTimeout := func(parent context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(parent, time.Duration(*inferenceTimeout)*time.Second)
+		}
 		hadToolCalls := false
 		defer func() {
 			if !hadToolCalls {
@@ -2812,7 +2820,9 @@ func main() {
 		}
 
 		for i := 0; i < 10; i++ {
-			resp, err := callOllamaNonStreamingWithContext(ctx, messages, toolDefs, *inferenceURL, *model, *apiKey)
+			inferenceCtx, cancel := withInferenceTimeout(ctx)
+			resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, toolDefs, *inferenceURL, *model, *apiKey)
+			cancel()
 			if err != nil {
 				return "", err
 			}
@@ -2839,19 +2849,23 @@ func main() {
 
 		var full strings.Builder
 		hadXMLToolCalls := false
+		streamIterationHadToolCalls := false
 		var xmlToolResults []string
 		insideThink := false
-		for evt := range streamOllamaWithContext(ctx, messages, nil, *inferenceURL, *model, *apiKey) {
+		streamCtx, cancelStream := withInferenceTimeout(ctx)
+		for evt := range streamOllamaWithContext(streamCtx, messages, nil, *inferenceURL, *model, *apiKey) {
 			if evt.Err != nil {
 				errText := evt.Err.Error()
 				full.WriteString(errText)
 				if !emit(sseChunk{Type: "content", Content: errText, Done: false}) {
+					cancelStream()
 					return full.String(), context.Canceled
 				}
 				break
 			}
 			if len(evt.ToolCalls) > 0 {
 				hadXMLToolCalls = true
+				streamIterationHadToolCalls = true
 				for _, tc := range evt.ToolCalls {
 					result := executeOneToolCall(tc)
 					out := result.Output
@@ -2910,10 +2924,17 @@ func main() {
 			}
 			full.WriteString(cleanedChunk)
 			if !emit(sseChunk{Type: "content", Content: cleanedChunk, Done: false}) {
+				cancelStream()
 				return full.String(), context.Canceled
 			}
 		}
+		cancelStream()
 		finalContent := full.String()
+		if strings.TrimSpace(finalContent) == "" && !streamIterationHadToolCalls {
+			log.Printf("[STALL] agent=%s model=%s session=%s — no output produced", agentName, *model, sessionID)
+			atomic.AddInt64(&metricsStallsTotal, 1)
+			rememberToolFailure(*memoryURL, agentName, sessionID, "inference", map[string]interface{}{}, toolpkg.ToolResult{Error: "no output produced"}, "stall")
+		}
 		if strings.Contains(finalContent, "<minimax:tool_call>") {
 			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
 				result := executeOneToolCall(tc)
@@ -2944,7 +2965,9 @@ func main() {
 			resultMsg := "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
 			messages = append(messages, message{Role: "user", Content: resultMsg})
 			for i := 0; i < 3; i++ {
-				resp, err := callOllamaNonStreamingWithContext(ctx, messages, toolDefs, *inferenceURL, *model, *apiKey)
+				inferenceCtx, cancel := withInferenceTimeout(ctx)
+				resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, toolDefs, *inferenceURL, *model, *apiKey)
+				cancel()
 				if err != nil {
 					return cleaned, err
 				}
