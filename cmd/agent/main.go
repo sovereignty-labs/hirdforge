@@ -1889,6 +1889,102 @@ func maybeRememberAction(memoryURL, agentName, sessionID, toolName string, args 
 	}()
 }
 
+func summarizeToolFailureArgs(args map[string]interface{}) string {
+	parts := make([]string, 0, 3)
+	if repo, ok := args["repo"]; ok {
+		parts = append(parts, fmt.Sprintf("repo=%v", repo))
+	}
+	if cmd, ok := args["command"]; ok {
+		cmdStr := fmt.Sprintf("%v", cmd)
+		if len(cmdStr) > 100 {
+			cmdStr = cmdStr[:100] + "..."
+		}
+		parts = append(parts, fmt.Sprintf("cmd=%s", cmdStr))
+	}
+	if path, ok := args["path"]; ok {
+		parts = append(parts, fmt.Sprintf("path=%v", path))
+	}
+	return strings.Join(parts, " ")
+}
+
+func rememberToolFailure(memoryURL, agentName, sessionID, toolName string, args map[string]interface{}, result toolpkg.ToolResult, failureType string) {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || strings.TrimSpace(result.Error) == "" {
+		return
+	}
+	argSummary := summarizeToolFailureArgs(args)
+	memory := fmt.Sprintf("[FAILURE:%s] tool=%s", failureType, toolName)
+	if argSummary != "" {
+		memory += " " + argSummary
+	}
+	memory += fmt.Sprintf(" error=%s", result.Error)
+	if len(memory) > 600 {
+		memory = memory[:600] + "..."
+	}
+	go func() {
+		payload := map[string]interface{}{
+			"agent":      agentName,
+			"collection": fmt.Sprintf("%s-memory", agentName),
+			"content":    memory,
+			"metadata": map[string]string{
+				"type":    "tool_failure",
+				"tool":    toolName,
+				"failure": failureType,
+				"session": sessionID,
+			},
+		}
+		body, _ := json.Marshal(payload)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		_ = resp.Body.Close()
+	}()
+}
+
+func rememberToolRecovery(memoryURL, agentName, sessionID, toolName string, args map[string]interface{}, attempt int) {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || attempt <= 1 {
+		return
+	}
+	argSummary := summarizeToolFailureArgs(args)
+	memory := fmt.Sprintf("[RECOVERY] tool=%s", toolName)
+	if argSummary != "" {
+		memory += " " + argSummary
+	}
+	memory += fmt.Sprintf(" recovered_on_attempt=%d", attempt)
+	go func() {
+		payload := map[string]interface{}{
+			"agent":      agentName,
+			"collection": fmt.Sprintf("%s-memory", agentName),
+			"content":    memory,
+			"metadata": map[string]string{
+				"type":    "tool_recovery",
+				"tool":    toolName,
+				"session": sessionID,
+			},
+		}
+		body, _ := json.Marshal(payload)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		_ = resp.Body.Close()
+	}()
+}
+
 func validateGiteaHMAC(secret string, body []byte, provided string) bool {
 	secret = strings.TrimSpace(secret)
 	provided = strings.TrimSpace(provided)
@@ -2272,15 +2368,24 @@ func main() {
 			}
 
 			result := runToolAttempt()
+			firstAttemptVerificationFailed := strings.HasPrefix(result.Error, "verification failed: ")
+			if firstAttemptVerificationFailed {
+				rememberToolFailure(*memoryURL, agentName, sessionID, tc.Function.Name, args, result, "verification_failed")
+			}
 			if result.Error != "" && *maxToolRetries > 0 && shouldRetryTool(tc.Function.Name) {
 				for attempt := 1; attempt <= *maxToolRetries; attempt++ {
 					log.Printf("[RETRY] tool=%s attempt=%d err=%s", tc.Function.Name, attempt, result.Error)
 					time.Sleep(2 * time.Second)
 					result = runToolAttempt()
 					if result.Error == "" {
+						log.Printf("[RECOVERY] tool=%s recovered on attempt=%d", tc.Function.Name, attempt+1)
+						rememberToolRecovery(*memoryURL, agentName, sessionID, tc.Function.Name, args, attempt+1)
 						break
 					}
 				}
+			}
+			if result.Error != "" {
+				rememberToolFailure(*memoryURL, agentName, sessionID, tc.Function.Name, args, result, "retry_exhausted")
 			}
 			if result.Error != "" {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error, "output": result.Output})
