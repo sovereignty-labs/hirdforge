@@ -30,6 +30,7 @@ class QueryRequest(BaseModel):
     agent: Optional[str] = None
     limit: int = 5
     type: Optional[Literal["general", "failure", "recovery", "lesson", "fact", "observation"]] = None
+    filter: Optional[dict] = None
     where: Optional[dict] = None
 
 class RememberRequest(BaseModel):
@@ -377,12 +378,13 @@ async def health():
 @app.post("/query")
 async def query(req: QueryRequest):
     """Search knowledge base. Called by agent recall tool."""
-    where = req.where.copy() if req.where else None
+    where = req.where.copy() if req.where else {}
+    if req.filter:
+        where.update(req.filter)
     if req.type:
-        if where is None:
-            where = {"type": req.type}
-        else:
-            where["type"] = req.type
+        where["type"] = req.type
+    if not where:
+        where = None
     results = hybrid_search(req.query, limit=req.limit, agent=req.agent, where=where)
     return {"results": results, "count": len(results)}
 
