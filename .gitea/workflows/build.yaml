@@ -41,6 +41,22 @@ jobs:
           docker build --no-cache -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
           docker push $REGISTRY/valhalla-gateway:latest
           docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+  build-seidr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-seidr && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-seidr
+      - name: Build and push seidr
+        run: |
+          cd /src-seidr
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          docker build --no-cache -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
+          docker push $REGISTRY/valhalla-seidr:latest
+          docker push $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
   build-lockbox:
     runs-on: ubuntu-latest
     steps:
@@ -61,7 +77,7 @@ jobs:
           fi
   update-infra:
     runs-on: ubuntu-latest
-    needs: [build-agent, build-gateway, build-lockbox]
+    needs: [build-agent, build-gateway, build-seidr, build-lockbox]
     steps:
       - name: Install tools
         run: apk add --no-cache curl
@@ -78,6 +94,7 @@ jobs:
           # Use regex to match any existing tag (e.g., :latest, :sha-xxx)
           sed -Ei "s|valhalla-agent:[a-zA-Z0-9_-]+|valhalla-agent:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/deployment-freya.yaml infrastructure/valhalla/deployment-leif.yaml infrastructure/valhalla/deployment-sindri.yaml
           sed -Ei "s|valhalla-gateway:[a-zA-Z0-9_-]+|valhalla-gateway:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-gateway.yaml
+          sed -Ei "s|valhalla-seidr:[a-zA-Z0-9_-]+|valhalla-seidr:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-seidr.yaml
           git config user.name "CI Bot" && git config user.email "ci@valhalla.local"
           BRANCH_NAME="ci/update-images-$SHA_SHORT"
           git checkout -b $BRANCH_NAME
