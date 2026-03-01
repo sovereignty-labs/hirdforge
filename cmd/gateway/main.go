@@ -61,6 +61,15 @@ type taskSocketEvent struct {
 	Timestamp   string `json:"timestamp"`
 }
 
+type Notification struct {
+	From      string `json:"from"`
+	TaskID    string `json:"task_id"`
+	Agent     string `json:"agent"`
+	State     string `json:"state"`
+	Result    string `json:"result"`
+	Timestamp string `json:"timestamp"`
+}
+
 type PodInfo struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
@@ -204,6 +213,9 @@ type gateway struct {
 	wsConns        []*wsClient
 	sessionStore   *sessionStore
 	settings       *settingsStore
+	notifMu        sync.Mutex
+	notifications  []Notification
+	notifCap       int
 	lastSessionMu  sync.RWMutex
 	lastSession    map[string]string
 	arMu           sync.RWMutex
@@ -541,6 +553,28 @@ func (g *gateway) eventsNewest() []Event {
 	out := make([]Event, len(g.events))
 	for i := range g.events {
 		out[i] = g.events[len(g.events)-1-i]
+	}
+	return out
+}
+
+func (g *gateway) addNotification(n Notification) {
+	g.notifMu.Lock()
+	if len(g.notifications) == g.notifCap {
+		copy(g.notifications, g.notifications[1:])
+		g.notifications[len(g.notifications)-1] = n
+	} else {
+		g.notifications = append(g.notifications, n)
+	}
+	g.notifMu.Unlock()
+	g.broadcastPayload(n)
+}
+
+func (g *gateway) notificationsNewest() []Notification {
+	g.notifMu.Lock()
+	defer g.notifMu.Unlock()
+	out := make([]Notification, len(g.notifications))
+	for i := range g.notifications {
+		out[i] = g.notifications[len(g.notifications)-1-i]
 	}
 	return out
 }
@@ -1314,6 +1348,8 @@ func main() {
 		k8s:            initK8s(),
 		sessionStore:   newSessionStore(),
 		settings:       newSettingsStore(),
+		notifications:  make([]Notification, 0, 100),
+		notifCap:       100,
 		lastSession:    map[string]string{},
 		activeRequests: map[string]*ActiveRequest{},
 	}
@@ -1639,6 +1675,38 @@ func main() {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/api/v1/notify", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var in Notification
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		in.From = strings.TrimSpace(in.From)
+		in.TaskID = strings.TrimSpace(in.TaskID)
+		in.Agent = strings.TrimSpace(in.Agent)
+		in.State = strings.TrimSpace(in.State)
+		in.Result = strings.TrimSpace(in.Result)
+		if in.From == "" || in.TaskID == "" || in.Agent == "" || in.State == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "from, task_id, agent, and state are required"})
+			return
+		}
+		if strings.TrimSpace(in.Timestamp) == "" {
+			in.Timestamp = time.Now().UTC().Format(time.RFC3339)
+		}
+		gw.addNotification(in)
+		writeJSON(w, http.StatusOK, in)
+	})
+	mux.HandleFunc("/api/v1/notifications", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, gw.notificationsNewest())
 	})
 	mux.HandleFunc("/api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
