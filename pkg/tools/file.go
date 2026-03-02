@@ -17,6 +17,12 @@ func resolvePath(workDir, relPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Strip leading workspace dir name if agent accidentally included it
+	// e.g. "workspace/repo/file" when workDir is "/workspace" -> "repo/file"
+	base := filepath.Base(absWorkDir)
+	if strings.HasPrefix(relPath, base+"/") {
+		relPath = strings.TrimPrefix(relPath, base+"/")
+	}
 	absPath, err := filepath.Abs(filepath.Join(workDir, relPath))
 	if err != nil {
 		return "", err
