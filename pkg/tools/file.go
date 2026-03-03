@@ -2,7 +2,6 @@ package tools
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +17,6 @@ func resolvePath(workDir, relPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[resolvePath] workDir=%q relPath=%q absWorkDir=%q isAbs=%v", workDir, relPath, absWorkDir, filepath.IsAbs(relPath))
 	var absPath string
 	if filepath.IsAbs(relPath) {
 		absPath = filepath.Clean(relPath)
@@ -35,7 +33,6 @@ func resolvePath(workDir, relPath string) (string, error) {
 	if absPath != absWorkDir && !strings.HasPrefix(absPath, absWorkDir+string(os.PathSeparator)) {
 		return "", fmt.Errorf("path escapes workspace")
 	}
-	log.Printf("[resolvePath] returning absPath=%q", absPath)
 	return absPath, nil
 }
 
