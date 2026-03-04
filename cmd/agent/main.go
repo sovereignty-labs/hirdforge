@@ -2695,6 +2695,18 @@ func newTaskID() string {
 	return fmt.Sprintf("task-%08x", rand.Uint32())
 }
 
+func resolveTokenFlagOrFile(flagValue, filePath, envKey string) string {
+	if token := strings.TrimSpace(flagValue); token != "" {
+		return token
+	}
+	if data, err := os.ReadFile(filePath); err == nil {
+		if token := strings.TrimSpace(string(data)); token != "" {
+			return token
+		}
+	}
+	return strings.TrimSpace(os.Getenv(envKey))
+}
+
 func taskNudgeCount(record tasklifepkg.TaskRecord) int {
 	count := 0
 	for _, state := range record.History {
@@ -2874,6 +2886,8 @@ func main() {
 	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
 	soulMaxLines := flag.Int("soul-max-lines", 80, "maximum number of lines allowed in a SOUL file")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
+	giteaTokenFlag := flag.String("gitea-token", "", "Gitea API token (optional; falls back to /vault/secrets/gitea-token)")
+	giteaReviewersTokenFlag := flag.String("gitea-reviewers-token", "", "Gitea reviewers token (optional; falls back to /vault/secrets/gitea-reviewers-token)")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for /webhook/gitea")
 	mcpServers := flag.String("mcp-servers", "", "Comma-separated MCP server URLs")
 	flag.Parse()
@@ -2938,6 +2952,11 @@ func main() {
 	if agentName == "" {
 		agentName = "valhalla-agent"
 	}
+	giteaToken := resolveTokenFlagOrFile(*giteaTokenFlag, "/vault/secrets/gitea-token", "GITEA_TOKEN")
+	giteaReviewersToken := resolveTokenFlagOrFile(*giteaReviewersTokenFlag, "/vault/secrets/gitea-reviewers-token", "GITEA_REVIEWERS_TOKEN")
+	if giteaReviewersToken != "" {
+		_ = os.Setenv("GITEA_REVIEWERS_TOKEN", giteaReviewersToken)
+	}
 	taskStore := taskspkg.NewStore()
 	taskTracker := tasklifepkg.NewTaskTracker()
 	sovereignStates := map[string]bool{}
@@ -2985,7 +3004,6 @@ func main() {
 		reg.Register(toolpkg.NewWriteTool(*workspace))
 	}
 	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] || enabled["gitea"] {
-		giteaToken := os.Getenv("GITEA_TOKEN")
 		if enabled["git-clone"] {
 			reg.Register(toolpkg.NewGitCloneTool(*workspace, *giteaURL, giteaToken))
 		}
