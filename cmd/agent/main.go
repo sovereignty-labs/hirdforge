@@ -280,6 +280,60 @@ type (
 		Description string      `json:"description"`
 		Parameters  interface{} `json:"parameters,omitempty"`
 	}
+	anthropicRequest struct {
+		Model     string             `json:"model"`
+		MaxTokens int                `json:"max_tokens"`
+		System    string             `json:"system,omitempty"`
+		Messages  []anthropicMessage `json:"messages"`
+		Stream    bool               `json:"stream"`
+		Tools     []anthropicTool    `json:"tools,omitempty"`
+	}
+	anthropicMessage struct {
+		Role    string      `json:"role"`
+		Content interface{} `json:"content"`
+	}
+	anthropicContentBlock struct {
+		Type      string      `json:"type"`
+		Text      string      `json:"text,omitempty"`
+		ID        string      `json:"id,omitempty"`
+		Name      string      `json:"name,omitempty"`
+		Input     interface{} `json:"input,omitempty"`
+		ToolUseID string      `json:"tool_use_id,omitempty"`
+		Content   string      `json:"content,omitempty"`
+	}
+	anthropicTool struct {
+		Name        string      `json:"name"`
+		Description string      `json:"description"`
+		InputSchema interface{} `json:"input_schema"`
+	}
+	anthropicResponse struct {
+		Content    []anthropicResponseBlock `json:"content"`
+		StopReason string                   `json:"stop_reason"`
+	}
+	anthropicResponseBlock struct {
+		Type  string          `json:"type"`
+		Text  string          `json:"text,omitempty"`
+		ID    string          `json:"id,omitempty"`
+		Name  string          `json:"name,omitempty"`
+		Input json.RawMessage `json:"input,omitempty"`
+	}
+	anthropicStreamEvent struct {
+		Type         string `json:"type"`
+		Index        int    `json:"index"`
+		ContentBlock *struct {
+			Type  string          `json:"type"`
+			ID    string          `json:"id,omitempty"`
+			Name  string          `json:"name,omitempty"`
+			Text  string          `json:"text,omitempty"`
+			Input json.RawMessage `json:"input,omitempty"`
+		} `json:"content_block,omitempty"`
+		Delta *struct {
+			Type        string `json:"type"`
+			Text        string `json:"text,omitempty"`
+			PartialJSON string `json:"partial_json,omitempty"`
+			StopReason  string `json:"stop_reason,omitempty"`
+		} `json:"delta,omitempty"`
+	}
 	streamChunk struct {
 		Choices []struct {
 			Delta struct {
@@ -1012,6 +1066,80 @@ func convertMessagesForResponses(msgs []message) []interface{} {
 	return out
 }
 
+func convertMessagesForAnthropic(msgs []message) (systemPrompt string, converted []anthropicMessage) {
+	systemParts := []string{}
+	out := make([]anthropicMessage, 0, len(msgs))
+	appendToolResult := func(m message) {
+		block := anthropicContentBlock{
+			Type:      "tool_result",
+			ToolUseID: strings.TrimSpace(m.ToolCallID),
+			Content:   m.Content,
+		}
+		if len(out) > 0 && out[len(out)-1].Role == "user" {
+			if blocks, ok := out[len(out)-1].Content.([]anthropicContentBlock); ok {
+				out[len(out)-1].Content = append(blocks, block)
+				return
+			}
+		}
+		out = append(out, anthropicMessage{
+			Role:    "user",
+			Content: []anthropicContentBlock{block},
+		})
+	}
+
+	for _, m := range msgs {
+		switch m.Role {
+		case "system":
+			if text := strings.TrimSpace(m.Content); text != "" {
+				systemParts = append(systemParts, text)
+			}
+		case "user":
+			out = append(out, anthropicMessage{Role: "user", Content: m.Content})
+		case "assistant":
+			if len(m.ToolCalls) == 0 {
+				out = append(out, anthropicMessage{Role: "assistant", Content: m.Content})
+				continue
+			}
+			blocks := []anthropicContentBlock{}
+			if strings.TrimSpace(m.Content) != "" {
+				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})
+			}
+			for _, tc := range m.ToolCalls {
+				argText := strings.TrimSpace(tc.Function.Arguments)
+				argRaw := json.RawMessage("{}")
+				if argText != "" && json.Valid([]byte(argText)) {
+					argRaw = json.RawMessage(argText)
+				}
+				blocks = append(blocks, anthropicContentBlock{
+					Type:  "tool_use",
+					ID:    tc.ID,
+					Name:  tc.Function.Name,
+					Input: argRaw,
+				})
+			}
+			out = append(out, anthropicMessage{Role: "assistant", Content: blocks})
+		case "tool":
+			appendToolResult(m)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, anthropicMessage{Role: "user", Content: "Hello"})
+	}
+	return strings.Join(systemParts, "\n"), out
+}
+
+func convertToolDefsForAnthropic(defs []toolDef) []anthropicTool {
+	out := make([]anthropicTool, len(defs))
+	for i, d := range defs {
+		out[i] = anthropicTool{
+			Name:        d.Function.Name,
+			Description: d.Function.Description,
+			InputSchema: d.Function.Parameters,
+		}
+	}
+	return out
+}
+
 // useResponsesAPI currently only matches model names that contain "codex".
 // That means models such as "o3" or "o4-mini" still bypass this logic even though
 // they should also use the Responses API.
@@ -1019,11 +1147,19 @@ func useResponsesAPI(model string) bool {
 	return strings.Contains(strings.ToLower(model), "codex")
 }
 
+// useAnthropicAPI returns true for model names containing "claude".
+func useAnthropicAPI(model string) bool {
+	return strings.Contains(strings.ToLower(model), "claude")
+}
+
 func callOllamaNonStreaming(messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	return callOllamaNonStreamingWithContext(context.Background(), messages, defs, inferenceURL, model, apiKey)
 }
 
 func callOllamaNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
+	if useAnthropicAPI(model) {
+		return callAnthropicNonStreamingWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
+	}
 	if useResponsesAPI(model) {
 		return callResponsesNonStreamingWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
 	}
@@ -1131,11 +1267,87 @@ func callResponsesNonStreamingWithContext(ctx context.Context, messages []messag
 	return normalized, nil
 }
 
+func callAnthropicNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
+	endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/messages"
+	systemPrompt, anthropicMsgs := convertMessagesForAnthropic(messages)
+	reqBody := anthropicRequest{
+		Model:     model,
+		MaxTokens: 16384,
+		System:    systemPrompt,
+		Messages:  anthropicMsgs,
+		Stream:    false,
+		Tools:     convertToolDefsForAnthropic(defs),
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return chatResponse{}, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return chatResponse{}, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return chatResponse{}, fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var out anthropicResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return chatResponse{}, fmt.Errorf("failed to parse response: %w", err)
+	}
+	var normalized chatResponse
+	normalized.Choices = append(normalized.Choices, struct {
+		Message struct {
+			Role      string     `json:"role"`
+			Content   string     `json:"content"`
+			ToolCalls []toolCall `json:"tool_calls"`
+		} `json:"message"`
+	}{})
+	msg := &normalized.Choices[0].Message
+	msg.Role = "assistant"
+	var contentBuf strings.Builder
+	for i, block := range out.Content {
+		switch block.Type {
+		case "text":
+			contentBuf.WriteString(block.Text)
+		case "tool_use":
+			argStr := "{}"
+			if len(block.Input) > 0 {
+				argStr = string(block.Input)
+			}
+			callID := strings.TrimSpace(block.ID)
+			if callID == "" {
+				callID = fmt.Sprintf("anthropic_%d", i)
+			}
+			msg.ToolCalls = append(msg.ToolCalls, toolCall{
+				ID:   callID,
+				Type: "function",
+				Function: toolCallFunction{
+					Name:      block.Name,
+					Arguments: argStr,
+				},
+			})
+		}
+	}
+	msg.Content = stripThinkTags(contentBuf.String())
+	return normalized, nil
+}
+
 func streamOllama(messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
 	return streamOllamaWithContext(context.Background(), messages, defs, inferenceURL, model, apiKey)
 }
 
 func streamOllamaWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
+	if useAnthropicAPI(model) {
+		return streamAnthropicWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
+	}
 	if useResponsesAPI(model) {
 		return streamResponsesWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
 	}
@@ -1355,6 +1567,155 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 			dataLines = nil
 			return nil
 		}
+		for {
+			line, err := reader.ReadString('\n')
+			if err == io.EOF {
+				_ = flush()
+				break
+			}
+			if err != nil {
+				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)}
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			if line == "" {
+				if err := flush(); err != nil {
+					chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)}
+					return
+				}
+				continue
+			}
+			if strings.HasPrefix(line, "event:") {
+				eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+				continue
+			}
+			if strings.HasPrefix(line, "data:") {
+				dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+	}()
+	return chunks
+}
+
+func streamAnthropicWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
+	chunks := make(chan inferenceStreamEvent)
+	go func() {
+		defer close(chunks)
+		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/messages"
+		systemPrompt, anthropicMsgs := convertMessagesForAnthropic(messages)
+		reqBody := anthropicRequest{
+			Model:     model,
+			MaxTokens: 16384,
+			System:    systemPrompt,
+			Messages:  anthropicMsgs,
+			Stream:    true,
+			Tools:     convertToolDefsForAnthropic(defs),
+		}
+		body, err := json.Marshal(reqBody)
+		if err != nil {
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
+			return
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)}
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			chunks <- inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
+			return
+		}
+
+		type pendingToolCall struct {
+			id   string
+			name string
+			args strings.Builder
+		}
+		pendingByIndex := map[int]*pendingToolCall{}
+		finalize := func(index int) {
+			pc := pendingByIndex[index]
+			if pc == nil {
+				return
+			}
+			argText := strings.TrimSpace(pc.args.String())
+			if argText == "" {
+				argText = "{}"
+			}
+			chunks <- inferenceStreamEvent{ToolCalls: []toolCall{{
+				ID:   pc.id,
+				Type: "function",
+				Function: toolCallFunction{
+					Name:      pc.name,
+					Arguments: argText,
+				},
+			}}}
+			delete(pendingByIndex, index)
+		}
+
+		reader := bufio.NewReader(resp.Body)
+		var eventName string
+		var dataLines []string
+		flush := func() error {
+			if eventName == "" && len(dataLines) == 0 {
+				return nil
+			}
+			data := strings.Join(dataLines, "\n")
+			var evt anthropicStreamEvent
+			if err := json.Unmarshal([]byte(data), &evt); err != nil {
+				eventName = ""
+				dataLines = nil
+				return nil
+			}
+
+			switch eventName {
+			case "content_block_start":
+				if evt.ContentBlock != nil && evt.ContentBlock.Type == "tool_use" {
+					pc := &pendingToolCall{
+						id:   strings.TrimSpace(evt.ContentBlock.ID),
+						name: strings.TrimSpace(evt.ContentBlock.Name),
+					}
+					if len(evt.ContentBlock.Input) > 0 {
+						pc.args.Write(evt.ContentBlock.Input)
+					}
+					pendingByIndex[evt.Index] = pc
+				}
+			case "content_block_delta":
+				if evt.Delta != nil {
+					if evt.Delta.Type == "text_delta" && evt.Delta.Text != "" {
+						chunks <- inferenceStreamEvent{Content: evt.Delta.Text}
+					} else if evt.Delta.Type == "input_json_delta" && evt.Delta.PartialJSON != "" {
+						if pc := pendingByIndex[evt.Index]; pc != nil {
+							pc.args.WriteString(evt.Delta.PartialJSON)
+						}
+					}
+				}
+			case "content_block_stop":
+				finalize(evt.Index)
+			case "message_stop":
+				indexes := make([]int, 0, len(pendingByIndex))
+				for idx := range pendingByIndex {
+					indexes = append(indexes, idx)
+				}
+				sort.Ints(indexes)
+				for _, idx := range indexes {
+					finalize(idx)
+				}
+			}
+			eventName = ""
+			dataLines = nil
+			return nil
+		}
+
 		for {
 			line, err := reader.ReadString('\n')
 			if err == io.EOF {
