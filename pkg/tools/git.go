@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,13 +113,7 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 func (t *GitCloneTool) buildURL(repo string) string {
 	t.Token = resolveGiteaToken(t.Token)
 	base := strings.TrimRight(t.GiteaURL, "/")
-	owner := "gitea_admin"
-	name := repo
-	if strings.Contains(repo, "/") {
-		parts := strings.SplitN(repo, "/", 2)
-		owner = parts[0]
-		name = parts[1]
-	}
+	owner, name := resolveRepoOwnerName(repo)
 	if t.Token != "" {
 		stripped := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 		scheme := "http://"
@@ -252,19 +247,27 @@ func (t *GitCommitTool) Verify(args map[string]interface{}, result ToolResult) e
 func (t *GitCommitTool) buildPushURL(repo string) string {
 	t.Token = resolveGiteaToken(t.Token)
 	base := strings.TrimRight(t.GiteaURL, "/")
-	owner := "gitea_admin"
-	name := repo
-	if strings.Contains(repo, "/") {
-		parts := strings.SplitN(repo, "/", 2)
-		owner = parts[0]
-		name = parts[1]
-	}
+	owner, name := resolveRepoOwnerName(repo)
 	stripped := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 	scheme := "http://"
 	if strings.HasPrefix(base, "https://") {
 		scheme = "https://"
 	}
 	return fmt.Sprintf("%stoken:%s@%s/%s/%s.git", scheme, t.Token, stripped, owner, name)
+}
+
+func resolveRepoOwnerName(repo string) (owner, name string) {
+	name = strings.TrimSpace(repo)
+	if strings.Contains(name, "/") {
+		parts := strings.SplitN(name, "/", 2)
+		return parts[0], parts[1]
+	}
+	owner = strings.TrimSpace(os.Getenv("GITEA_DEFAULT_OWNER"))
+	if owner == "" {
+		owner = "gitea_admin"
+	}
+	log.Printf("git tool: repo %q missing owner, defaulting to %q", repo, owner)
+	return owner, name
 }
 
 type GitDiffTool struct {
