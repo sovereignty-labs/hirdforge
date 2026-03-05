@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -8,11 +10,18 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	calendarv3 "google.golang.org/api/calendar/v3"
+	gmailv1 "google.golang.org/api/gmail/v1"
+	"google.golang.org/api/option"
 )
 
 type HuntScope struct {
@@ -82,7 +91,46 @@ type lockboxState struct {
 	audits   map[string][]AuditEntry
 	queues   map[string]*WriteQueue
 	services map[string]ServiceHandler
+	tools    map[string]ToolHandler
 	queueSeq uint64
+}
+
+type ToolHandler struct {
+	Name        string
+	Description string
+	InputSchema map[string]interface{}
+	Handler     func(params map[string]interface{}) (interface{}, error)
+}
+
+type oauthTokenFile struct {
+	AccessToken  string `json:"access_token"`
+	TokenType    string `json:"token_type"`
+	RefreshToken string `json:"refresh_token"`
+	Expiry       string `json:"expiry,omitempty"`
+}
+
+type jsonRPCRequest struct {
+	JSONRPC string                 `json:"jsonrpc"`
+	ID      interface{}            `json:"id,omitempty"`
+	Method  string                 `json:"method"`
+	Params  map[string]interface{} `json:"params,omitempty"`
+}
+
+type jsonRPCResponse struct {
+	JSONRPC string        `json:"jsonrpc"`
+	ID      interface{}   `json:"id,omitempty"`
+	Result  interface{}   `json:"result,omitempty"`
+	Error   *jsonRPCError `json:"error,omitempty"`
+}
+
+type jsonRPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+type googleClients struct {
+	gmail    *gmailv1.Service
+	calendar *calendarv3.Service
 }
 
 type permissionSpec struct {
@@ -587,8 +635,510 @@ func (s *lockboxState) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req jsonRPCRequest
+	if err := decodeJSONStrict(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      nil,
+			Error:   &jsonRPCError{Code: -32700, Message: "parse error: " + err.Error()},
+		})
+		return
+	}
+	if strings.TrimSpace(req.JSONRPC) == "" {
+		req.JSONRPC = "2.0"
+	}
+	if req.Method == "notifications/initialized" || req.ID == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	resp := jsonRPCResponse{JSONRPC: "2.0", ID: req.ID}
+	switch req.Method {
+	case "initialize":
+		resp.Result = map[string]interface{}{
+			"protocolVersion": "2025-03-26",
+			"serverInfo": map[string]interface{}{
+				"name":    "valhalla-lockbox",
+				"version": "0.1.0",
+			},
+			"capabilities": map[string]interface{}{
+				"tools": map[string]interface{}{},
+			},
+		}
+	case "tools/list":
+		s.mu.RLock()
+		names := make([]string, 0, len(s.tools))
+		for name := range s.tools {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		tools := make([]map[string]interface{}, 0, len(names))
+		for _, name := range names {
+			t := s.tools[name]
+			tools = append(tools, map[string]interface{}{
+				"name":        t.Name,
+				"description": t.Description,
+				"inputSchema": t.InputSchema,
+			})
+		}
+		s.mu.RUnlock()
+		resp.Result = map[string]interface{}{"tools": tools}
+	case "tools/call":
+		toolName, _ := req.Params["name"].(string)
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" {
+			resp.Error = &jsonRPCError{Code: -32602, Message: "missing tool name"}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		argsRaw, _ := req.Params["arguments"]
+		args, ok := argsRaw.(map[string]interface{})
+		if !ok || args == nil {
+			args = map[string]interface{}{}
+		}
+		s.mu.RLock()
+		tool, ok := s.tools[toolName]
+		s.mu.RUnlock()
+		if !ok {
+			resp.Error = &jsonRPCError{Code: -32601, Message: "unknown tool: " + toolName}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		out, err := tool.Handler(args)
+		if err != nil {
+			resp.Result = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": err.Error()},
+				},
+				"isError": true,
+			}
+		} else {
+			text := toJSONString(out)
+			resp.Result = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{"type": "text", "text": text},
+				},
+				"isError": false,
+			}
+		}
+	default:
+		resp.Error = &jsonRPCError{Code: -32601, Message: "method not found: " + req.Method}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func toJSONString(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}
+
+func strParam(params map[string]interface{}, key string, required bool) (string, error) {
+	raw, ok := params[key]
+	if !ok {
+		if required {
+			return "", fmt.Errorf("missing %s", key)
+		}
+		return "", nil
+	}
+	val, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string", key)
+	}
+	val = strings.TrimSpace(val)
+	if required && val == "" {
+		return "", fmt.Errorf("%s is required", key)
+	}
+	return val, nil
+}
+
+func intParam(params map[string]interface{}, key string, fallback int) int {
+	raw, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	switch v := raw.(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return fallback
+	}
+}
+
+func saveOAuthToken(path string, token *oauth2.Token) error {
+	payload := oauthTokenFile{
+		AccessToken:  token.AccessToken,
+		TokenType:    token.TokenType,
+		RefreshToken: token.RefreshToken,
+	}
+	if !token.Expiry.IsZero() {
+		payload.Expiry = token.Expiry.UTC().Format(time.RFC3339)
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func loadOAuthToken(path string) (*oauth2.Token, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var payload oauthTokenFile
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	token := &oauth2.Token{
+		AccessToken:  strings.TrimSpace(payload.AccessToken),
+		TokenType:    strings.TrimSpace(payload.TokenType),
+		RefreshToken: strings.TrimSpace(payload.RefreshToken),
+	}
+	if payload.Expiry != "" {
+		if t, err := time.Parse(time.RFC3339, payload.Expiry); err == nil {
+			token.Expiry = t
+		}
+	}
+	return token, nil
+}
+
+func setupGoogleClients(ctx context.Context, clientID, clientSecret, tokenFile string) (*googleClients, error) {
+	clientID = strings.TrimSpace(clientID)
+	clientSecret = strings.TrimSpace(clientSecret)
+	tokenFile = strings.TrimSpace(tokenFile)
+	if clientID == "" || clientSecret == "" {
+		return nil, fmt.Errorf("google OAuth credentials are required")
+	}
+	if tokenFile == "" {
+		tokenFile = "/vault/secrets/google-token.json"
+	}
+	config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint:     google.Endpoint,
+		Scopes: []string{
+			gmailv1.GmailReadonlyScope,
+			gmailv1.GmailModifyScope,
+			gmailv1.GmailSendScope,
+			calendarv3.CalendarReadonlyScope,
+			calendarv3.CalendarEventsScope,
+		},
+		RedirectURL: "urn:ietf:wg:oauth:2.0:oob",
+	}
+
+	token, err := loadOAuthToken(tokenFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read token file: %w", err)
+		}
+		authURL := config.AuthCodeURL("lockbox-offline", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+		fmt.Printf("Lockbox Google OAuth setup required.\nOpen this URL in your browser and authorize:\n%s\n\nPaste authorization code: ", authURL)
+		var code string
+		if _, scanErr := fmt.Scanln(&code); scanErr != nil {
+			return nil, fmt.Errorf("read authorization code: %w", scanErr)
+		}
+		token, err = config.Exchange(ctx, strings.TrimSpace(code))
+		if err != nil {
+			return nil, fmt.Errorf("exchange auth code: %w", err)
+		}
+		if err := saveOAuthToken(tokenFile, token); err != nil {
+			return nil, fmt.Errorf("save token file: %w", err)
+		}
+	}
+
+	tokenSource := config.TokenSource(ctx, token)
+	refreshed, err := tokenSource.Token()
+	if err != nil {
+		return nil, fmt.Errorf("refresh token: %w", err)
+	}
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = token.RefreshToken
+	}
+	if err := saveOAuthToken(tokenFile, refreshed); err != nil {
+		return nil, fmt.Errorf("persist refreshed token: %w", err)
+	}
+	httpClient := oauth2.NewClient(ctx, oauth2.ReuseTokenSource(refreshed, tokenSource))
+	gmailSvc, err := gmailv1.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("gmail client: %w", err)
+	}
+	calendarSvc, err := calendarv3.NewService(ctx, option.WithHTTPClient(httpClient))
+	if err != nil {
+		return nil, fmt.Errorf("calendar client: %w", err)
+	}
+	return &googleClients{gmail: gmailSvc, calendar: calendarSvc}, nil
+}
+
+func decodeBodyPart(payload *gmailv1.MessagePart) string {
+	if payload == nil {
+		return ""
+	}
+	if payload.Body != nil && payload.Body.Data != "" {
+		if decoded, err := base64.URLEncoding.DecodeString(payload.Body.Data); err == nil {
+			return string(decoded)
+		}
+	}
+	for _, part := range payload.Parts {
+		if strings.HasPrefix(part.MimeType, "text/plain") || part.MimeType == "" {
+			if body := decodeBodyPart(part); strings.TrimSpace(body) != "" {
+				return body
+			}
+		}
+	}
+	return ""
+}
+
+func headerValue(payload *gmailv1.MessagePart, name string) string {
+	if payload == nil {
+		return ""
+	}
+	for _, h := range payload.Headers {
+		if strings.EqualFold(h.Name, name) {
+			return h.Value
+		}
+	}
+	return ""
+}
+
+func registerGoogleTools(state *lockboxState, clients *googleClients) {
+	state.tools["gmail_list_inbox"] = ToolHandler{
+		Name:        "gmail_list_inbox",
+		Description: "List inbox emails",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"max_results": map[string]interface{}{"type": "integer"},
+			},
+		},
+		Handler: func(params map[string]interface{}) (interface{}, error) {
+			maxResults := intParam(params, "max_results", 10)
+			if maxResults <= 0 {
+				maxResults = 10
+			}
+			resp, err := clients.gmail.Users.Messages.List("me").LabelIds("INBOX").MaxResults(int64(maxResults)).Do()
+			if err != nil {
+				return nil, err
+			}
+			items := make([]map[string]interface{}, 0, len(resp.Messages))
+			for _, m := range resp.Messages {
+				msg, err := clients.gmail.Users.Messages.Get("me", m.Id).Format("metadata").MetadataHeaders("From", "Subject", "Date").Do()
+				if err != nil {
+					continue
+				}
+				items = append(items, map[string]interface{}{
+					"id":      msg.Id,
+					"from":    headerValue(msg.Payload, "From"),
+					"subject": headerValue(msg.Payload, "Subject"),
+					"snippet": msg.Snippet,
+					"date":    headerValue(msg.Payload, "Date"),
+				})
+			}
+			return items, nil
+		},
+	}
+
+	state.tools["gmail_read_email"] = ToolHandler{
+		Name:        "gmail_read_email",
+		Description: "Read one email by ID",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"id"},
+		},
+		Handler: func(params map[string]interface{}) (interface{}, error) {
+			id, err := strParam(params, "id", true)
+			if err != nil {
+				return nil, err
+			}
+			msg, err := clients.gmail.Users.Messages.Get("me", id).Format("full").Do()
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{
+				"from":    headerValue(msg.Payload, "From"),
+				"to":      headerValue(msg.Payload, "To"),
+				"subject": headerValue(msg.Payload, "Subject"),
+				"body":    decodeBodyPart(msg.Payload),
+				"date":    headerValue(msg.Payload, "Date"),
+			}, nil
+		},
+	}
+
+	state.tools["gmail_archive_email"] = ToolHandler{
+		Name:        "gmail_archive_email",
+		Description: "Archive one email by removing INBOX label",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"id": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"id"},
+		},
+		Handler: func(params map[string]interface{}) (interface{}, error) {
+			id, err := strParam(params, "id", true)
+			if err != nil {
+				return nil, err
+			}
+			_, err = clients.gmail.Users.Messages.Modify("me", id, &gmailv1.ModifyMessageRequest{
+				RemoveLabelIds: []string{"INBOX"},
+			}).Do()
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"success": true}, nil
+		},
+	}
+
+	state.tools["gmail_send_email"] = ToolHandler{
+		Name:        "gmail_send_email",
+		Description: "Send an email",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"to":      map[string]interface{}{"type": "string"},
+				"subject": map[string]interface{}{"type": "string"},
+				"body":    map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"to", "subject", "body"},
+		},
+		Handler: func(params map[string]interface{}) (interface{}, error) {
+			to, err := strParam(params, "to", true)
+			if err != nil {
+				return nil, err
+			}
+			subject, err := strParam(params, "subject", true)
+			if err != nil {
+				return nil, err
+			}
+			body, err := strParam(params, "body", true)
+			if err != nil {
+				return nil, err
+			}
+			msg := fmt.Sprintf("To: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s", to, subject, body)
+			encoded := base64.URLEncoding.EncodeToString([]byte(msg))
+			resp, err := clients.gmail.Users.Messages.Send("me", &gmailv1.Message{Raw: encoded}).Do()
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{"id": resp.Id, "success": true}, nil
+		},
+	}
+
+	state.tools["calendar_list_events"] = ToolHandler{
+		Name:        "calendar_list_events",
+		Description: "List upcoming calendar events",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"days_ahead": map[string]interface{}{"type": "integer"},
+			},
+		},
+		Handler: func(params map[string]interface{}) (interface{}, error) {
+			daysAhead := intParam(params, "days_ahead", 7)
+			if daysAhead <= 0 {
+				daysAhead = 7
+			}
+			start := time.Now().UTC()
+			end := start.Add(time.Duration(daysAhead) * 24 * time.Hour)
+			resp, err := clients.calendar.Events.List("primary").
+				ShowDeleted(false).
+				SingleEvents(true).
+				OrderBy("startTime").
+				TimeMin(start.Format(time.RFC3339)).
+				TimeMax(end.Format(time.RFC3339)).
+				Do()
+			if err != nil {
+				return nil, err
+			}
+			items := make([]map[string]interface{}, 0, len(resp.Items))
+			for _, e := range resp.Items {
+				startVal := e.Start.DateTime
+				if startVal == "" {
+					startVal = e.Start.Date
+				}
+				endVal := e.End.DateTime
+				if endVal == "" {
+					endVal = e.End.Date
+				}
+				items = append(items, map[string]interface{}{
+					"id":       e.Id,
+					"summary":  e.Summary,
+					"start":    startVal,
+					"end":      endVal,
+					"location": e.Location,
+				})
+			}
+			return items, nil
+		},
+	}
+
+	state.tools["calendar_create_event"] = ToolHandler{
+		Name:        "calendar_create_event",
+		Description: "Create a calendar event",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"summary":     map[string]interface{}{"type": "string"},
+				"start":       map[string]interface{}{"type": "string"},
+				"end":         map[string]interface{}{"type": "string"},
+				"location":    map[string]interface{}{"type": "string"},
+				"description": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"summary", "start", "end"},
+		},
+		Handler: func(params map[string]interface{}) (interface{}, error) {
+			summary, err := strParam(params, "summary", true)
+			if err != nil {
+				return nil, err
+			}
+			start, err := strParam(params, "start", true)
+			if err != nil {
+				return nil, err
+			}
+			end, err := strParam(params, "end", true)
+			if err != nil {
+				return nil, err
+			}
+			location, _ := strParam(params, "location", false)
+			description, _ := strParam(params, "description", false)
+			event := &calendarv3.Event{
+				Summary:     summary,
+				Location:    location,
+				Description: description,
+				Start:       &calendarv3.EventDateTime{DateTime: start},
+				End:         &calendarv3.EventDateTime{DateTime: end},
+			}
+			created, err := clients.calendar.Events.Insert("primary", event).Do()
+			if err != nil {
+				return nil, err
+			}
+			return map[string]interface{}{
+				"id":   created.Id,
+				"link": created.HtmlLink,
+			}, nil
+		},
+	}
+}
+
 func main() {
 	port := flag.Int("port", 8083, "HTTP port")
+	googleClientID := flag.String("google-client-id", "", "Google OAuth client ID")
+	googleClientSecret := flag.String("google-client-secret", "", "Google OAuth client secret")
+	googleTokenFile := flag.String("google-token-file", "/vault/secrets/google-token.json", "Path to stored Google OAuth token")
 	flag.Parse()
 
 	state := &lockboxState{
@@ -596,8 +1146,17 @@ func main() {
 		audits:   map[string][]AuditEntry{},
 		queues:   map[string]*WriteQueue{},
 		services: map[string]ServiceHandler{},
+		tools:    map[string]ToolHandler{},
 	}
 	state.services["mock"] = &MockService{}
+
+	if strings.TrimSpace(*googleClientID) != "" || strings.TrimSpace(*googleClientSecret) != "" {
+		clients, err := setupGoogleClients(context.Background(), *googleClientID, *googleClientSecret, *googleTokenFile)
+		if err != nil {
+			log.Fatalf("google setup failed: %v", err)
+		}
+		registerGoogleTools(state, clients)
+	}
 
 	go func() {
 		t := time.NewTicker(15 * time.Second)
@@ -613,6 +1172,7 @@ func main() {
 	mux.HandleFunc("/approve-write", state.approveWrite)
 	mux.HandleFunc("/audit/", state.audit)
 	mux.HandleFunc("/health", state.health)
+	mux.HandleFunc("/mcp", state.mcp)
 
 	addr := fmt.Sprintf(":%d", *port)
 	log.Printf("valhalla-lockbox listening on %s", addr)
