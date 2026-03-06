@@ -2,7 +2,9 @@ package tools
 
 import (
 	"fmt"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -129,6 +131,7 @@ func (t *WriteTool) Execute(args map[string]interface{}) ToolResult {
 	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
 		return ToolResult{Error: err.Error()}
 	}
+	autoStageWrittenFile(absPath)
 	return ToolResult{Output: fmt.Sprintf("wrote %d bytes to %s", len(content), path)}
 }
 
@@ -156,4 +159,36 @@ func (t *WriteTool) Verify(args map[string]interface{}, result ToolResult) error
 	}
 
 	return nil
+}
+
+func autoStageWrittenFile(absPath string) {
+	repoRoot := findGitRepoRoot(filepath.Dir(absPath))
+	if repoRoot == "" {
+		return
+	}
+	relPath, err := filepath.Rel(repoRoot, absPath)
+	if err != nil {
+		log.Printf("write tool auto-stage: failed to compute relative path for %q: %v", absPath, err)
+		return
+	}
+	cmd := exec.Command("git", "add", relPath)
+	cmd.Dir = repoRoot
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		log.Printf("write tool auto-stage: git add failed for %q: %v: %s", absPath, err, strings.TrimSpace(string(out)))
+	}
+}
+
+func findGitRepoRoot(startDir string) string {
+	dir := startDir
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, ".git")); err == nil && fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
