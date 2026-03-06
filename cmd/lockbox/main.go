@@ -705,6 +705,39 @@ func (s *lockboxState) health(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *lockboxState) listQueues(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	queues := make([]map[string]interface{}, 0, len(s.queues))
+	for _, q := range s.queues {
+		if q.Status != "pending" {
+			continue
+		}
+		queues = append(queues, map[string]interface{}{
+			"queue_id":  q.QueueID,
+			"hunt_id":   q.HuntID,
+			"service":   q.Service,
+			"action":    q.Action,
+			"params":    cloneParams(q.Params),
+			"status":    q.Status,
+			"queued_at": q.QueuedAt,
+		})
+	}
+	s.mu.RUnlock()
+	sort.Slice(queues, func(i, j int) bool {
+		iq, _ := queues[i]["queued_at"].(time.Time)
+		jq, _ := queues[j]["queued_at"].(time.Time)
+		return iq.Before(jq)
+	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status": "ok",
+		"queues": queues,
+	})
+}
+
 func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -809,7 +842,7 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
 			s.queues[qid] = &WriteQueue{
 				QueueID:  qid,
-				HuntID:   "mcp-session",
+				HuntID:   "mcp",
 				Service:  "mcp",
 				Action:   toolName,
 				Params:   cloneParams(args),
@@ -818,7 +851,7 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 			}
 			s.addAudit(AuditEntry{
 				Timestamp: now,
-				HuntID:    "mcp-session",
+				HuntID:    "mcp",
 				Service:   "mcp",
 				Action:    toolName,
 				Params:    cloneParams(args),
@@ -1387,6 +1420,7 @@ func main() {
 	mux.HandleFunc("/action", state.action)
 	mux.HandleFunc("/approve-write", state.approveWrite)
 	mux.HandleFunc("/audit/", state.audit)
+	mux.HandleFunc("/queues", state.listQueues)
 	mux.HandleFunc("/health", state.health)
 	mux.HandleFunc("/mcp", state.mcp)
 
