@@ -99,6 +99,7 @@ type ToolHandler struct {
 	Name        string
 	Description string
 	InputSchema map[string]interface{}
+	WriteTier   string
 	Handler     func(params map[string]interface{}) (interface{}, error)
 }
 
@@ -465,24 +466,6 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 
 	s.mu.Lock()
-	scope, ok := s.hunts[req.HuntID]
-	if !ok {
-		s.mu.Unlock()
-		writeJSON(w, http.StatusNotFound, map[string]interface{}{"status": "error", "error": "hunt scope not found"})
-		return
-	}
-	if now.After(scope.ExpiresAt) {
-		delete(s.hunts, req.HuntID)
-		delete(s.audits, req.HuntID)
-		for qid, q := range s.queues {
-			if q.HuntID == req.HuntID {
-				delete(s.queues, qid)
-			}
-		}
-		s.mu.Unlock()
-		writeJSON(w, http.StatusGone, map[string]interface{}{"status": "expired", "error": req.HuntID + " scope has expired"})
-		return
-	}
 	q, ok := s.queues[req.QueueID]
 	if !ok || q.HuntID != req.HuntID {
 		s.mu.Unlock()
@@ -493,6 +476,26 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]interface{}{"status": "error", "error": "queue item is not pending"})
 		return
+	}
+	if q.Service != "mcp" {
+		scope, ok := s.hunts[req.HuntID]
+		if !ok {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"status": "error", "error": "hunt scope not found"})
+			return
+		}
+		if now.After(scope.ExpiresAt) {
+			delete(s.hunts, req.HuntID)
+			delete(s.audits, req.HuntID)
+			for qid, queued := range s.queues {
+				if queued.HuntID == req.HuntID {
+					delete(s.queues, qid)
+				}
+			}
+			s.mu.Unlock()
+			writeJSON(w, http.StatusGone, map[string]interface{}{"status": "expired", "error": req.HuntID + " scope has expired"})
+			return
+		}
 	}
 
 	if !*req.Approved {
@@ -506,8 +509,78 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 			Status:    "denied",
 			Error:     "write action rejected",
 		}, q.QueueID)
+		delete(s.queues, q.QueueID)
 		s.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "rejected", "queue_id": q.QueueID})
+		return
+	}
+
+	params := cloneParams(q.Params)
+	service := q.Service
+	action := q.Action
+	queueID := q.QueueID
+	huntID := q.HuntID
+
+	if service == "mcp" {
+		tool, ok := s.tools[action]
+		if !ok {
+			q.Status = "error"
+			q.Error = "tool unavailable"
+			s.addAudit(AuditEntry{
+				Timestamp: now,
+				HuntID:    huntID,
+				Service:   service,
+				Action:    action,
+				Params:    cloneParams(params),
+				Status:    "error",
+				Error:     q.Error,
+			}, queueID)
+			s.mu.Unlock()
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{"status": "error", "error": q.Error})
+			return
+		}
+		s.mu.Unlock()
+
+		data, err := tool.Handler(params)
+		if err != nil {
+			s.mu.Lock()
+			if qq, ok := s.queues[queueID]; ok {
+				qq.Status = "error"
+				qq.Error = err.Error()
+			}
+			s.addAudit(AuditEntry{
+				Timestamp: now,
+				HuntID:    huntID,
+				Service:   service,
+				Action:    action,
+				Params:    cloneParams(params),
+				Status:    "error",
+				Error:     err.Error(),
+			}, queueID)
+			s.mu.Unlock()
+			writeJSON(w, http.StatusBadGateway, map[string]interface{}{"status": "error", "error": err.Error()})
+			return
+		}
+
+		s.mu.Lock()
+		if qq, ok := s.queues[queueID]; ok {
+			qq.Status = "approved"
+			qq.Error = ""
+		}
+		s.addAudit(AuditEntry{
+			Timestamp: now,
+			HuntID:    huntID,
+			Service:   service,
+			Action:    action,
+			Params:    cloneParams(params),
+			Status:    "ok",
+		}, queueID)
+		s.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":   "approved",
+			"queue_id": queueID,
+			"data":     data,
+		})
 		return
 	}
 
@@ -517,7 +590,7 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 		q.Error = "service/action unavailable"
 		s.addAudit(AuditEntry{
 			Timestamp: now,
-			HuntID:    req.HuntID,
+			HuntID:    huntID,
 			Service:   q.Service,
 			Action:    q.Action,
 			Params:    cloneParams(q.Params),
@@ -528,10 +601,6 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]interface{}{"status": "error", "error": q.Error})
 		return
 	}
-	params := cloneParams(q.Params)
-	service := q.Service
-	action := q.Action
-	queueID := q.QueueID
 	s.mu.Unlock()
 
 	data, err := svc.Execute(action, params, ServiceCredential{})
@@ -543,7 +612,7 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 		}
 		s.addAudit(AuditEntry{
 			Timestamp: now,
-			HuntID:    req.HuntID,
+			HuntID:    huntID,
 			Service:   service,
 			Action:    action,
 			Params:    cloneParams(params),
@@ -562,7 +631,7 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 	}
 	s.addAudit(AuditEntry{
 		Timestamp: now,
-		HuntID:    req.HuntID,
+		HuntID:    huntID,
 		Service:   service,
 		Action:    action,
 		Params:    cloneParams(params),
@@ -708,7 +777,73 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
-		out, err := tool.Handler(args)
+		writeTier := strings.TrimSpace(tool.WriteTier)
+		if writeTier == "" {
+			writeTier = "read"
+		}
+		var (
+			out interface{}
+			err error
+		)
+		switch writeTier {
+		case "read":
+			out, err = tool.Handler(args)
+		case "safe_write":
+			out, err = tool.Handler(args)
+			if err == nil {
+				s.mu.Lock()
+				s.addAudit(AuditEntry{
+					Timestamp: time.Now().UTC(),
+					HuntID:    "mcp-session",
+					Service:   "mcp",
+					Action:    toolName,
+					Params:    cloneParams(args),
+					Status:    "executed_safe_write",
+				}, "")
+				s.mu.Unlock()
+			}
+		case "destructive_write":
+			now := time.Now().UTC()
+			qid := fmt.Sprintf("q-%06d", atomic.AddUint64(&s.queueSeq, 1))
+			s.mu.Lock()
+			s.queues[qid] = &WriteQueue{
+				QueueID:  qid,
+				HuntID:   "mcp-session",
+				Service:  "mcp",
+				Action:   toolName,
+				Params:   cloneParams(args),
+				Status:   "pending",
+				QueuedAt: now,
+			}
+			s.addAudit(AuditEntry{
+				Timestamp: now,
+				HuntID:    "mcp-session",
+				Service:   "mcp",
+				Action:    toolName,
+				Params:    cloneParams(args),
+				Status:    "queued",
+			}, qid)
+			s.mu.Unlock()
+			resp.Result = map[string]interface{}{
+				"content": []map[string]interface{}{
+					{
+						"type": "text",
+						"text": toJSONString(map[string]interface{}{
+							"status":   "queued_for_approval",
+							"queue_id": qid,
+							"message":  "Destructive action queued for Sovereign approval",
+						}),
+					},
+				},
+				"isError": false,
+			}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		default:
+			resp.Error = &jsonRPCError{Code: -32602, Message: "invalid write tier: " + writeTier}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
 		if err != nil {
 			resp.Result = map[string]interface{}{
 				"content": []map[string]interface{}{
@@ -916,6 +1051,7 @@ func registerGoogleTools(state *lockboxState, clients *googleClients) {
 	state.tools["gmail_list_inbox"] = ToolHandler{
 		Name:        "gmail_list_inbox",
 		Description: "List inbox emails",
+		WriteTier:   "read",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -952,6 +1088,7 @@ func registerGoogleTools(state *lockboxState, clients *googleClients) {
 	state.tools["gmail_read_email"] = ToolHandler{
 		Name:        "gmail_read_email",
 		Description: "Read one email by ID",
+		WriteTier:   "read",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -981,6 +1118,7 @@ func registerGoogleTools(state *lockboxState, clients *googleClients) {
 	state.tools["gmail_archive_email"] = ToolHandler{
 		Name:        "gmail_archive_email",
 		Description: "Archive one email by removing INBOX label",
+		WriteTier:   "safe_write",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1006,6 +1144,7 @@ func registerGoogleTools(state *lockboxState, clients *googleClients) {
 	state.tools["gmail_send_email"] = ToolHandler{
 		Name:        "gmail_send_email",
 		Description: "Send an email",
+		WriteTier:   "destructive_write",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1041,6 +1180,7 @@ func registerGoogleTools(state *lockboxState, clients *googleClients) {
 	state.tools["calendar_list_events"] = ToolHandler{
 		Name:        "calendar_list_events",
 		Description: "List upcoming calendar events",
+		WriteTier:   "read",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -1089,6 +1229,7 @@ func registerGoogleTools(state *lockboxState, clients *googleClients) {
 	state.tools["calendar_create_event"] = ToolHandler{
 		Name:        "calendar_create_event",
 		Description: "Create a calendar event",
+		WriteTier:   "safe_write",
 		InputSchema: map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
