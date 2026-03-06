@@ -181,7 +181,7 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 	}
 
 	if res := runGit(repoDir, []string{"git", "add", "-A"}, 10*time.Second); res.Error != "" {
-		return res
+		log.Printf("git-commit auto-add failed in %s: %s (%s)", repoDir, res.Error, strings.TrimSpace(res.Output))
 	}
 
 	statusRes := runGit(repoDir, []string{"git", "status", "--porcelain"}, 10*time.Second)
