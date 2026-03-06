@@ -130,6 +130,7 @@ type jsonRPCError struct {
 }
 
 type googleClients struct {
+	http     *http.Client
 	gmail    *gmailv1.Service
 	calendar *calendarv3.Service
 }
@@ -1013,7 +1014,7 @@ func setupGoogleClients(ctx context.Context, clientID, clientSecret, tokenFile s
 	if err != nil {
 		return nil, fmt.Errorf("calendar client: %w", err)
 	}
-	return &googleClients{gmail: gmailSvc, calendar: calendarSvc}, nil
+	return &googleClients{http: httpClient, gmail: gmailSvc, calendar: calendarSvc}, nil
 }
 
 func decodeBodyPart(payload *gmailv1.MessagePart) string {
@@ -1271,6 +1272,80 @@ func registerGoogleTools(state *lockboxState, clients *googleClients) {
 				"id":   created.Id,
 				"link": created.HtmlLink,
 			}, nil
+		},
+	}
+
+	state.tools["api_call"] = ToolHandler{
+		Name:        "api_call",
+		Description: "Make an authenticated API call through lockbox",
+		WriteTier:   "destructive_write",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"service": map[string]interface{}{"type": "string"},
+				"method":  map[string]interface{}{"type": "string"},
+				"path":    map[string]interface{}{"type": "string"},
+				"body":    map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"service", "method", "path"},
+		},
+		Handler: func(params map[string]interface{}) (interface{}, error) {
+			service, err := strParam(params, "service", true)
+			if err != nil {
+				return nil, err
+			}
+			method, err := strParam(params, "method", true)
+			if err != nil {
+				return nil, err
+			}
+			path, err := strParam(params, "path", true)
+			if err != nil {
+				return nil, err
+			}
+			body, _ := strParam(params, "body", false)
+
+			var baseURL string
+			switch strings.ToLower(service) {
+			case "gmail":
+				baseURL = "https://gmail.googleapis.com"
+			case "calendar":
+				baseURL = "https://www.googleapis.com"
+			default:
+				return nil, fmt.Errorf("unsupported service: %s", service)
+			}
+
+			method = strings.ToUpper(method)
+			switch method {
+			case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete:
+			default:
+				return nil, fmt.Errorf("unsupported method: %s", method)
+			}
+
+			if path == "" {
+				return nil, fmt.Errorf("path is required")
+			}
+			url := strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(path, "/")
+			req, err := http.NewRequestWithContext(context.Background(), method, url, strings.NewReader(body))
+			if err != nil {
+				return nil, fmt.Errorf("create request: %w", err)
+			}
+			if body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			resp, err := clients.http.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("request failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			if err != nil {
+				return nil, fmt.Errorf("read response: %w", err)
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return nil, fmt.Errorf("api status %d: %s", resp.StatusCode, string(data))
+			}
+			return string(data), nil
 		},
 	}
 }
