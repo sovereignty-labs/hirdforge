@@ -221,6 +221,7 @@ async function api(path,fb){
   }catch(e){return fb;}
 }
 async function apiPost(p){try{const r=await fetch(CFG.API+p,{method:'POST'});return await r.json();}catch(e){return{error:e.message};}}
+async function apiPostJSON(p,b){try{const r=await fetch(CFG.API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});return await r.json();}catch(e){return{error:e.message};}}
 async function apiText(p){try{const r=await fetch(CFG.API+p);if(!r.ok)throw new Error(r.status);return await r.text();}catch(e){return`Error: ${e.summary||e.message}`;}}
 
 function usePoll(path,fb,iv){
@@ -883,6 +884,7 @@ function App(){
   const[tab,setTab]=useState("comms");const[sel,setSel]=useState(0);
   const[ch,setCh]=useState([]);const[msg,setMsg]=useState("");const[tgt,setTgt]=useState("ragnar");const[busy,setBusy]=useState(false);
   const[sidByA,setSidByA]=useState({});const[sItems,setSItems]=useState([]);const[toast,setToast]=useState("");
+  const[approvals,setApprovals]=useState([]);const[approvalsOpen,setApprovalsOpen]=useState(false);const[approvalBusy,setApprovalBusy]=useState({});
   const[termOpen,setTermOpen]=useState(true);const[termH,setTermH]=useState(200);
   const auth=useAuth();
 
@@ -895,6 +897,8 @@ function App(){
   const{prs}=usePRs();const repos=useRepos();
   const online=agents.filter(a=>a.status==="online").length;
   const openPRCount=(prs||[]).filter(p=>p.state==='open').length;
+  const pendingApprovals=(approvals||[]).filter(q=>q&&q.status==="pending");
+  const approvalsCount=pendingApprovals.length;
   const curSid=sidByA[tgt]||localStorage.getItem(lsk(auth.user,tgt))||`hirdforge-${tgt}-${Date.now()}`;
 
   useEffect(()=>{if(!tgt)return;const r=localStorage.getItem(lck(auth.user,tgt));if(r){try{const p=JSON.parse(r);setCh(Array.isArray(p)?p.map(m=>s2u(tgt,m,auth.user)):[]);}catch{setCh([]);}}else setCh([]);
@@ -916,12 +920,16 @@ function App(){
     localStorage.setItem(key,JSON.stringify([...existing,serialized]));
     if(owner===tgt)setCh(p=>[...p,entry]);
   },[events,tgt,auth.user]);
+  useEffect(()=>{let m=true;const go=async()=>{try{const r=await fetch('/api/v1/approvals');if(!r.ok)throw new Error();const d=await r.json();if(!m)return;const qs=Array.isArray(d?.queues)?d.queues:[];setApprovals(qs);}catch{if(m)setApprovals([]);}};go();const id=setInterval(go,10000);return()=>{m=false;clearInterval(id);};},[]);
 
   const setCurSid=s=>setSidByA(p=>({...p,[tgt]:s}));
   const loadSess=async s=>{const d=await api(`/api/v1/sessions/${s}`,null);if(d?.messages){setCurSid(s);setCh(d.messages.map(m=>s2u(tgt,m,auth.user)));}};
   const newConv=()=>{setCurSid(`hirdforge-${tgt}-${Date.now()}`);setCh([]);};
   const clearH=()=>{setCh([]);localStorage.removeItem(lck(auth.user,tgt));};
   const eStop=async()=>{await apiPost('/api/v1/agents/stop-all');setBusy(false);setCh(p=>{if(!p.length)return p;const u=[...p];const l={...u[u.length-1]};if(l.streaming){l.streaming=false;l.text=(l.text?l.text+"\n":"")+"[Stopped by Sovereign]";u[u.length-1]=l;}return u;});setToast("All agents stopped");setTimeout(()=>setToast(""),1800);};
+  const refreshApprovals=async()=>{try{const r=await fetch('/api/v1/approvals');if(!r.ok)throw new Error();const d=await r.json();setApprovals(Array.isArray(d?.queues)?d.queues:[]);}catch{setApprovals([]);}};
+  const decideApproval=async(queueID,approved)=>{if(!queueID)return;setApprovalBusy(p=>({...p,[queueID]:true}));const path=approved?'/api/v1/approvals/approve':'/api/v1/approvals/reject';const out=await apiPostJSON(path,{queue_id:queueID});if(out?.error){setToast(out.error);}else{setToast(approved?"Approval granted":"Approval rejected");setTimeout(()=>setToast(""),1500);}await refreshApprovals();setApprovalBusy(p=>({...p,[queueID]:false}));};
+  const summarizeApprovalParams=params=>{try{const txt=JSON.stringify(params||{});return txt.length>120?txt.slice(0,120)+"…":txt;}catch{return "{}";}};
 
   return<div className="app">
     <div className="header">
@@ -931,6 +939,7 @@ function App(){
       </div>
       <div style={{display:"flex",alignItems:"center",gap:14}}>
         {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=><div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:"rgba(255,255,255,0.22)"}}><Pip status={x.s} size={4}/><span>{x.l}</span></div>)}
+        {approvalsCount>0&&<button onClick={()=>setApprovalsOpen(v=>!v)} style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:3,fontSize:10,fontWeight:700,color:"#f87171",fontFamily:"'IBM Plex Mono',monospace"}} title="Pending write approvals">🛡 {approvalsCount}</button>}
         {openPRCount>0&&<button onClick={()=>{setTab('realm');}} style={{display:"flex",alignItems:"center",gap:4,padding:"3px 8px",background:"rgba(251,191,36,0.08)",border:"1px solid rgba(251,191,36,0.25)",borderRadius:3,fontSize:10,fontWeight:700,color:"#fbbf24",fontFamily:"'IBM Plex Mono',monospace",animation:"forge-glow 2s ease infinite"}} title="Open pull requests awaiting review">⚔ {openPRCount} PR{openPRCount>1?'s':''}</button>}
         <button onClick={eStop} title="Emergency Stop" style={{width:24,height:24,borderRadius:"50%",border:"1px solid rgba(239,68,68,0.5)",background:"rgba(239,68,68,0.1)",color:"#ef4444",fontWeight:900,fontSize:9,boxShadow:busy?"0 0 10px rgba(239,68,68,0.3)":"none"}}>■</button>
         <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/>
@@ -942,6 +951,19 @@ function App(){
         </div>
         <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/><span style={{fontSize:12,fontFamily:"'Space Grotesk',sans-serif"}}><span style={{color:"#34d399",fontWeight:700}}>{online}</span><span style={{color:"rgba(255,255,255,0.12)"}}> / {agents.length}</span></span>
       </div>
+      {approvalsOpen&&<div style={{position:"absolute",top:44,right:16,width:420,maxHeight:420,overflowY:"auto",background:"rgba(7,9,16,0.98)",border:"1px solid rgba(248,113,113,0.28)",borderRadius:6,boxShadow:"0 12px 32px rgba(0,0,0,0.45)",padding:10,zIndex:200}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><span style={{fontSize:11,fontWeight:700,color:"#fca5a5",letterSpacing:".08em",textTransform:"uppercase"}}>Pending Approvals</span><button onClick={()=>setApprovalsOpen(false)} style={{background:"transparent",border:"none",color:"rgba(255,255,255,0.35)",fontSize:14}}>×</button></div>
+        {pendingApprovals.length===0&&<div style={{fontSize:11,color:"rgba(255,255,255,0.32)",padding:"6px 2px"}}>No pending approvals.</div>}
+        {pendingApprovals.map((q,idx)=><div key={q.queue_id||idx} style={{border:"1px solid rgba(255,255,255,0.07)",background:"rgba(255,255,255,0.02)",borderRadius:5,padding:8,marginBottom:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:8,marginBottom:4}}><span style={{fontSize:11,color:"#e5e7eb",fontWeight:700}}>{q.action||"unknown_tool"}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.35)"}}>{fAgo(q.queued_at)}</span></div>
+          <div style={{fontSize:10,color:"rgba(255,255,255,0.28)",marginBottom:6}}>#{q.queue_id||"?"} · {fT(q.queued_at)}</div>
+          <div style={{fontSize:10,color:"rgba(255,255,255,0.5)",background:"rgba(0,0,0,0.25)",border:"1px solid rgba(255,255,255,0.06)",padding:"6px 7px",borderRadius:4,marginBottom:8,wordBreak:"break-all"}}>{summarizeApprovalParams(q.params)}</div>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>decideApproval(q.queue_id,true)} disabled={!!approvalBusy[q.queue_id]} style={{padding:"5px 9px",fontSize:10,fontWeight:700,background:"rgba(52,211,153,0.12)",border:"1px solid rgba(52,211,153,0.35)",color:"#6ee7b7",borderRadius:4,fontFamily:"'IBM Plex Mono',monospace"}}>Approve</button>
+            <button onClick={()=>decideApproval(q.queue_id,false)} disabled={!!approvalBusy[q.queue_id]} style={{padding:"5px 9px",fontSize:10,fontWeight:700,background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.35)",color:"#fca5a5",borderRadius:4,fontFamily:"'IBM Plex Mono',monospace"}}>Reject</button>
+          </div>
+        </div>)}
+      </div>}
     </div>
     <div className="tabs">
       <Tab active={tab==="comms"} label="Comms" count={events.length} onClick={()=>setTab("comms")}/>

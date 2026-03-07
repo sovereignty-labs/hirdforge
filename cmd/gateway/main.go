@@ -1331,6 +1331,7 @@ func main() {
 	giteaURL := flag.String("gitea-url", "", "Gitea base URL")
 	giteaToken := flag.String("gitea-token", "", "Gitea API token (optional)")
 	giteaRepo := flag.String("gitea-repo", "gitea_admin/project_valhalla", "Gitea repo in owner/name format")
+	lockboxURL := flag.String("lockbox-url", "", "Lockbox base URL for approval queue proxy")
 	flag.Parse()
 	if strings.TrimSpace(*agentsFlag) == "" {
 		die("missing --agents", fmt.Errorf("required"))
@@ -1707,6 +1708,93 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, gw.notificationsNewest())
+	})
+	proxyLockbox := func(w http.ResponseWriter, r *http.Request, method, path string, body []byte) {
+		base := strings.TrimSpace(*lockboxURL)
+		if base == "" {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "lockbox not configured"})
+			return
+		}
+		var bodyReader io.Reader
+		if body != nil {
+			bodyReader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(r.Context(), method, strings.TrimRight(base, "/")+path, bodyReader)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, io.LimitReader(resp.Body, 4<<20))
+	}
+	mux.HandleFunc("/api/v1/approvals", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		proxyLockbox(w, r, http.MethodGet, "/queues", nil)
+	})
+	mux.HandleFunc("/api/v1/approvals/approve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var in struct {
+			QueueID string `json:"queue_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		in.QueueID = strings.TrimSpace(in.QueueID)
+		if in.QueueID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "queue_id is required"})
+			return
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"hunt_id":  "mcp",
+			"queue_id": in.QueueID,
+			"approved": true,
+		})
+		proxyLockbox(w, r, http.MethodPost, "/approve-write", payload)
+	})
+	mux.HandleFunc("/api/v1/approvals/reject", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var in struct {
+			QueueID string `json:"queue_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		in.QueueID = strings.TrimSpace(in.QueueID)
+		if in.QueueID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "queue_id is required"})
+			return
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"hunt_id":  "mcp",
+			"queue_id": in.QueueID,
+			"approved": false,
+		})
+		proxyLockbox(w, r, http.MethodPost, "/approve-write", payload)
 	})
 	mux.HandleFunc("/api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
