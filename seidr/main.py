@@ -20,7 +20,9 @@ CHROMA_HOST = os.getenv("CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.getenv("CHROMA_PORT", "8000"))
 COLLECTION = os.getenv("COLLECTION_NAME", "valhalla_knowledge")
 MEMORY_TTL_HOURS = int(os.getenv("MEMORY_TTL_HOURS", "240"))
+LESSON_TTL_HOURS = 90 * 24
 MEMORY_TYPES = {"general", "failure", "recovery", "lesson", "fact", "observation"}
+COGNITIVE_LAYERS = {"experience", "lesson", "soul_candidate"}
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "default")
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
 
@@ -30,6 +32,7 @@ class QueryRequest(BaseModel):
     agent: Optional[str] = None
     limit: int = 5
     type: Optional[Literal["general", "failure", "recovery", "lesson", "fact", "observation"]] = None
+    layer: Optional[Literal["experience", "lesson", "soul_candidate"]] = None
     filter: Optional[dict] = None
     where: Optional[dict] = None
 
@@ -39,7 +42,20 @@ class RememberRequest(BaseModel):
     tags: list[str] = []
     source: str = "agent"
     type: Literal["general", "failure", "recovery", "lesson", "fact", "observation"] = "general"
+    layer: Optional[Literal["experience", "lesson", "soul_candidate"]] = None
+    confidence: Optional[float] = None
+    source_ids: Optional[str] = None
+    validation_count: Optional[int] = None
     metadata: Optional[dict] = None
+
+
+class ValidateRequest(BaseModel):
+    memory_id: str
+    outcome: Literal["success", "contradiction"]
+
+
+class ReflectRequest(BaseModel):
+    agent: str
 
 class IngestRequest(BaseModel):
     path: str = "/docs"
@@ -205,6 +221,61 @@ def resolve_memory_type(req: RememberRequest) -> str:
     return req.type
 
 
+def normalize_layer(value: Optional[str]) -> str:
+    layer = (value or "").strip().lower()
+    if layer in COGNITIVE_LAYERS:
+        return layer
+    return "experience"
+
+
+def normalize_confidence(value: Optional[float], layer: str) -> float:
+    if value is None:
+        return 0.7 if layer == "lesson" else 0.5
+    return max(0.0, min(1.0, float(value)))
+
+
+def normalize_source_ids(value: Optional[str]) -> str:
+    if value is None:
+        return "[]"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return "[]"
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return json.dumps(parsed)
+        except Exception:
+            pass
+        return stripped
+    if isinstance(value, list):
+        return json.dumps(value)
+    return "[]"
+
+
+def normalize_validation_count(value: Optional[int]) -> int:
+    if value is None:
+        return 0
+    try:
+        n = int(value)
+    except Exception:
+        return 0
+    return max(0, n)
+
+
+def find_memory_record(memory_id: str):
+    for name in list_all_collection_names():
+        col = get_named_collection(name)
+        result = col.get(ids=[memory_id], include=["documents", "metadatas"])
+        ids = result.get("ids", [])
+        if not ids:
+            continue
+        docs = result.get("documents", [])
+        metas = result.get("metadatas", [])
+        return name, col, ids[0], docs[0], (metas[0] or {})
+    return None
+
+
 def iter_collection_entries(col):
     total = col.count()
     if total == 0:
@@ -219,12 +290,14 @@ def prune_collection(name: str) -> dict:
     if total == 0:
         return {"pruned": 0, "remaining": 0}
 
-    cutoff = utcnow() - timedelta(hours=MEMORY_TTL_HOURS)
     pruned = 0
     for doc_id, _, meta in iter_collection_entries(col):
         meta = meta or {}
-        if meta.get("type") == "lesson":
+        layer = normalize_layer(meta.get("layer"))
+        if layer == "soul_candidate":
             continue
+        ttl_hours = LESSON_TTL_HOURS if layer == "lesson" else MEMORY_TTL_HOURS
+        cutoff = utcnow() - timedelta(hours=ttl_hours)
         ts = parse_timestamp(meta.get("timestamp", ""))
         if ts is None or ts >= cutoff:
             continue
@@ -383,6 +456,8 @@ async def query(req: QueryRequest):
         where.update(req.filter)
     if req.type:
         where["type"] = req.type
+    if req.layer:
+        where["layer"] = req.layer
     if not where:
         where = None
     results = hybrid_search(req.query, limit=req.limit, agent=req.agent, where=where)
@@ -409,15 +484,24 @@ async def remember(req: RememberRequest):
                 return {"id": None, "stored": False, "reason": "duplicate", "similar_to": existing_id}
 
     doc_id = f"{req.agent}-{int(time.time())}-{os.urandom(4).hex()}"
+    layer = normalize_layer(req.layer)
     metadata = {
         "agent": req.agent,
         "source": req.source,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tags": ",".join(req.tags) if req.tags else "",
         "type": memory_type,
+        "layer": layer,
+        "confidence": normalize_confidence(req.confidence, layer),
+        "source_ids": normalize_source_ids(req.source_ids),
+        "validation_count": normalize_validation_count(req.validation_count),
     }
     if req.metadata:
         metadata.update(req.metadata)
+    metadata["layer"] = normalize_layer(metadata.get("layer"))
+    metadata["confidence"] = normalize_confidence(metadata.get("confidence"), metadata["layer"])
+    metadata["source_ids"] = normalize_source_ids(metadata.get("source_ids"))
+    metadata["validation_count"] = normalize_validation_count(metadata.get("validation_count"))
     col.add(
         documents=[req.content],
         metadatas=[metadata],
@@ -453,6 +537,110 @@ async def list_memories(agent: str = None, limit: int = 100, type: str = None):
 @app.post("/prune")
 async def prune():
     return prune_expired_memories()
+
+
+@app.post("/validate")
+async def validate_memory(req: ValidateRequest):
+    record = find_memory_record(req.memory_id)
+    if not record:
+        return {"updated": False, "error": "memory not found"}
+    _, col, doc_id, document, meta = record
+    meta = dict(meta or {})
+    current_conf = normalize_confidence(meta.get("confidence"), normalize_layer(meta.get("layer")))
+    current_validations = normalize_validation_count(meta.get("validation_count"))
+    if req.outcome == "success":
+        current_validations += 1
+        current_conf = min(1.0, current_conf + 0.1)
+    else:
+        current_conf = max(0.0, current_conf - 0.2)
+    meta["validation_count"] = current_validations
+    meta["confidence"] = round(current_conf, 4)
+    col.upsert(documents=[document], metadatas=[meta], ids=[doc_id])
+    return {"updated": True, "memory_id": doc_id, "metadata": meta}
+
+
+@app.post("/reflect")
+async def reflect(req: ReflectRequest):
+    agent = (req.agent or "").strip()
+    if not agent:
+        return {"agent": "", "clusters": [], "count": 0}
+    col = get_collection(agent)
+    cutoff = utcnow() - timedelta(days=14)
+    experiences = []
+    for doc_id, document, meta in iter_collection_entries(col):
+        meta = meta or {}
+        layer = normalize_layer(meta.get("layer"))
+        if layer != "experience":
+            continue
+        ts = parse_timestamp(meta.get("timestamp", ""))
+        if ts is None or ts < cutoff:
+            continue
+        experiences.append((doc_id, document, meta, ts))
+    if len(experiences) < 3:
+        return {"agent": agent, "clusters": [], "count": 0}
+
+    parent = list(range(len(experiences)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    id_to_idx = {doc_id: idx for idx, (doc_id, _, _, _) in enumerate(experiences)}
+    for idx, (doc_id, document, _, _) in enumerate(experiences):
+        results = col.query(
+            query_texts=[document],
+            n_results=len(experiences),
+            include=["distances"],
+        )
+        ids = results.get("ids", [[]])[0]
+        distances = results.get("distances", [[]])[0]
+        for other_id, distance in zip(ids, distances):
+            if other_id == doc_id or other_id not in id_to_idx or distance is None:
+                continue
+            similarity = 1.0 - float(distance)
+            if similarity > 0.80:
+                union(idx, id_to_idx[other_id])
+
+    grouped = {}
+    for idx in range(len(experiences)):
+        grouped.setdefault(find(idx), []).append(idx)
+
+    clusters = []
+    for members in grouped.values():
+        if len(members) < 3:
+            continue
+        cluster_memories = []
+        memory_ids = []
+        for i in members:
+            mem_id, content, meta, ts = experiences[i]
+            memory_ids.append(mem_id)
+            cluster_memories.append({
+                "id": mem_id,
+                "content": content,
+                "timestamp": ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "confidence": normalize_confidence(meta.get("confidence"), "experience"),
+                "validation_count": normalize_validation_count(meta.get("validation_count")),
+            })
+        synthesis_prompt = (
+            "Synthesize these related experiences into one reusable lesson with actionable steps. "
+            f"Memory IDs: {', '.join(memory_ids)}."
+        )
+        clusters.append({
+            "size": len(cluster_memories),
+            "members": cluster_memories,
+            "suggested_synthesis_prompt": synthesis_prompt,
+        })
+
+    clusters.sort(key=lambda c: c["size"], reverse=True)
+    return {"agent": agent, "clusters": clusters, "count": len(clusters)}
+
 
 @app.post("/migrate")
 async def migrate(req: MigrateRequest):
