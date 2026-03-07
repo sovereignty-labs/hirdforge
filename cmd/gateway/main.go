@@ -70,6 +70,21 @@ type Notification struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type approvalQueueItem struct {
+	QueueID  string                 `json:"queue_id"`
+	HuntID   string                 `json:"hunt_id"`
+	Service  string                 `json:"service"`
+	Action   string                 `json:"action"`
+	Params   map[string]interface{} `json:"params"`
+	Status   string                 `json:"status"`
+	QueuedAt string                 `json:"queued_at"`
+}
+
+type approvalsResponse struct {
+	Status string              `json:"status"`
+	Queues []approvalQueueItem `json:"queues"`
+}
+
 type PodInfo struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
@@ -1325,6 +1340,83 @@ func podNameFromPath(path, action string) (string, bool) {
 	return name, true
 }
 
+func summarizeApprovalParams(params map[string]interface{}) string {
+	if len(params) == 0 {
+		return "(no params)"
+	}
+	b, err := json.Marshal(params)
+	if err != nil {
+		return "(unserializable params)"
+	}
+	s := strings.TrimSpace(string(b))
+	if len(s) > 280 {
+		return s[:280] + "..."
+	}
+	return s
+}
+
+func approvalAgentName(item approvalQueueItem) string {
+	if item.Params == nil {
+		return "unknown"
+	}
+	for _, key := range []string{"agent", "from", "requested_by"} {
+		if raw, ok := item.Params[key]; ok {
+			if s := strings.TrimSpace(fmt.Sprint(raw)); s != "" {
+				return s
+			}
+		}
+	}
+	return "unknown"
+}
+
+func sendDiscordApprovalWebhook(webhookURL string, item approvalQueueItem) error {
+	webhookURL = strings.TrimSpace(webhookURL)
+	if webhookURL == "" {
+		return nil
+	}
+	agent := approvalAgentName(item)
+	action := strings.TrimSpace(item.Action)
+	if action == "" {
+		action = "unknown_action"
+	}
+	payload := map[string]interface{}{
+		"embeds": []map[string]interface{}{{
+			"title":       "Pending Lockbox Approval",
+			"description": fmt.Sprintf("New write approval queued for `%s` by `%s`.", action, agent),
+			"color":       16096779, // amber
+			"fields": []map[string]interface{}{
+				{"name": "Action", "value": action, "inline": true},
+				{"name": "Agent", "value": agent, "inline": true},
+				{"name": "Queue ID", "value": item.QueueID, "inline": false},
+				{"name": "Details", "value": summarizeApprovalParams(item.Params), "inline": false},
+			},
+			"footer": map[string]string{
+				"text": "Valhalla Gateway • Approval required",
+			},
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+		}},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("discord webhook returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
 func main() {
 	port := flag.String("port", "8080", "HTTP port")
 	agentsFlag := flag.String("agents", "", "comma-separated name=url agent list")
@@ -1332,6 +1424,7 @@ func main() {
 	giteaToken := flag.String("gitea-token", "", "Gitea API token (optional)")
 	giteaRepo := flag.String("gitea-repo", "gitea_admin/project_valhalla", "Gitea repo in owner/name format")
 	lockboxURL := flag.String("lockbox-url", "", "Lockbox base URL for approval queue proxy")
+	discordWebhookURL := flag.String("discord-webhook-url", "", "Discord webhook URL for new approval notifications")
 	flag.Parse()
 	if strings.TrimSpace(*agentsFlag) == "" {
 		die("missing --agents", fmt.Errorf("required"))
@@ -2581,6 +2674,59 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ready", "agents": len(agents), "healthy": healthy})
 	})
+
+	if strings.TrimSpace(*discordWebhookURL) != "" {
+		go func() {
+			seen := map[string]struct{}{}
+			poll := func() {
+				approvalsURL := fmt.Sprintf("http://127.0.0.1:%s/api/v1/approvals", strings.TrimSpace(*port))
+				req, err := http.NewRequest(http.MethodGet, approvalsURL, nil)
+				if err != nil {
+					log.Printf("approval notifier: create request failed: %v", err)
+					return
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					log.Printf("approval notifier: poll failed: %v", err)
+					return
+				}
+				defer resp.Body.Close()
+				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+					b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+					log.Printf("approval notifier: poll returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+					return
+				}
+				var out approvalsResponse
+				if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+					log.Printf("approval notifier: decode failed: %v", err)
+					return
+				}
+				for _, item := range out.Queues {
+					if strings.TrimSpace(item.Status) != "pending" {
+						continue
+					}
+					qid := strings.TrimSpace(item.QueueID)
+					if qid == "" {
+						continue
+					}
+					if _, exists := seen[qid]; exists {
+						continue
+					}
+					seen[qid] = struct{}{}
+					if err := sendDiscordApprovalWebhook(*discordWebhookURL, item); err != nil {
+						log.Printf("approval notifier: webhook send failed for %s: %v", qid, err)
+					}
+				}
+			}
+			time.Sleep(5 * time.Second)
+			poll()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				poll()
+			}
+		}()
+	}
 
 	addr := ":" + *port
 	log.Printf("Valhalla Gateway listening on %s", addr)
