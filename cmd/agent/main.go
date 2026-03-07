@@ -283,7 +283,7 @@ type (
 	anthropicRequest struct {
 		Model     string             `json:"model"`
 		MaxTokens int                `json:"max_tokens"`
-		System    string             `json:"system,omitempty"`
+		System    interface{}        `json:"system,omitempty"`
 		Messages  []anthropicMessage `json:"messages"`
 		Stream    bool               `json:"stream"`
 		Tools     []anthropicTool    `json:"tools,omitempty"`
@@ -1066,7 +1066,7 @@ func convertMessagesForResponses(msgs []message) []interface{} {
 	return out
 }
 
-func convertMessagesForAnthropic(msgs []message) (systemPrompt string, converted []anthropicMessage) {
+func convertMessagesForAnthropic(msgs []message) (systemPrompt interface{}, converted []anthropicMessage) {
 	systemParts := []string{}
 	out := make([]anthropicMessage, 0, len(msgs))
 	appendToolResult := func(m message) {
@@ -1125,7 +1125,32 @@ func convertMessagesForAnthropic(msgs []message) (systemPrompt string, converted
 	if len(out) == 0 {
 		out = append(out, anthropicMessage{Role: "user", Content: "Hello"})
 	}
-	return strings.Join(systemParts, "\n"), out
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i].Role != "user" {
+			continue
+		}
+		if text, ok := out[i].Content.(string); ok {
+			out[i].Content = []map[string]interface{}{{
+				"type": "text",
+				"text": text,
+				"cache_control": map[string]string{
+					"type": "ephemeral",
+				},
+			}}
+		}
+		break
+	}
+	systemText := strings.Join(systemParts, "\n")
+	if strings.TrimSpace(systemText) != "" {
+		systemPrompt = []map[string]interface{}{{
+			"type": "text",
+			"text": systemText,
+			"cache_control": map[string]string{
+				"type": "ephemeral",
+			},
+		}}
+	}
+	return systemPrompt, out
 }
 
 func convertToolDefsForAnthropic(defs []toolDef) []anthropicTool {
