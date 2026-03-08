@@ -2675,8 +2675,10 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ready", "agents": len(agents), "healthy": healthy})
 	})
 
+	log.Printf("approval notifier: discord-webhook-url=%q lockbox-url=%q", *discordWebhookURL, *lockboxURL)
 	if strings.TrimSpace(*discordWebhookURL) != "" {
 		go func() {
+			log.Printf("approval notifier: goroutine started")
 			seen := map[string]struct{}{}
 			poll := func() {
 				approvalsURL := fmt.Sprintf("http://127.0.0.1:%s/api/v1/approvals", strings.TrimSpace(*port))
@@ -2719,6 +2721,7 @@ func main() {
 				}
 			}
 			time.Sleep(5 * time.Second)
+			log.Printf("approval notifier: starting first poll")
 			poll()
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
