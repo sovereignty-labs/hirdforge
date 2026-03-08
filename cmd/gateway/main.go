@@ -1405,7 +1405,9 @@ func sendDiscordApprovalWebhook(webhookURL string, item approvalQueueItem) error
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	log.Printf("approval notifier: sending webhook for %s", item.QueueID)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -1414,6 +1416,7 @@ func sendDiscordApprovalWebhook(webhookURL string, item approvalQueueItem) error
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		return fmt.Errorf("discord webhook returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
 	}
+	log.Printf("approval notifier: webhook sent for %s", item.QueueID)
 	return nil
 }
 
