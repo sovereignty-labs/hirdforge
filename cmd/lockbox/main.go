@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -99,6 +101,7 @@ type lockboxState struct {
 	upstreamSessionID string
 	upstreamTools     map[string]upstreamTool
 	upstreamRPCSeq    uint64
+	upstreamInitMu    sync.Mutex
 }
 
 type ToolHandler struct {
@@ -113,6 +116,27 @@ type upstreamTool struct {
 	Name        string
 	Description string
 	InputSchema map[string]interface{}
+}
+
+type upstreamCallError struct {
+	statusCode int
+	body       string
+	rpcCode    int
+	rpcMessage string
+	err        error
+}
+
+func (e *upstreamCallError) Error() string {
+	switch {
+	case e.rpcCode != 0:
+		return fmt.Sprintf("upstream MCP error %d: %s", e.rpcCode, e.rpcMessage)
+	case e.statusCode != 0:
+		return fmt.Sprintf("upstream status %d: %s", e.statusCode, strings.TrimSpace(e.body))
+	case e.err != nil:
+		return e.err.Error()
+	default:
+		return "upstream call failed"
+	}
 }
 
 type oauthTokenFile struct {
@@ -835,13 +859,68 @@ func callUpstreamRPC(url, sessionID string, reqBody jsonRPCRequest, includeSessi
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return out, resp.Header, fmt.Errorf("upstream status %s: %s", resp.Status, strings.TrimSpace(string(b)))
+		return out, resp.Header, &upstreamCallError{
+			statusCode: resp.StatusCode,
+			body:       string(b),
+		}
 	}
-	out, err = parseSSEJSONRPCResponse(resp.Body)
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return out, resp.Header, err
 	}
+	out, err = parseSSEJSONRPCResponse(bytes.NewReader(buf))
+	if err != nil {
+		return out, resp.Header, &upstreamCallError{err: fmt.Errorf("%w: %s", err, strings.TrimSpace(string(buf)))}
+	}
 	return out, resp.Header, nil
+}
+
+func hasStaleSessionText(text string) bool {
+	text = strings.ToLower(strings.TrimSpace(text))
+	if text == "" {
+		return false
+	}
+	if !strings.Contains(text, "session") {
+		return false
+	}
+	return strings.Contains(text, "not found") || strings.Contains(text, "expired") || strings.Contains(text, "invalid")
+}
+
+func isLikelyStaleSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ue *upstreamCallError
+	if errors.As(err, &ue) {
+		if ue.statusCode == http.StatusBadRequest || ue.statusCode == http.StatusNotFound || ue.statusCode == http.StatusGone {
+			return true
+		}
+		if ue.rpcCode == -32000 {
+			return true
+		}
+		if hasStaleSessionText(ue.body) || hasStaleSessionText(ue.rpcMessage) {
+			return true
+		}
+	}
+	return hasStaleSessionText(err.Error())
+}
+
+func (s *lockboxState) refreshUpstreamSessionIfNeeded(previousSession string) error {
+	s.upstreamInitMu.Lock()
+	defer s.upstreamInitMu.Unlock()
+
+	s.mu.RLock()
+	current := strings.TrimSpace(s.upstreamSessionID)
+	url := strings.TrimSpace(s.upstreamMCPURL)
+	s.mu.RUnlock()
+	if url == "" {
+		return fmt.Errorf("upstream MCP not configured")
+	}
+	if current != "" && current != strings.TrimSpace(previousSession) {
+		return nil
+	}
+	log.Printf("upstream session stale, re-initializing")
+	return s.discoverUpstreamTools()
 }
 
 func (s *lockboxState) discoverUpstreamTools() error {
@@ -931,23 +1010,47 @@ func (s *lockboxState) proxyUpstreamToolCall(toolName string, args map[string]in
 	if sessionID == "" {
 		return nil, fmt.Errorf("upstream MCP session is not initialized")
 	}
-	id := atomic.AddUint64(&s.upstreamRPCSeq, 1)
-	resp, _, err := callUpstreamRPC(url, sessionID, jsonRPCRequest{
-		JSONRPC: "2.0",
-		ID:      id,
-		Method:  "tools/call",
-		Params: map[string]interface{}{
-			"name":      toolName,
-			"arguments": cloneParams(args),
-		},
-	}, true)
-	if err != nil {
+	callOnce := func(session string) (interface{}, error) {
+		id := atomic.AddUint64(&s.upstreamRPCSeq, 1)
+		resp, _, err := callUpstreamRPC(url, session, jsonRPCRequest{
+			JSONRPC: "2.0",
+			ID:      id,
+			Method:  "tools/call",
+			Params: map[string]interface{}{
+				"name":      toolName,
+				"arguments": cloneParams(args),
+			},
+		}, true)
+		if err != nil {
+			return nil, err
+		}
+		if resp.Error != nil {
+			return nil, &upstreamCallError{
+				statusCode: http.StatusOK,
+				rpcCode:    resp.Error.Code,
+				rpcMessage: resp.Error.Message,
+			}
+		}
+		return resp.Result, nil
+	}
+	out, err := callOnce(sessionID)
+	if err == nil {
+		return out, nil
+	}
+	if !isLikelyStaleSessionError(err) {
 		return nil, err
 	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("upstream MCP error %d: %s", resp.Error.Code, resp.Error.Message)
+	if refreshErr := s.refreshUpstreamSessionIfNeeded(sessionID); refreshErr != nil {
+		return nil, refreshErr
 	}
-	return resp.Result, nil
+	s.mu.RLock()
+	newSessionID := strings.TrimSpace(s.upstreamSessionID)
+	s.mu.RUnlock()
+	out, retryErr := callOnce(newSessionID)
+	if retryErr != nil {
+		return nil, retryErr
+	}
+	return out, nil
 }
 
 func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
