@@ -724,7 +724,7 @@ async def remember(req: RememberRequest):
             for item in similar:
                 similarity = float(item.get("vector_score", item.get("similarity", 0.0)))
                 old_id = (item.get("id") or "").strip()
-                if similarity <= 0.85 or old_id == "":
+                if similarity <= 0.40 or old_id == "":
                     continue
                 old_content = item.get("content", "")
                 contradicts, explanation = await detect_contradiction(old_content, content)
