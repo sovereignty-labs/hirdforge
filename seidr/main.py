@@ -179,6 +179,8 @@ def hybrid_search(query: str, limit: int = 5, agent: str = None, where: dict = N
 
     # Build filter
     search_where = where.copy() if where else None
+    if search_where and len(search_where) > 1:
+        search_where = {"$and": [{k: v} for k, v in search_where.items()]}
 
     # Vector search
     results = col.query(
@@ -726,8 +728,18 @@ async def remember(req: RememberRequest):
                 old_id = (item.get("id") or "").strip()
                 if similarity <= 0.40 or old_id == "":
                     continue
+                log("info", "contradiction check", {
+                    "new_id": doc_id,
+                    "old_id": old_id,
+                    "similarity": similarity,
+                })
                 old_content = item.get("content", "")
                 contradicts, explanation = await detect_contradiction(old_content, content)
+                log("info", "contradiction result", {
+                    "old_id": old_id,
+                    "contradicts": contradicts,
+                    "explanation": explanation,
+                })
                 if not contradicts:
                     continue
                 record = find_memory_record(old_id)
@@ -740,6 +752,11 @@ async def remember(req: RememberRequest):
                 if explanation:
                     old_meta["supersede_reason"] = explanation
                 old_col.upsert(documents=[old_doc], metadatas=[old_meta], ids=[old_doc_id])
+                log("info", "memory superseded", {
+                    "old_id": old_doc_id,
+                    "new_id": doc_id,
+                    "reason": explanation,
+                })
                 COGNITIVE_STATS["contradictions_detected"] += 1
 
         col.add(documents=[content], metadatas=[metadata], ids=[doc_id])
@@ -795,6 +812,7 @@ async def list_memories(agent: str = None, limit: int = 100, type: str = None):
             memories.append({
                 "id": doc_id,
                 "content": doc,
+                "metadata": meta,
                 "agent": meta.get("agent", ""),
                 "source": meta.get("source", ""),
                 "timestamp": meta.get("timestamp", ""),
