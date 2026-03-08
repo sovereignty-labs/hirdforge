@@ -393,6 +393,8 @@ type (
 var sessionsMu sync.Mutex
 var sessions = map[string][]message{}
 var seenSessions = map[string]bool{}
+var sessionContextMemoryIDs = map[string]map[string]struct{}{}
+var sessionValidatedIDs = map[string]map[string]bool{}
 var (
 	startTime         = time.Now()
 	requestCount      int64
@@ -688,8 +690,9 @@ func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult
 }
 
 type recallTool struct {
-	memoryURL string
-	agentName string
+	memoryURL  string
+	agentName  string
+	onMemories func(sessionID string, ids []string)
 }
 
 func (t *recallTool) Name() string { return "recall" }
@@ -725,12 +728,23 @@ func (t *recallTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	}
 	var out struct {
 		Results []struct {
+			ID         string  `json:"id"`
 			Content    string  `json:"content"`
 			Similarity float64 `json:"similarity"`
 		} `json:"results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Results) == 0 {
 		return toolpkg.ToolResult{Output: "No relevant memories found."}
+	}
+	memoryIDs := make([]string, 0, len(out.Results))
+	for _, r := range out.Results {
+		if id := strings.TrimSpace(r.ID); id != "" {
+			memoryIDs = append(memoryIDs, id)
+		}
+	}
+	sessionID, _ := args["_session_id"].(string)
+	if t.onMemories != nil && strings.TrimSpace(sessionID) != "" && len(memoryIDs) > 0 {
+		t.onMemories(sessionID, memoryIDs)
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Found %d relevant memories:\n\n", len(out.Results))
@@ -1941,13 +1955,76 @@ func dropOldestHistoryPairs(history []message, maxPairs int) []message {
 	return append([]message(nil), trimmed[1:]...)
 }
 
-func buildSessionBootstrapContext(memoryURL, agentName, toolsFile, playbookFile, soulContent string, persona *personaRepo) string {
-	var blocks []string
-	if b := fetchRecentMemoryBlocks(memoryURL, agentName); b != "" {
-		blocks = append(blocks, b)
+func addSessionContextMemoryIDs(sessionID string, ids []string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || len(ids) == 0 {
+		return
 	}
-	if b := fetchRecentToolLessons(memoryURL, agentName, soulContent); b != "" {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	set, ok := sessionContextMemoryIDs[sessionID]
+	if !ok {
+		set = map[string]struct{}{}
+		sessionContextMemoryIDs[sessionID] = set
+	}
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		set[id] = struct{}{}
+	}
+}
+
+func snapshotSessionContextMemoryIDs(sessionID string) []string {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	set := sessionContextMemoryIDs[sessionID]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func markSessionMemoryValidated(sessionID, memoryID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	memoryID = strings.TrimSpace(memoryID)
+	if sessionID == "" || memoryID == "" {
+		return false
+	}
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	set, ok := sessionValidatedIDs[sessionID]
+	if !ok {
+		set = map[string]bool{}
+		sessionValidatedIDs[sessionID] = set
+	}
+	if set[memoryID] {
+		return false
+	}
+	set[memoryID] = true
+	return true
+}
+
+func buildSessionBootstrapContext(memoryURL, agentName, toolsFile, playbookFile, soulContent string, persona *personaRepo) (string, []string) {
+	var blocks []string
+	contextIDs := make([]string, 0, 12)
+	if b, ids := fetchRecentMemoryBlocks(memoryURL, agentName); b != "" {
 		blocks = append(blocks, b)
+		contextIDs = append(contextIDs, ids...)
+	}
+	if b, ids := fetchRecentToolLessons(memoryURL, agentName, soulContent); b != "" {
+		blocks = append(blocks, b)
+		contextIDs = append(contextIDs, ids...)
 	}
 	if persona != nil {
 		if b := loadPersonaSessionContext(persona); b != "" {
@@ -1962,9 +2039,9 @@ func buildSessionBootstrapContext(memoryURL, agentName, toolsFile, playbookFile,
 		}
 	}
 	if len(blocks) == 0 {
-		return ""
+		return "", contextIDs
 	}
-	return "Use this reference context for this session.\n\n" + strings.Join(blocks, "\n\n")
+	return "Use this reference context for this session.\n\n" + strings.Join(blocks, "\n\n"), contextIDs
 }
 
 func readContextFileBlock(title, path string) string {
@@ -1986,9 +2063,9 @@ func readContextFileBlock(title, path string) string {
 	return title + "\n" + content
 }
 
-func fetchMemoryCollectionBlock(memoryURL, collection, title string) string {
+func fetchMemoryCollectionBlock(memoryURL, collection, title string) (string, []string) {
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(collection) == "" {
-		return ""
+		return "", nil
 	}
 	payload := map[string]interface{}{
 		"collection": collection,
@@ -1998,28 +2075,30 @@ func fetchMemoryCollectionBlock(memoryURL, collection, title string) string {
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 8 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ""
+		return "", nil
 	}
 	var out struct {
 		Results []struct {
+			ID         string  `json:"id"`
 			Content    string  `json:"content"`
 			Similarity float64 `json:"similarity"`
 		} `json:"results"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ""
+		return "", nil
 	}
 	lines := make([]string, 0, len(out.Results))
+	ids := make([]string, 0, len(out.Results))
 	for _, r := range out.Results {
 		if r.Similarity <= 0.5 {
 			continue
@@ -2029,25 +2108,31 @@ func fetchMemoryCollectionBlock(memoryURL, collection, title string) string {
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("- [%.2f] %s", r.Similarity, content))
+		if id := strings.TrimSpace(r.ID); id != "" {
+			ids = append(ids, id)
+		}
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", ids
 	}
-	return title + "\n" + strings.Join(lines, "\n")
+	return title + "\n" + strings.Join(lines, "\n"), ids
 }
 
-func fetchRecentMemoryBlocks(memoryURL, agentName string) string {
+func fetchRecentMemoryBlocks(memoryURL, agentName string) (string, []string) {
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" {
-		return ""
+		return "", nil
 	}
 	blocks := make([]string, 0, 2)
-	if b := fetchMemoryCollectionBlock(memoryURL, fmt.Sprintf("%s-memory", agentName), "## Recent Memory"); b != "" {
+	ids := make([]string, 0, 10)
+	if b, found := fetchMemoryCollectionBlock(memoryURL, fmt.Sprintf("%s-memory", agentName), "## Recent Memory"); b != "" {
 		blocks = append(blocks, b)
+		ids = append(ids, found...)
 	}
-	if b := fetchMemoryCollectionBlock(memoryURL, "warband-context", "## Warband Context"); b != "" {
+	if b, found := fetchMemoryCollectionBlock(memoryURL, "warband-context", "## Warband Context"); b != "" {
 		blocks = append(blocks, b)
+		ids = append(ids, found...)
 	}
-	return strings.Join(blocks, "\n\n")
+	return strings.Join(blocks, "\n\n"), ids
 }
 
 func soulHasLearnedTool(soulContent, toolName string) bool {
@@ -2067,9 +2152,9 @@ func soulHasLearnedTool(soulContent, toolName string) bool {
 	return false
 }
 
-func fetchRecentToolLessons(memoryURL, agentName, soulContent string) string {
+func fetchRecentToolLessons(memoryURL, agentName, soulContent string) (string, []string) {
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" {
-		return ""
+		return "", nil
 	}
 
 	body, _ := json.Marshal(map[string]interface{}{
@@ -2079,32 +2164,34 @@ func fetchRecentToolLessons(memoryURL, agentName, soulContent string) string {
 	})
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ""
+		return "", nil
 	}
 
 	var out struct {
 		Results []struct {
+			ID      string `json:"id"`
 			Content string `json:"content"`
 			Text    string `json:"text"`
 		} `json:"results"`
 		Memories []struct {
+			ID      string `json:"id"`
 			Content string `json:"content"`
 			Text    string `json:"text"`
 		} `json:"memories"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return ""
+		return "", nil
 	}
 
 	rawItems := out.Results
@@ -2112,11 +2199,12 @@ func fetchRecentToolLessons(memoryURL, agentName, soulContent string) string {
 		rawItems = out.Memories
 	}
 	if len(rawItems) == 0 {
-		return ""
+		return "", nil
 	}
 
 	const maxLessonChars = 2000
 	lessons := make([]string, 0, len(rawItems))
+	ids := make([]string, 0, len(rawItems))
 	totalChars := 0
 	for _, item := range rawItems {
 		text := strings.TrimSpace(item.Content)
@@ -2140,17 +2228,121 @@ func fetchRecentToolLessons(memoryURL, agentName, soulContent string) string {
 			break
 		}
 		lessons = append(lessons, text)
+		if id := strings.TrimSpace(item.ID); id != "" {
+			ids = append(ids, id)
+		}
 		totalChars += entryLen
 	}
 	if len(lessons) == 0 {
-		return ""
+		return "", ids
 	}
 
 	return "## Recent Tool Lessons\nThe following are recent tool failures and recoveries from your past sessions. Use these to avoid repeating mistakes:\n<lessons>\n" +
-		strings.Join(lessons, "\n") + "\n</lessons>"
+		strings.Join(lessons, "\n") + "\n</lessons>", ids
+}
+
+func truncateWords(s string, maxWords int) string {
+	if maxWords <= 0 {
+		return ""
+	}
+	parts := strings.Fields(strings.TrimSpace(s))
+	if len(parts) <= maxWords {
+		return strings.Join(parts, " ")
+	}
+	return strings.Join(parts[:maxWords], " ") + "..."
+}
+
+func fetchReflectionContext(memoryURL, agentName string) string {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" {
+		return ""
+	}
+	body, _ := json.Marshal(map[string]string{"agent": agentName})
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/reflect", bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var out struct {
+		Clusters []struct {
+			Size    int `json:"size"`
+			Members []struct {
+				Content string `json:"content"`
+			} `json:"members"`
+		} `json:"clusters"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Clusters) == 0 {
+		return ""
+	}
+	maxClusters := len(out.Clusters)
+	if maxClusters > 2 {
+		maxClusters = 2
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Memory reflection: You have %d experience clusters ready for synthesis.\n", len(out.Clusters))
+	for i := 0; i < maxClusters; i++ {
+		c := out.Clusters[i]
+		preview := ""
+		if len(c.Members) > 0 {
+			preview = truncateWords(c.Members[0].Content, 32)
+		}
+		fmt.Fprintf(&b, "Cluster %d (%d experiences): %s Consider synthesizing lessons from these patterns using the remember tool with type=lesson.\n", i+1, c.Size, preview)
+	}
+	return truncateWords(b.String(), 500)
+}
+
+func validateContextMemoriesAsync(memoryURL, sessionID, outcome string) {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	outcome = strings.TrimSpace(outcome)
+	if outcome != "success" && outcome != "contradiction" {
+		return
+	}
+	ids := snapshotSessionContextMemoryIDs(sessionID)
+	if len(ids) == 0 {
+		return
+	}
+	for _, memoryID := range ids {
+		if !markSessionMemoryValidated(sessionID, memoryID) {
+			continue
+		}
+		go func(mid string) {
+			payload, _ := json.Marshal(map[string]string{
+				"memory_id": mid,
+				"outcome":   outcome,
+			})
+			req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/validate", bytes.NewReader(payload))
+			if err != nil {
+				logJSON("warn", "memory validation request build failed", map[string]interface{}{"error": err.Error(), "memory_id": mid})
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			client := &http.Client{Timeout: 3 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				logJSON("warn", "memory validation request failed", map[string]interface{}{"error": err.Error(), "memory_id": mid})
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+				logJSON("warn", "memory validation returned non-2xx", map[string]interface{}{"memory_id": mid, "status": resp.StatusCode, "body": strings.TrimSpace(string(b))})
+			}
+		}(memoryID)
+	}
 }
 
 type recalledMemory struct {
+	ID       string
 	Text     string
 	Metadata map[string]interface{}
 }
@@ -2176,6 +2368,7 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 	}
 
 	type recallItem struct {
+		ID       string                 `json:"id"`
 		Content  string                 `json:"content"`
 		Text     string                 `json:"text"`
 		Metadata map[string]interface{} `json:"metadata"`
@@ -2202,6 +2395,7 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 			continue
 		}
 		memories = append(memories, recalledMemory{
+			ID:       strings.TrimSpace(item.ID),
 			Text:     text,
 			Metadata: item.Metadata,
 		})
@@ -3369,7 +3563,13 @@ func main() {
 	}
 	broadcastExec := &broadcastTool{peers: peers}
 	taskStatusExec := &taskStatusTool{peers: peers}
-	recallExec := &recallTool{memoryURL: *memoryURL, agentName: agentName}
+	recallExec := &recallTool{
+		memoryURL: *memoryURL,
+		agentName: agentName,
+		onMemories: func(sessionID string, ids []string) {
+			addSessionContextMemoryIDs(sessionID, ids)
+		},
+	}
 	rememberExec := &rememberTool{memoryURL: *memoryURL, agentName: agentName}
 	enabled := map[string]bool{}
 	for _, name := range strings.Split(*toolsFlag, ",") {
@@ -3478,17 +3678,26 @@ func main() {
 		sessionsMu.Unlock()
 
 		bootstrapContext := ""
+		bootstrapMemoryIDs := []string{}
+		reflectionContext := ""
 		if firstMessage {
 			if persona != nil {
 				if err := syncPersonaRepo(persona.URL, persona.Root); err != nil {
 					logJSON("warn", "persona repo refresh failed", map[string]interface{}{"error": err.Error()})
 				}
 			}
-			bootstrapContext = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, soul, persona)
+			bootstrapContext, bootstrapMemoryIDs = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, soul, persona)
+			if len(bootstrapMemoryIDs) > 0 {
+				addSessionContextMemoryIDs(sessionID, bootstrapMemoryIDs)
+			}
+			reflectionContext = fetchReflectionContext(*memoryURL, agentName)
 		}
 		systemContent := soul
 		if strings.TrimSpace(bootstrapContext) != "" {
 			systemContent = soul + "\n\n" + bootstrapContext
+		}
+		if strings.TrimSpace(reflectionContext) != "" {
+			systemContent += "\n\n" + reflectionContext
 		}
 		messages := []message{{Role: "system", Content: systemContent}}
 		messages = append(messages, history...)
@@ -3526,6 +3735,9 @@ func main() {
 				case "broadcast":
 					result = broadcastExec.Execute(args)
 				default:
+					if tc.Function.Name == "recall" {
+						args["_session_id"] = sessionID
+					}
 					if t, ok := reg.Get(tc.Function.Name); ok {
 						result = t.Execute(args)
 					}
@@ -3561,8 +3773,10 @@ func main() {
 			}
 			if result.Error != "" {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error, "output": result.Output})
+				validateContextMemoriesAsync(*memoryURL, sessionID, "contradiction")
 			} else {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
+				validateContextMemoriesAsync(*memoryURL, sessionID, "success")
 			}
 			if logTool != nil {
 				inputBytes, _ := json.Marshal(args)
