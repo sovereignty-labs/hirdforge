@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -93,6 +94,11 @@ type lockboxState struct {
 	services map[string]ServiceHandler
 	tools    map[string]ToolHandler
 	queueSeq uint64
+
+	upstreamMCPURL    string
+	upstreamSessionID string
+	upstreamTools     map[string]upstreamTool
+	upstreamRPCSeq    uint64
 }
 
 type ToolHandler struct {
@@ -101,6 +107,12 @@ type ToolHandler struct {
 	InputSchema map[string]interface{}
 	WriteTier   string
 	Handler     func(params map[string]interface{}) (interface{}, error)
+}
+
+type upstreamTool struct {
+	Name        string
+	Description string
+	InputSchema map[string]interface{}
 }
 
 type oauthTokenFile struct {
@@ -523,8 +535,9 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 	huntID := q.HuntID
 
 	if service == "mcp" {
-		tool, ok := s.tools[action]
-		if !ok {
+		tool, nativeTool := s.tools[action]
+		_, upstreamTool := s.upstreamTools[action]
+		if !nativeTool && !upstreamTool {
 			q.Status = "error"
 			q.Error = "tool unavailable"
 			s.addAudit(AuditEntry{
@@ -542,7 +555,15 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 
-		data, err := tool.Handler(params)
+		var (
+			data interface{}
+			err  error
+		)
+		if nativeTool {
+			data, err = tool.Handler(params)
+		} else {
+			data, err = s.proxyUpstreamToolCall(action, params)
+		}
 		if err != nil {
 			s.mu.Lock()
 			if qq, ok := s.queues[queueID]; ok {
@@ -738,6 +759,197 @@ func (s *lockboxState) listQueues(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func classifyUpstreamWriteTier(toolName string) string {
+	name := strings.ToLower(strings.TrimSpace(toolName))
+	switch {
+	case strings.HasPrefix(name, "search_"),
+		strings.HasPrefix(name, "get_"),
+		strings.HasPrefix(name, "list_"),
+		strings.HasPrefix(name, "check_"):
+		return "read"
+	case strings.HasPrefix(name, "manage_"),
+		strings.HasPrefix(name, "modify_"),
+		strings.HasPrefix(name, "batch_modify_"),
+		strings.HasPrefix(name, "copy_"),
+		strings.HasPrefix(name, "import_"):
+		return "safe_write"
+	case strings.HasPrefix(name, "send_"),
+		strings.HasPrefix(name, "create_"),
+		strings.HasPrefix(name, "update_"),
+		strings.HasPrefix(name, "delete_"),
+		strings.HasPrefix(name, "set_"),
+		strings.HasPrefix(name, "draft_"):
+		return "destructive_write"
+	default:
+		return "destructive_write"
+	}
+}
+
+func parseSSEJSONRPCResponse(body io.Reader) (jsonRPCResponse, error) {
+	var out jsonRPCResponse
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var dataLines []string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return out, err
+	}
+	if len(dataLines) == 0 {
+		return out, fmt.Errorf("upstream response missing SSE data line")
+	}
+	payload := strings.Join(dataLines, "\n")
+	if err := json.Unmarshal([]byte(payload), &out); err != nil {
+		return out, fmt.Errorf("decode SSE JSON-RPC payload: %w", err)
+	}
+	return out, nil
+}
+
+func callUpstreamRPC(url, sessionID string, reqBody jsonRPCRequest, includeSession bool) (jsonRPCResponse, http.Header, error) {
+	var out jsonRPCResponse
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return out, nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimSpace(url), strings.NewReader(string(body)))
+	if err != nil {
+		return out, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if includeSession {
+		if strings.TrimSpace(sessionID) == "" {
+			return out, nil, fmt.Errorf("missing upstream MCP session id")
+		}
+		req.Header.Set("Mcp-Session-Id", strings.TrimSpace(sessionID))
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return out, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return out, resp.Header, fmt.Errorf("upstream status %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	out, err = parseSSEJSONRPCResponse(resp.Body)
+	if err != nil {
+		return out, resp.Header, err
+	}
+	return out, resp.Header, nil
+}
+
+func (s *lockboxState) discoverUpstreamTools() error {
+	s.mu.RLock()
+	url := strings.TrimSpace(s.upstreamMCPURL)
+	s.mu.RUnlock()
+	if url == "" {
+		return nil
+	}
+	initReq := jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      1,
+		Method:  "initialize",
+		Params: map[string]interface{}{
+			"protocolVersion": "2024-11-05",
+			"capabilities":    map[string]interface{}{},
+			"clientInfo": map[string]interface{}{
+				"name":    "lockbox",
+				"version": "1.0",
+			},
+		},
+	}
+	_, headers, err := callUpstreamRPC(url, "", initReq, false)
+	if err != nil {
+		return err
+	}
+	sessionID := strings.TrimSpace(headers.Get("Mcp-Session-Id"))
+	if sessionID == "" {
+		return fmt.Errorf("upstream initialize missing Mcp-Session-Id header")
+	}
+	listResp, _, err := callUpstreamRPC(url, sessionID, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      2,
+		Method:  "tools/list",
+		Params:  map[string]interface{}{},
+	}, true)
+	if err != nil {
+		return err
+	}
+	if listResp.Error != nil {
+		return fmt.Errorf("upstream tools/list error %d: %s", listResp.Error.Code, listResp.Error.Message)
+	}
+	resultMap, ok := listResp.Result.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("upstream tools/list result format invalid")
+	}
+	rawTools, ok := resultMap["tools"].([]interface{})
+	if !ok {
+		return fmt.Errorf("upstream tools/list missing tools array")
+	}
+	discovered := map[string]upstreamTool{}
+	for _, raw := range rawTools {
+		tm, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name := strings.TrimSpace(fmt.Sprint(tm["name"]))
+		if name == "" {
+			continue
+		}
+		description := strings.TrimSpace(fmt.Sprint(tm["description"]))
+		var inputSchema map[string]interface{}
+		if m, ok := tm["inputSchema"].(map[string]interface{}); ok {
+			inputSchema = m
+		}
+		discovered[name] = upstreamTool{
+			Name:        name,
+			Description: description,
+			InputSchema: inputSchema,
+		}
+	}
+	s.mu.Lock()
+	s.upstreamSessionID = sessionID
+	s.upstreamTools = discovered
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *lockboxState) proxyUpstreamToolCall(toolName string, args map[string]interface{}) (interface{}, error) {
+	s.mu.RLock()
+	url := strings.TrimSpace(s.upstreamMCPURL)
+	sessionID := strings.TrimSpace(s.upstreamSessionID)
+	s.mu.RUnlock()
+	if url == "" {
+		return nil, fmt.Errorf("upstream MCP not configured")
+	}
+	if sessionID == "" {
+		return nil, fmt.Errorf("upstream MCP session is not initialized")
+	}
+	id := atomic.AddUint64(&s.upstreamRPCSeq, 1)
+	resp, _, err := callUpstreamRPC(url, sessionID, jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  "tools/call",
+		Params: map[string]interface{}{
+			"name":      toolName,
+			"arguments": cloneParams(args),
+		},
+	}, true)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Error != nil {
+		return nil, fmt.Errorf("upstream MCP error %d: %s", resp.Error.Code, resp.Error.Message)
+	}
+	return resp.Result, nil
+}
+
 func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -779,9 +991,25 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		tools := make([]map[string]interface{}, 0, len(names))
+		tools := make([]map[string]interface{}, 0, len(names)+len(s.upstreamTools))
 		for _, name := range names {
 			t := s.tools[name]
+			tools = append(tools, map[string]interface{}{
+				"name":        t.Name,
+				"description": t.Description,
+				"inputSchema": t.InputSchema,
+			})
+		}
+		upstreamNames := make([]string, 0, len(s.upstreamTools))
+		for name := range s.upstreamTools {
+			upstreamNames = append(upstreamNames, name)
+		}
+		sort.Strings(upstreamNames)
+		for _, name := range upstreamNames {
+			if _, exists := s.tools[name]; exists {
+				continue
+			}
+			t := s.upstreamTools[name]
 			tools = append(tools, map[string]interface{}{
 				"name":        t.Name,
 				"description": t.Description,
@@ -804,10 +1032,85 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 			args = map[string]interface{}{}
 		}
 		s.mu.RLock()
-		tool, ok := s.tools[toolName]
+		tool, nativeTool := s.tools[toolName]
+		_, upstreamTool := s.upstreamTools[toolName]
 		s.mu.RUnlock()
-		if !ok {
+		if !nativeTool && !upstreamTool {
 			resp.Error = &jsonRPCError{Code: -32601, Message: "unknown tool: " + toolName}
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+		if upstreamTool && !nativeTool {
+			writeTier := classifyUpstreamWriteTier(toolName)
+			var (
+				out interface{}
+				err error
+			)
+			switch writeTier {
+			case "read":
+				out, err = s.proxyUpstreamToolCall(toolName, args)
+			case "safe_write":
+				out, err = s.proxyUpstreamToolCall(toolName, args)
+				if err == nil {
+					s.mu.Lock()
+					s.addAudit(AuditEntry{
+						Timestamp: time.Now().UTC(),
+						HuntID:    "mcp-session",
+						Service:   "mcp",
+						Action:    toolName,
+						Params:    cloneParams(args),
+						Status:    "executed_safe_write",
+					}, "")
+					s.mu.Unlock()
+				}
+			case "destructive_write":
+				now := time.Now().UTC()
+				qid := fmt.Sprintf("q-%06d", atomic.AddUint64(&s.queueSeq, 1))
+				s.mu.Lock()
+				s.queues[qid] = &WriteQueue{
+					QueueID:  qid,
+					HuntID:   "mcp",
+					Service:  "mcp",
+					Action:   toolName,
+					Params:   cloneParams(args),
+					Status:   "pending",
+					QueuedAt: now,
+				}
+				s.addAudit(AuditEntry{
+					Timestamp: now,
+					HuntID:    "mcp",
+					Service:   "mcp",
+					Action:    toolName,
+					Params:    cloneParams(args),
+					Status:    "queued",
+				}, qid)
+				s.mu.Unlock()
+				resp.Result = map[string]interface{}{
+					"content": []map[string]interface{}{
+						{
+							"type": "text",
+							"text": toJSONString(map[string]interface{}{
+								"status":   "queued_for_approval",
+								"queue_id": qid,
+								"message":  "Destructive action queued for Sovereign approval",
+							}),
+						},
+					},
+					"isError": false,
+				}
+				writeJSON(w, http.StatusOK, resp)
+				return
+			default:
+				resp.Error = &jsonRPCError{Code: -32602, Message: "invalid write tier: " + writeTier}
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
+			if err != nil {
+				resp.Error = &jsonRPCError{Code: -32000, Message: err.Error()}
+				writeJSON(w, http.StatusOK, resp)
+				return
+			}
+			resp.Result = out
 			writeJSON(w, http.StatusOK, resp)
 			return
 		}
@@ -1388,15 +1691,18 @@ func main() {
 	googleClientID := flag.String("google-client-id", "", "Google OAuth client ID")
 	googleClientSecret := flag.String("google-client-secret", "", "Google OAuth client secret")
 	googleTokenFile := flag.String("google-token-file", "/vault/secrets/google-token.json", "Path to stored Google OAuth token")
+	upstreamMCP := flag.String("upstream-mcp", "", "Upstream MCP server URL")
 	flag.Parse()
 
 	state := &lockboxState{
-		hunts:    map[string]*HuntScope{},
-		audits:   map[string][]AuditEntry{},
-		queues:   map[string]*WriteQueue{},
-		services: map[string]ServiceHandler{},
-		tools:    map[string]ToolHandler{},
+		hunts:         map[string]*HuntScope{},
+		audits:        map[string][]AuditEntry{},
+		queues:        map[string]*WriteQueue{},
+		services:      map[string]ServiceHandler{},
+		tools:         map[string]ToolHandler{},
+		upstreamTools: map[string]upstreamTool{},
 	}
+	state.upstreamMCPURL = strings.TrimSpace(*upstreamMCP)
 	state.services["mock"] = &MockService{}
 
 	if strings.TrimSpace(*googleClientID) != "" || strings.TrimSpace(*googleClientSecret) != "" {
@@ -1405,6 +1711,16 @@ func main() {
 			log.Fatalf("google setup failed: %v", err)
 		}
 		registerGoogleTools(state, clients)
+	}
+	if state.upstreamMCPURL != "" {
+		if err := state.discoverUpstreamTools(); err != nil {
+			log.Printf("warning: upstream MCP unavailable: %v", err)
+		} else {
+			state.mu.RLock()
+			n := len(state.upstreamTools)
+			state.mu.RUnlock()
+			log.Printf("upstream MCP connected: discovered %d tools", n)
+		}
 	}
 
 	go func() {
