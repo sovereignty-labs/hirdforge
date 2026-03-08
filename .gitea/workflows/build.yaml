@@ -98,7 +98,7 @@ jobs:
           # For JSON-formatted deployment files, update only the image field via jq
           # so manually-added env vars/volumes are preserved.
           for file in infrastructure/valhalla/deployment-*.yaml; do
-            if grep -q '^[[:space:]]*{' "$file"; then
+            if jq empty "$file" 2>/dev/null; then
               current_image=$(jq -r '.spec.template.spec.containers[0].image // empty' "$file")
               if [ -n "$current_image" ]; then
                 base_image="${current_image%%:*}"
