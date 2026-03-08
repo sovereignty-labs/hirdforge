@@ -2702,7 +2702,7 @@ func main() {
 					return
 				}
 				for _, item := range out.Queues {
-					if strings.TrimSpace(item.Status) != "queued" {
+					if strings.TrimSpace(item.Status) != "pending" {
 						continue
 					}
 					qid := strings.TrimSpace(item.QueueID)
