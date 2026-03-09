@@ -393,6 +393,7 @@ type (
 var sessionsMu sync.Mutex
 var sessions = map[string][]message{}
 var seenSessions = map[string]bool{}
+var skillNudgeInjected = map[string]bool{}
 var sessionContextMemoryIDs = map[string]map[string]struct{}{}
 var sessionValidatedIDs = map[string]map[string]bool{}
 var (
@@ -3670,6 +3671,11 @@ func main() {
 		if firstMessage {
 			seenSessions[sessionID] = true
 		}
+		injectSkillNudge := false
+		if firstMessage && strings.TrimSpace(*personaRepoFlag) != "" && !skillNudgeInjected[sessionID] {
+			skillNudgeInjected[sessionID] = true
+			injectSkillNudge = true
+		}
 		sessionsMu.Unlock()
 
 		history = compactHistory(sessionID, history, *maxContext, *compactionThreshold, *compactionBatch, *inferenceURL, *model, *apiKey, *memoryURL, agentName)
@@ -3701,6 +3707,12 @@ func main() {
 		}
 		messages := []message{{Role: "system", Content: systemContent}}
 		messages = append(messages, history...)
+		if injectSkillNudge {
+			messages = append(messages, message{
+				Role:    "system",
+				Content: "Before starting this task, check the Skills table in your SOUL and load any matching skill files using exec: cat /tmp/valhalla-personas/<path>. Do not skip this step.",
+			})
+		}
 		messages = append(messages, message{Role: "user", Content: content})
 
 		shouldRetryTool := func(name string) bool {
