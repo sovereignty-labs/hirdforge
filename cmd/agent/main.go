@@ -3709,7 +3709,7 @@ func main() {
 		messages = append(messages, history...)
 		if injectSkillNudge {
 			messages = append(messages, message{
-				Role:    "system",
+				Role:    "user",
 				Content: "Before starting this task, check the Skills table in your SOUL and load any matching skill files using exec: cat /tmp/valhalla-personas/<path>. Do not skip this step.",
 			})
 		}
