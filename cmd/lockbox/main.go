@@ -102,6 +102,7 @@ type lockboxState struct {
 	upstreamTools     map[string]upstreamTool
 	upstreamRPCSeq    uint64
 	upstreamInitMu    sync.Mutex
+	googleUserEmail   string
 }
 
 type ToolHandler struct {
@@ -1003,12 +1004,18 @@ func (s *lockboxState) proxyUpstreamToolCall(toolName string, args map[string]in
 	s.mu.RLock()
 	url := strings.TrimSpace(s.upstreamMCPURL)
 	sessionID := strings.TrimSpace(s.upstreamSessionID)
+	googleUserEmail := strings.TrimSpace(s.googleUserEmail)
 	s.mu.RUnlock()
 	if url == "" {
 		return nil, fmt.Errorf("upstream MCP not configured")
 	}
 	if sessionID == "" {
 		return nil, fmt.Errorf("upstream MCP session is not initialized")
+	}
+	if googleUserEmail != "" {
+		if _, exists := args["user_google_email"]; !exists {
+			args["user_google_email"] = googleUserEmail
+		}
 	}
 	callOnce := func(session string) (interface{}, error) {
 		id := atomic.AddUint64(&s.upstreamRPCSeq, 1)
@@ -1133,6 +1140,14 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 		args, ok := argsRaw.(map[string]interface{})
 		if !ok || args == nil {
 			args = map[string]interface{}{}
+		}
+		s.mu.RLock()
+		googleUserEmail := strings.TrimSpace(s.googleUserEmail)
+		s.mu.RUnlock()
+		if googleUserEmail != "" {
+			if _, exists := args["user_google_email"]; !exists {
+				args["user_google_email"] = googleUserEmail
+			}
 		}
 		s.mu.RLock()
 		tool, nativeTool := s.tools[toolName]
@@ -1793,6 +1808,7 @@ func main() {
 	port := flag.Int("port", 8083, "HTTP port")
 	googleClientID := flag.String("google-client-id", "", "Google OAuth client ID")
 	googleClientSecret := flag.String("google-client-secret", "", "Google OAuth client secret")
+	googleUserEmail := flag.String("google-user-email", "", "Google user email to inject into tool params")
 	googleTokenFile := flag.String("google-token-file", "/vault/secrets/google-token.json", "Path to stored Google OAuth token")
 	upstreamMCP := flag.String("upstream-mcp", "", "Upstream MCP server URL")
 	flag.Parse()
@@ -1806,6 +1822,7 @@ func main() {
 		upstreamTools: map[string]upstreamTool{},
 	}
 	state.upstreamMCPURL = strings.TrimSpace(*upstreamMCP)
+	state.googleUserEmail = strings.TrimSpace(*googleUserEmail)
 	state.services["mock"] = &MockService{}
 
 	if strings.TrimSpace(*googleClientID) != "" || strings.TrimSpace(*googleClientSecret) != "" {
