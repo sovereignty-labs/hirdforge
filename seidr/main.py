@@ -173,14 +173,24 @@ def bm25_search(query: str, documents: list[dict], k: int = 10) -> list[int]:
     scores.sort(key=lambda x: x[1], reverse=True)
     return [i for i, s in scores[:k] if s > 0]
 
+def wrap_where_filter(where):
+    if not where:
+        return None
+    if not isinstance(where, dict):
+        return where
+    if "$and" in where:
+        return where
+    plain_keys = [k for k in where.keys() if not str(k).startswith("$")]
+    if len(plain_keys) > 1:
+        return {"$and": [{k: where[k]} for k in plain_keys]}
+    return where
+
 def hybrid_search(query: str, limit: int = 5, agent: str = None, where: dict = None):
     """Combine vector similarity + BM25 keyword search."""
     col = get_collection(agent)
 
     # Build filter
-    search_where = where.copy() if where else None
-    if search_where and len(search_where) > 1:
-        search_where = {"$and": [{k: v} for k, v in search_where.items()]}
+    search_where = wrap_where_filter(where.copy() if where else None)
 
     # Vector search
     results = col.query(
@@ -550,7 +560,7 @@ def consolidate_agent_memories(agent: str) -> dict:
             results = col.query(
                 query_texts=[document],
                 n_results=len(items),
-                where={"type": mem_type},
+                where=wrap_where_filter({"type": mem_type}),
                 include=["distances"],
             )
             ids = results.get("ids", [[]])[0]
@@ -805,7 +815,7 @@ async def list_memories(agent: str = None, limit: int = 100, type: str = None):
     names = [collection_name_for_agent(agent)] if agent else list_all_collection_names()
     for name in names:
         col = get_named_collection(name)
-        where = {"type": type} if type else None
+        where = wrap_where_filter({"type": type} if type else None)
         results = col.get(where=where, limit=limit, include=["documents", "metadatas"])
         for doc, meta, doc_id in zip(results["documents"], results["metadatas"], results["ids"]):
             meta = meta or {}
