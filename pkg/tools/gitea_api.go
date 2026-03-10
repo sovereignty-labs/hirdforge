@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -36,6 +37,8 @@ func (t *GiteaAPITool) Parameters() map[string]string {
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
 		"title":  "Title for issue or PR (create-issue, create-pr)",
 		"body":   "Body text for issue, comment, or PR description",
+		"labels": "Comma-separated label names (create-issue, list-issues)",
+		"state":  "Issue state for list-issues: open or closed (default open)",
 		"issue":  "Issue or PR number (comment, close-issue)",
 		"head":   "Source branch for PR (create-pr)",
 		"base":   "Target branch for PR (create-pr, defaults to main)",
@@ -61,7 +64,7 @@ func (t *GiteaAPITool) Execute(args map[string]interface{}) ToolResult {
 	case "comment":
 		return t.comment(owner, name, args)
 	case "list-issues":
-		return t.listIssues(owner, name)
+		return t.listIssues(owner, name, args)
 	case "list-branches":
 		return t.listBranches(owner, name)
 	case "close-issue":
@@ -117,11 +120,19 @@ func (t *GiteaAPITool) apiRequest(method, path string, body interface{}) ([]byte
 func (t *GiteaAPITool) createIssue(owner, repo string, args map[string]interface{}) ToolResult {
 	title, _ := args["title"].(string)
 	body, _ := args["body"].(string)
+	labelsCSV, _ := args["labels"].(string)
 	if title == "" {
 		return ToolResult{Error: "title is required for create-issue"}
 	}
 
-	payload := map[string]string{"title": title, "body": body}
+	labelIDs, err := t.resolveLabelIDs(owner, repo, labelsCSV)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	payload := map[string]interface{}{"title": title, "body": body}
+	if len(labelIDs) > 0 {
+		payload["labels"] = labelIDs
+	}
 	resp, status, err := t.apiRequest("POST", fmt.Sprintf("/repos/%s/%s/issues", owner, repo), payload)
 	if err != nil {
 		return ToolResult{Error: err.Error()}
@@ -135,6 +146,47 @@ func (t *GiteaAPITool) createIssue(owner, repo string, args map[string]interface
 	num, _ := result["number"].(float64)
 	url, _ := result["html_url"].(string)
 	return ToolResult{Output: fmt.Sprintf("created issue #%d: %s\n%s", int(num), title, url)}
+}
+
+func (t *GiteaAPITool) resolveLabelIDs(owner, repo, labelsCSV string) ([]int, error) {
+	labelsCSV = strings.TrimSpace(labelsCSV)
+	if labelsCSV == "" {
+		return nil, nil
+	}
+	resp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/labels", owner, repo), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, string(resp))
+	}
+	var labels []map[string]interface{}
+	if err := json.Unmarshal(resp, &labels); err != nil {
+		return nil, err
+	}
+	labelIDByName := map[string]int{}
+	for _, l := range labels {
+		name, _ := l["name"].(string)
+		if name == "" {
+			continue
+		}
+		idf, _ := l["id"].(float64)
+		labelIDByName[name] = int(idf)
+	}
+	names := strings.Split(labelsCSV, ",")
+	out := make([]int, 0, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		id, ok := labelIDByName[name]
+		if !ok {
+			return nil, fmt.Errorf("label not found: %s", name)
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 func (t *GiteaAPITool) comment(owner, repo string, args map[string]interface{}) ToolResult {
@@ -160,8 +212,23 @@ func (t *GiteaAPITool) comment(owner, repo string, args map[string]interface{}) 
 	return ToolResult{Output: fmt.Sprintf("commented on issue #%d", issueNum)}
 }
 
-func (t *GiteaAPITool) listIssues(owner, repo string) ToolResult {
-	resp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/issues?state=open&limit=20&type=issues", owner, repo), nil)
+func (t *GiteaAPITool) listIssues(owner, repo string, args map[string]interface{}) ToolResult {
+	state, _ := args["state"].(string)
+	labelsCSV, _ := args["labels"].(string)
+	state = strings.TrimSpace(strings.ToLower(state))
+	if state == "" {
+		state = "open"
+	}
+	if state != "open" && state != "closed" {
+		return ToolResult{Error: "state must be open or closed"}
+	}
+	q := url.Values{}
+	q.Set("state", state)
+	if strings.TrimSpace(labelsCSV) != "" {
+		q.Set("labels", strings.TrimSpace(labelsCSV))
+	}
+	path := fmt.Sprintf("/repos/%s/%s/issues?%s", owner, repo, q.Encode())
+	resp, status, err := t.apiRequest("GET", path, nil)
 	if err != nil {
 		return ToolResult{Error: err.Error()}
 	}
@@ -172,29 +239,33 @@ func (t *GiteaAPITool) listIssues(owner, repo string) ToolResult {
 	var issues []map[string]interface{}
 	json.Unmarshal(resp, &issues)
 
-	if len(issues) == 0 {
-		return ToolResult{Output: "no open issues"}
-	}
-
-	var sb strings.Builder
+	summary := make([]map[string]interface{}, 0, len(issues))
 	for _, issue := range issues {
 		num, _ := issue["number"].(float64)
 		title, _ := issue["title"].(string)
-		labels := ""
+		st, _ := issue["state"].(string)
+		labelNames := []string{}
 		if ls, ok := issue["labels"].([]interface{}); ok && len(ls) > 0 {
-			names := make([]string, 0, len(ls))
 			for _, l := range ls {
 				if lm, ok := l.(map[string]interface{}); ok {
 					if n, ok := lm["name"].(string); ok {
-						names = append(names, n)
+						labelNames = append(labelNames, n)
 					}
 				}
 			}
-			labels = " [" + strings.Join(names, ", ") + "]"
 		}
-		sb.WriteString(fmt.Sprintf("#%d %s%s\n", int(num), title, labels))
+		summary = append(summary, map[string]interface{}{
+			"number": int(num),
+			"title":  title,
+			"labels": labelNames,
+			"state":  st,
+		})
 	}
-	return ToolResult{Output: sb.String()}
+	out, err := json.Marshal(summary)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	return ToolResult{Output: string(out)}
 }
 
 func (t *GiteaAPITool) listBranches(owner, repo string) ToolResult {
