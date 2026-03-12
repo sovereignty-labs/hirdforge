@@ -90,11 +90,12 @@ jobs:
         run: |
           cd /src-code
           SHA_SHORT=$(git rev-parse --short HEAD)
+          NEW_TAG="sha-$SHA_SHORT"
           cd /src-infra
-          # Use regex to match any existing tag (e.g., :latest, :sha-xxx)
-          sed -Ei "s|valhalla-agent:[a-zA-Z0-9_-]+|valhalla-agent:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/deployment-freya.yaml infrastructure/valhalla/deployment-leif.yaml infrastructure/valhalla/deployment-sindri.yaml
-          sed -Ei "s|valhalla-gateway:[a-zA-Z0-9_-]+|valhalla-gateway:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-gateway.yaml
-          sed -Ei "s|valhalla-seidr:[a-zA-Z0-9_-]+|valhalla-seidr:sha-$SHA_SHORT|g" infrastructure/valhalla/deployment-seidr.yaml
+          # Update only first-party valhalla images from our registry prefix.
+          sed -i "s|203.0.113.26:30637/gitea_admin/valhalla-\([a-z]*\):[^ ]*|203.0.113.26:30637/gitea_admin/valhalla-\1:${NEW_TAG}|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/deployment-freya.yaml infrastructure/valhalla/deployment-leif.yaml infrastructure/valhalla/deployment-sindri.yaml
+          sed -i "s|203.0.113.26:30637/gitea_admin/valhalla-\([a-z]*\):[^ ]*|203.0.113.26:30637/gitea_admin/valhalla-\1:${NEW_TAG}|g" infrastructure/valhalla/deployment-gateway.yaml
+          sed -i "s|203.0.113.26:30637/gitea_admin/valhalla-\([a-z]*\):[^ ]*|203.0.113.26:30637/gitea_admin/valhalla-\1:${NEW_TAG}|g" infrastructure/valhalla/deployment-seidr.yaml
           # For JSON-formatted deployment files, update only the image field via jq
           # so manually-added env vars/volumes are preserved.
           for file in infrastructure/valhalla/deployment-*.yaml; do
