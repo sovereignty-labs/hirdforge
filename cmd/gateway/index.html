@@ -111,6 +111,19 @@
   .session-item{padding:5px 7px;border:1px solid rgba(255,255,255,0.04);border-radius:3px;cursor:pointer;margin-bottom:2px;transition:all .1s}
   .session-item:hover{background:rgba(255,255,255,0.02)}
   .session-item.active{border-color:rgba(129,140,248,0.3);background:rgba(129,140,248,0.05)}
+  .session-tabs{display:flex;gap:4px;padding:8px 0 6px}
+  .session-tab{padding:3px 9px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.02);color:rgba(255,255,255,0.35);font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;border-radius:3px}
+  .session-tab.active{border-color:rgba(129,140,248,0.35);background:rgba(129,140,248,0.1);color:#a5b4fc}
+  .session-browser{padding:8px 16px 10px;border-bottom:1px solid rgba(255,255,255,0.04);background:rgba(0,0,0,0.18);flex-shrink:0}
+  .session-list{max-height:120px;overflow-y:auto;display:flex;flex-direction:column;gap:2px}
+  .source-badge{display:inline-flex;align-items:center;padding:1px 5px;font-size:8px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;border-radius:2px;background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.55);margin-left:5px}
+  .autonomous-banner{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;border-bottom:1px solid rgba(245,158,11,0.35);background:rgba(245,158,11,0.14);color:#fcd34d;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;flex-shrink:0}
+  .injection-wrap{padding:8px 16px;border-top:1px solid rgba(245,158,11,0.22);background:rgba(245,158,11,0.05);display:flex;flex-direction:column;gap:6px;flex-shrink:0}
+  .injection-row{display:flex;gap:8px;align-items:flex-end}
+  .injection-input{flex:1;background:rgba(0,0,0,0.22);border:1px solid rgba(245,158,11,0.35);padding:8px 10px;color:#fde68a;font-size:12px;font-family:'IBM Plex Mono',monospace;outline:none;border-radius:4px}
+  .injection-btn{padding:8px 12px;border:1px solid rgba(245,158,11,0.55);border-radius:4px;background:rgba(245,158,11,0.2);color:#f59e0b;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .pulse-dot{width:6px;height:6px;border-radius:50%;background:#22c55e;animation:pulse 1.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:.35;transform:scale(0.95)}50%{opacity:1;transform:scale(1.15)}}
 
   /* Fleet */
   .fleet{display:grid;grid-template-columns:1fr 300px;height:100%;overflow:hidden}
@@ -521,12 +534,46 @@ const ChatBubble=({msg})=>{const self=msg.from==="kit";const c=C[msg.from]||"#81
 };
 
 // ═══════════ COMMS VIEW ═══════════
-const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMsg,target,setTarget,sending,setSending,sessionId,setSessionId,sessionItems,onLoadSession,onNewConversation,onClearHistory,onEmergencyStop,auth})=>{
-  const mRef=useRef(null);const tRef=useRef(null);const cRef=useRef(null);
+const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMsg,target,setTarget,sending,setSending,sessionId,setSessionId,sessionItems,sessionFilter,setSessionFilter,onLoadSession,onNewConversation,onClearHistory,onEmergencyStop,auth,fleetState,onTogglePause,onQueueInjection,showToast,sessionMeta})=>{
+  const mRef=useRef(null);const tRef=useRef(null);const cRef=useRef(null);const feedRef=useRef(null);
+  const[injection,setInjection]=useState("");
   const ta=agents.find(a=>a.id===target)||FA[0];const tc=C[target]||"#818cf8";
   const userName=auth?.user||'Sovereign';const userRole=auth?.role||'sovereign';
+  const targetState=(fleetState||[]).find(s=>s.name===target)||{};
+  const isAutonomousSession=(sessionMeta?.source==="cronjob");
+  const activeSession=(targetState.active&&targetState.session_id&&targetState.session_id===sessionId);
+  const feedItems=useMemo(()=>[...(events||[])].slice(0,50).reverse(),[events]);
   const scrollB=useCallback(()=>{if(mRef.current)mRef.current.scrollTop=mRef.current.scrollHeight;},[]);
   useEffect(()=>{requestAnimationFrame(scrollB);},[chatHistory,scrollB]);
+  useEffect(()=>{if(feedRef.current)feedRef.current.scrollTop=feedRef.current.scrollHeight;},[feedItems]);
+  useEffect(()=>{setInjection("");},[target,sessionId]);
+
+  const formatMissionEvent=e=>{
+    const type=(e?.type||"").toLowerCase();
+    const agent=e?.agent||"system";
+    const summary=e?.summary||e?.message||"";
+    if(type==="skill_loaded")return{txt:`📋 ${agent} loaded skill file`,color:"#22d3ee"};
+    if(type==="recon_started")return{txt:`🔍 ${agent} cloning repository`,color:"#34d399"};
+    if(type==="recon_reading")return{txt:`📖 ${agent} reading ARCHITECTURE.md`,color:"#818cf8"};
+    if(type==="pr_created")return{txt:`🎉 ${agent} created pull request`,color:"#10b981"};
+    if(type==="injection_queued")return{txt:`💉 Sovereign queued injection for ${agent}`,color:"#f59e0b"};
+    if(type==="injection_sent")return{txt:`💉 Injection delivered to ${agent}`,color:"#f59e0b"};
+    if(type==="agent_paused")return{txt:`⏸️ ${agent} paused`,color:"#f59e0b"};
+    if(type==="agent_resumed")return{txt:`▶️ ${agent} resumed`,color:"#34d399"};
+    if(type==="agent_paused_skip")return{txt:`⏭️ ${agent} skipped (paused)`,color:"#fbbf24"};
+    if(type==="tool_call")return{txt:`⚒ ${agent} tool call`,color:"#22d3ee"};
+    if(type==="message")return{txt:`✉ ${summary||`Message sent to ${agent}`}`,color:"#6b7280"};
+    return{txt:summary||`${type||"event"}: ${agent}`,color:"#6b7280"};
+  };
+
+  const runInjection=async()=>{
+    const content=injection.trim();
+    if(!content)return;
+    const out=await onQueueInjection(target,content,sessionId);
+    if(out?.error){showToast(out.error);return;}
+    setInjection("");
+    showToast(`Injection queued for ${target}`);
+  };
 
   const stopCur=async()=>{if(cRef.current){cRef.current.abort();cRef.current=null;}setChatHistory(p=>{if(!p.length)return p;const u=[...p];const l={...u[u.length-1]};if(l.from===target&&l.streaming){l.streaming=false;l.text=(l.text?l.text+"\n":"")+"[Stopped by Sovereign]";u[u.length-1]=l;}return u;});setSending(false);await apiPost(`/api/v1/agents/${target}/stop`);};
 
@@ -551,6 +598,20 @@ const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMs
         <div style={{marginLeft:"auto",paddingRight:6}}><Btn label="Broadcast" icon="⚡" color="#fbbf24" small/></div>
       </div>
       <div className="agent-info"><Av agent={ta} size={22}/><div style={{flex:1}}><span style={{fontSize:12,fontWeight:700,color:tc}}>{ta.name}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.25)",marginLeft:8}}>{ta.role}</span></div><Btn label="Clear" icon="⌫" color="#ef4444" small onClick={onClearHistory}/><Badge text={ta.model} color={tc}/></div>
+      <div className="session-browser">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span className="sidebar-title" style={{margin:0}}>Sessions</span>
+          <div style={{display:"flex",gap:3}}><Btn label="New" icon="＋" color={tc} small onClick={onNewConversation}/><Btn label="Stop All" icon="■" color="#ef4444" small onClick={onEmergencyStop}/></div>
+        </div>
+        <div className="session-tabs">
+          {[{k:"all",l:"All"},{k:"comms",l:"Comms"},{k:"cronjob",l:"Autonomous"}].map(f=><button key={f.k} className={`session-tab${sessionFilter===f.k?" active":""}`} onClick={()=>setSessionFilter(f.k)}>{f.l}</button>)}
+        </div>
+        <div className="session-list">{sessionItems.map(s=><div key={s.id} className={`session-item${sessionId===s.id?" active":""}`} onClick={()=>onLoadSession(s.id,s)}><div style={{display:"flex",justifyContent:"space-between",gap:4}}><span style={{fontSize:10,color:sessionId===s.id?tc:"rgba(255,255,255,0.3)",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.id}{s.source==="cronjob"&&<span className="source-badge">AUTO</span>}</span><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",flexShrink:0}}>{fAgo((s.updated_at||0)*1000)}</span></div><div style={{fontSize:10,color:"rgba(255,255,255,0.2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{s.last_preview||"…"}</div></div>)}{sessionItems.length===0&&<div style={{fontSize:10,color:"rgba(255,255,255,0.12)",padding:4}}>No sessions</div>}</div>
+      </div>
+      {isAutonomousSession&&<div className="autonomous-banner">
+        <span>Autonomous Session — {target}{sessionMeta?.task_ref?` — ${sessionMeta.task_ref}`:""}</span>
+        <span>{sessionMeta?.source||"cronjob"}</span>
+      </div>}
       <div className="messages-region"><div className="messages-scroll" ref={mRef}>
         <div className="spacer"/>
         {chatHistory.length===0&&<div style={{textAlign:"center",padding:"30px 0",opacity:.25}}><div style={{fontSize:24,fontFamily:"'Space Grotesk',sans-serif",fontWeight:800,color:tc,marginBottom:6}}>⚔</div><div style={{fontSize:12}}>Command the warband</div></div>}
@@ -560,25 +621,60 @@ const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMs
         <textarea ref={tRef} value={msg} onChange={e=>{setMsg(e.target.value);e.target.style.height='44px';e.target.style.height=Math.min(e.target.scrollHeight,120)+'px';}} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}}} placeholder={`Command ${(ta.name||"").split(' ')[0]}...`} rows={1}/>
         {sending?<button className="btn-send btn-stop" onClick={stopCur}>STOP</button>:<button className="btn-send" onClick={send} style={{background:`${tc}15`,borderColor:`${tc}30`,color:tc,boxShadow:`0 0 14px ${tc}0c`}}>SEND</button>}
       </div>
+      <div className="injection-wrap">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:9,fontWeight:700,color:"#f59e0b",letterSpacing:".1em",textTransform:"uppercase"}}>Sovereign Injection</span>
+          {!activeSession&&<span style={{fontSize:9,color:"rgba(245,158,11,0.8)"}}>Agent is idle — injection will fire on next activity.</span>}
+        </div>
+        <div className="injection-row">
+          <input className="injection-input" value={injection} onChange={e=>setInjection(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();runInjection();}}} placeholder={`Inject message to ${target}...`}/>
+          <button className="injection-btn" onClick={runInjection}>Send Injection</button>
+        </div>
+      </div>
     </div>
     <div className="sidebar">
-      <div className="sidebar-section"><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><span className="sidebar-title" style={{margin:0}}>Sessions</span><div style={{display:"flex",gap:3}}><Btn label="New" icon="＋" color={tc} small onClick={onNewConversation}/><Btn label="Stop All" icon="■" color="#ef4444" small onClick={onEmergencyStop}/></div></div>
-        <div style={{maxHeight:140,overflowY:"auto",display:"flex",flexDirection:"column",gap:2}}>{sessionItems.map(s=><div key={s.id} className={`session-item${sessionId===s.id?" active":""}`} onClick={()=>onLoadSession(s.id)}><div style={{display:"flex",justifyContent:"space-between",gap:4}}><span style={{fontSize:10,color:sessionId===s.id?tc:"rgba(255,255,255,0.3)",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.id}</span><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",flexShrink:0}}>{fAgo((s.updated_at||0)*1000)}</span></div><div style={{fontSize:10,color:"rgba(255,255,255,0.2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{s.last_preview||"…"}</div></div>)}{sessionItems.length===0&&<div style={{fontSize:10,color:"rgba(255,255,255,0.12)",padding:4}}>No sessions</div>}</div>
+      <div className="sidebar-section" style={{paddingBottom:8}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><span className="sidebar-title" style={{margin:0}}>Mission Control</span><span style={{fontSize:9,color:"rgba(255,255,255,0.2)"}}>{fleetState.length} agents</span></div>
+        <div style={{maxHeight:300,overflowY:"auto",display:"flex",flexDirection:"column",gap:5}}>
+          {(fleetState||[]).map(st=>{
+            const ag=agents.find(a=>a.id===st.name)||{id:st.name,name:st.name,status:"offline"};
+            const dot=C[st.name]||"#818cf8";
+            const offline=ag.status==="offline";
+            const status=offline?"Offline":(st.paused?"Paused":(st.active?"Active":"Idle"));
+            const statusColor=offline?"#ef4444":(st.paused?"#f59e0b":(st.active?"#22c55e":"#6b7280"));
+            return <div key={st.name} className="glass" style={{padding:"6px 8px",borderColor:st.paused?"rgba(245,158,11,0.35)":"rgba(255,255,255,0.07)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:6}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,minWidth:0}}>
+                  <span style={{width:8,height:8,borderRadius:"50%",background:dot,flexShrink:0}}/>
+                  <span style={{fontSize:11,fontWeight:700,color:"#e2e8f0",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{st.name}</span>
+                  {st.active&&<span className="pulse-dot"/>}
+                  <span style={{fontSize:9,color:statusColor,fontWeight:700,textTransform:"uppercase"}}>{status}</span>
+                </div>
+                {!offline&&<button onClick={()=>onTogglePause(st.name,!!st.paused)} style={{padding:"2px 7px",fontSize:9,fontWeight:700,background:st.paused?"rgba(34,197,94,0.12)":"rgba(245,158,11,0.16)",border:`1px solid ${st.paused?"rgba(34,197,94,0.35)":"rgba(245,158,11,0.4)"}`,color:st.paused?"#34d399":"#f59e0b",borderRadius:3,fontFamily:"'IBM Plex Mono',monospace"}}>{st.paused?"Resume":"Pause"}</button>}
+              </div>
+              {st.active&&<div style={{display:"flex",justifyContent:"space-between",gap:6,marginTop:4,paddingLeft:14}}>
+                <span style={{fontSize:9,color:"rgba(255,255,255,0.28)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{st.task_ref||"no-task"} · {st.source||"comms"}</span>
+                <span style={{fontSize:9,color:"rgba(255,255,255,0.22)"}}>{st.since?fUp(Math.max(0,Math.floor(Date.now()/1000-st.since))):"0m"}</span>
+              </div>}
+            </div>;
+          })}
+        </div>
       </div>
       <div className="sidebar-section" style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",alignItems:"center",gap:5}}><div style={{width:5,height:5,borderRadius:"50%",background:wsConnected?"#ef4444":"#6b7280",animation:wsConnected?"rec-pulse 1.5s ease infinite":"none"}}/><span style={{fontSize:9,fontWeight:700,color:"rgba(255,255,255,0.25)",letterSpacing:".1em",textTransform:"uppercase"}}>{wsConnected?"Live":"Offline"}</span></div><span style={{fontSize:9,color:"rgba(255,255,255,0.1)"}}>{events.length}</span></div>
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>{[{l:"DELEGATES",v:events.filter(e=>e.type==="delegate").length,c:"#818cf8"},{l:"GIT",v:events.filter(e=>e.type==="git").length,c:"#34d399"},{l:"ALERTS",v:events.filter(e=>e.type==="alert").length,c:"#fbbf24"}].map(s=><div key={s.l} style={{padding:"6px 8px",textAlign:"center",background:"rgba(0,0,0,0.1)"}}><div style={{fontSize:14,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.v}</div><div style={{fontSize:7,color:"rgba(255,255,255,0.15)",letterSpacing:".1em"}}>{s.l}</div></div>)}</div>
-      <div style={{flex:1,overflowY:"auto"}}>{events.length===0?<div style={{padding:14,textAlign:"center",fontSize:10,color:"rgba(255,255,255,0.08)"}}>Waiting for events...</div>:events.map((e,i)=>{const ec={delegate:"#818cf8",git:"#34d399",exec:"#22d3ee",alert:"#fbbf24",task:"#10b981"}[e.type]||"#6b7280";const source=e.agent||e.source||e.type||"SYSTEM";return<div key={i} style={{display:"flex",gap:6,padding:"5px 12px",borderBottom:"1px solid rgba(255,255,255,0.02)",borderLeft:`2px solid ${ec}18`}}><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",minWidth:44,flexShrink:0}}>{fT(e.timestamp)}</span><div style={{flex:1,minWidth:0}}><span style={{fontSize:9,fontWeight:800,color:ec,marginRight:4}}>{source.slice(0,3).toUpperCase()}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.35)"}}>{e.summary||e.message}</span></div></div>;})}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",borderBottom:"1px solid rgba(255,255,255,0.04)",flexShrink:0}}>{[{l:"Active",v:(fleetState||[]).filter(s=>s.active&&!s.paused).length,c:"#22c55e"},{l:"Paused",v:(fleetState||[]).filter(s=>s.paused).length,c:"#f59e0b"},{l:"Events",v:Math.min((events||[]).length,50),c:"#818cf8"}].map(s=><div key={s.l} style={{padding:"6px 8px",textAlign:"center",background:"rgba(0,0,0,0.1)"}}><div style={{fontSize:14,fontWeight:800,color:s.c,fontFamily:"'Space Grotesk',sans-serif"}}>{s.v}</div><div style={{fontSize:7,color:"rgba(255,255,255,0.15)",letterSpacing:".1em"}}>{s.l}</div></div>)}</div>
+      <div ref={feedRef} style={{flex:1,overflowY:"auto"}}>{feedItems.length===0?<div style={{padding:14,textAlign:"center",fontSize:10,color:"rgba(255,255,255,0.08)"}}>Waiting for events...</div>:feedItems.map((e,i)=>{const f=formatMissionEvent(e);return<div key={`${e.timestamp||i}-${i}`} style={{display:"flex",gap:6,padding:"5px 12px",borderBottom:"1px solid rgba(255,255,255,0.02)",borderLeft:`2px solid ${f.color}22`}}><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",minWidth:44,flexShrink:0}}>{fT(e.timestamp)}</span><div style={{flex:1,minWidth:0,fontSize:10,color:"rgba(255,255,255,0.5)"}}>{f.txt}</div></div>;})}</div>
     </div>
   </div>;
 };
 
 // ═══════════ FLEET VIEW ═══════════
-const FleetView=({agents,selected,setSelected})=>{const a=agents[selected]||agents[0];const c=C[a?.id]||"#818cf8";
+const FleetView=({agents,selected,setSelected,fleetState,onTogglePause})=>{const a=agents[selected]||agents[0];const c=C[a?.id]||"#818cf8";
+  const statesByName=useMemo(()=>Object.fromEntries((fleetState||[]).map(s=>[s.name,s])),[fleetState]);
   return<div className="fleet"><div className="fleet-list">
     <div style={{display:"grid",gridTemplateColumns:"32px 1fr 70px 44px",gap:8,padding:"7px 14px",fontSize:9,color:"rgba(255,255,255,0.12)",textTransform:"uppercase",letterSpacing:".1em",borderBottom:"1px solid rgba(255,255,255,0.04)"}}><span/><span>Agent</span><span>Load</span><span style={{textAlign:"right"}}>Tasks</span></div>
-    {agents.map((ag,i)=>{const ac=C[ag.id];return<div key={ag.id} className={`fleet-row${selected===i?" active":""}`} onClick={()=>setSelected(i)}><Av agent={ag} size={26}/><div><div style={{fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{ag.name}</div><div style={{fontSize:10,color:"rgba(255,255,255,0.22)",marginTop:1}}>{ag.role} <span style={{color:ac}}>{ag.model}</span></div></div><div><Bar value={ag.cpu_percent||0} color={ag.cpu_percent>60?"#fbbf24":"#34d399"}/><div style={{display:"flex",justifyContent:"space-between",marginTop:2,fontSize:8,color:"rgba(255,255,255,0.18)"}}><span>CPU {ag.cpu_percent||0}%</span><span>MEM {ag.memory_percent||0}%</span></div></div><div style={{textAlign:"right"}}><div style={{fontSize:15,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{ag.tasks_completed||0}</div><div style={{fontSize:7,color:"rgba(255,255,255,0.15)"}}>tasks</div></div></div>;})}
-  </div><div className="fleet-detail">
-    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18}}><Av agent={a} size={38}/><div style={{flex:1}}><div style={{fontSize:16,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{a.name}</div><div style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{a.role}</div></div><Badge text={a.status} color={sc(a.status)}/></div>
+    {agents.map((ag,i)=>{const ac=C[ag.id];const st=statesByName[ag.id]||{};const paused=!!st.paused;return<div key={ag.id} className={`fleet-row${selected===i?" active":""}`} onClick={()=>setSelected(i)} style={paused?{borderLeft:"2px solid #f59e0b",background:"rgba(245,158,11,0.05)"}:undefined}><Av agent={ag} size={26}/><div><div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:12,fontWeight:600,color:"#e2e8f0"}}>{ag.name}</span>{paused&&<Badge text="PAUSED" color="#f59e0b"/>}</div><div style={{fontSize:10,color:"rgba(255,255,255,0.22)",marginTop:1}}>{ag.role} <span style={{color:ac}}>{ag.model}</span></div></div><div><Bar value={ag.cpu_percent||0} color={ag.cpu_percent>60?"#fbbf24":"#34d399"}/><div style={{display:"flex",justifyContent:"space-between",marginTop:2,fontSize:8,color:"rgba(255,255,255,0.18)"}}><span>CPU {ag.cpu_percent||0}%</span><span>MEM {ag.memory_percent||0}%</span></div></div><div style={{textAlign:"right",display:"flex",flexDirection:"column",alignItems:"flex-end",gap:3}}><button onClick={e=>{e.stopPropagation();onTogglePause(ag.id,paused);}} style={{padding:"2px 7px",fontSize:9,fontWeight:700,background:paused?"rgba(34,197,94,0.12)":"rgba(245,158,11,0.16)",border:`1px solid ${paused?"rgba(34,197,94,0.35)":"rgba(245,158,11,0.4)"}`,color:paused?"#34d399":"#f59e0b",borderRadius:3,fontFamily:"'IBM Plex Mono',monospace"}}>{paused?"Resume":"Pause"}</button><div style={{fontSize:15,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{ag.tasks_completed||0}</div></div></div>;})}
+  </div><div className="fleet-detail" style={statesByName[a?.id]?.paused?{border:"1px solid rgba(245,158,11,0.3)"}:undefined}>
+    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18}}><Av agent={a} size={38}/><div style={{flex:1}}><div style={{fontSize:16,fontWeight:800,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{a.name}</div><div style={{fontSize:11,color:"rgba(255,255,255,0.3)"}}>{a.role}</div></div><Badge text={statesByName[a?.id]?.paused?"PAUSED":a.status} color={statesByName[a?.id]?.paused?"#f59e0b":sc(a.status)}/><button onClick={()=>onTogglePause(a?.id,!!statesByName[a?.id]?.paused)} style={{padding:"4px 9px",fontSize:10,fontWeight:700,background:statesByName[a?.id]?.paused?"rgba(34,197,94,0.12)":"rgba(245,158,11,0.16)",border:`1px solid ${statesByName[a?.id]?.paused?"rgba(34,197,94,0.35)":"rgba(245,158,11,0.4)"}`,color:statesByName[a?.id]?.paused?"#34d399":"#f59e0b",borderRadius:3,fontFamily:"'IBM Plex Mono',monospace"}}>{statesByName[a?.id]?.paused?"Resume":"Pause"}</button></div>
     <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:6,marginBottom:14}}>{[{l:"CPU",v:`${a.cpu_percent||0}%`,c:a.cpu_percent>60?"#fbbf24":"#34d399"},{l:"Memory",v:`${a.memory_percent||0}%`,c:"#818cf8"},{l:"Latency",v:a.ping_ms?`${a.ping_ms}ms`:"—",c:"#22d3ee"},{l:"Uptime",v:fUp(a.uptime_seconds||0),c:"#e2e8f0"}].map(m=><div key={m.l} className="glass metric"><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span></div>)}</div>
     <div style={{marginBottom:12}}><span className="metric-label" style={{display:"block",marginBottom:4}}>Pipeline</span><div className="glass" style={{padding:"8px 12px",display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:12,fontWeight:600,color:c}}>{a.model}</span><span style={{color:"rgba(255,255,255,0.08)"}}>→</span><span style={{fontSize:12,color:"rgba(255,255,255,0.35)"}}>{a.backend}</span></div></div>
     <div><span className="metric-label" style={{display:"block",marginBottom:4}}>Tools ({(a.tools||[]).length})</span><div style={{display:"flex",flexWrap:"wrap",gap:3}}>{(a.tools||[]).map(t=><Badge key={t} text={t} color="rgba(255,255,255,0.3)"/>)}</div></div>
@@ -878,17 +974,20 @@ const Tab=({active,label,count,onClick})=><button onClick={onClick} style={{back
 
 const lck=(u,a)=>`hirdforge-chat-${u}-${a}`;const lsk=(u,a)=>`hirdforge-session-${u}-${a}`;
 const u2s=m=>({role:m.from==="kit"?"user":"assistant",content:m.text||"",timestamp:m.timestamp||Date.now(),kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent});
-const s2u=(a,m,uname)=>{const u=m.role==="user";const aid=u?"kit":(m.noticeAgent||a);return{from:u?"kit":a,agent:u?{id:"kit",name:`${uname||'Sovereign'}`,initial:(uname||'S')[0]?.toUpperCase()||"S",status:"online"}:{id:aid,name:aid,initial:(aid||"?")[0]?.toUpperCase()||"?",status:"online"},text:m.content||"",time:new Date(m.timestamp||Date.now()).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:m.timestamp||Date.now(),streaming:false,toolCalls:[],toolResults:[],kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent};};
+const s2u=(a,m,uname,source)=>{const u=m.role==="user";const aid=u?"kit":(m.noticeAgent||a);const auto=source==="cronjob";
+  return{from:u?"kit":a,agent:u?{id:"kit",name:auto?"CronJob":`${uname||'Sovereign'}`,initial:auto?"C":((uname||'S')[0]?.toUpperCase()||"S"),status:"online"}:{id:aid,name:aid,initial:(aid||"?")[0]?.toUpperCase()||"?",status:"online"},text:m.content||"",time:new Date(m.timestamp||Date.now()).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:m.timestamp||Date.now(),streaming:false,toolCalls:[],toolResults:[],kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent};};
 
 function App(){
   const[tab,setTab]=useState("comms");const[sel,setSel]=useState(0);
   const[ch,setCh]=useState([]);const[msg,setMsg]=useState("");const[tgt,setTgt]=useState("ragnar");const[busy,setBusy]=useState(false);
   const[sidByA,setSidByA]=useState({});const[sItems,setSItems]=useState([]);const[toast,setToast]=useState("");
+  const[sessionFilter,setSessionFilter]=useState("all");const[sessionMeta,setSessionMeta]=useState(null);
   const[approvals,setApprovals]=useState([]);const[approvalsOpen,setApprovalsOpen]=useState(false);const[approvalBusy,setApprovalBusy]=useState({});
   const[termOpen,setTermOpen]=useState(true);const[termH,setTermH]=useState(200);
   const auth=useAuth();
 
   const agents=usePoll('/api/v1/agents',FA,CFG.POLL);
+  const fleetState=usePoll('/api/v1/fleet/state',[],5000);
   const nodes=usePoll('/api/v1/cluster/nodes',FN,CFG.POLL*2);
   const pods=usePoll('/api/v1/cluster/pods',[],CFG.POLL*2);
   const commits=usePoll('/api/v1/gitea/commits',[],CFG.POLL*3);
@@ -901,12 +1000,12 @@ function App(){
   const approvalsCount=pendingApprovals.length;
   const curSid=sidByA[tgt]||localStorage.getItem(lsk(auth.user,tgt))||`hirdforge-${tgt}-${Date.now()}`;
 
-  useEffect(()=>{if(!tgt)return;const r=localStorage.getItem(lck(auth.user,tgt));if(r){try{const p=JSON.parse(r);setCh(Array.isArray(p)?p.map(m=>s2u(tgt,m,auth.user)):[]);}catch{setCh([]);}}else setCh([]);
-    const sid=localStorage.getItem(lsk(auth.user,tgt));if(sid){setSidByA(p=>({...p,[tgt]:sid}));api(`/api/v1/sessions/${sid}`,null).then(s=>{if(s?.messages)setCh(s.messages.map(m=>s2u(tgt,m,auth.user)));});}
+  useEffect(()=>{if(!tgt)return;setSessionMeta(null);const r=localStorage.getItem(lck(auth.user,tgt));if(r){try{const p=JSON.parse(r);setCh(Array.isArray(p)?p.map(m=>s2u(tgt,m,auth.user)):[]);}catch{setCh([]);}}else setCh([]);
+    const sid=localStorage.getItem(lsk(auth.user,tgt));if(sid){setSidByA(p=>({...p,[tgt]:sid}));api(`/api/v1/sessions/${sid}`,null).then(s=>{if(s?.messages){setSessionMeta({source:s.source||"",task_ref:s.task_ref||"",id:s.id||sid});setCh(s.messages.map(m=>s2u(tgt,m,auth.user,s.source)));}});}
   },[tgt,auth.user]);
   useEffect(()=>{if(tgt)localStorage.setItem(lck(auth.user,tgt),JSON.stringify(ch.map(u2s)));},[ch,tgt,auth.user]);
   useEffect(()=>{if(tgt&&sidByA[tgt])localStorage.setItem(lsk(auth.user,tgt),sidByA[tgt]);},[sidByA,tgt,auth.user]);
-  useEffect(()=>{let m=true;const go=async()=>{const a=await api('/api/v1/sessions',[]);if(m&&Array.isArray(a))setSItems(a.filter(s=>s.agent===tgt));};go();const id=setInterval(go,5000);return()=>{m=false;clearInterval(id);};},[tgt,busy]);
+  useEffect(()=>{let m=true;const go=async()=>{const src=sessionFilter==="all"?"":sessionFilter;const qp=`/api/v1/sessions?agent=${encodeURIComponent(tgt)}${src?`&source=${encodeURIComponent(src)}`:""}`;const a=await api(qp,[]);if(m&&Array.isArray(a))setSItems(a);};go();const id=setInterval(go,5000);return()=>{m=false;clearInterval(id);};},[tgt,busy,sessionFilter]);
   useEffect(()=>{const e=events[0];if(!e||!e.delegated_by)return;if(e.type!=="task_complete"&&e.type!=="task_failed")return;
     const owner=e.delegated_by;const completing=(e.agent||"system").toLowerCase();const ts=Date.parse(e.timestamp||"")||Date.now();
     const cap=completing.charAt(0).toUpperCase()+completing.slice(1);
@@ -923,13 +1022,16 @@ function App(){
   useEffect(()=>{let m=true;const go=async()=>{try{const r=await fetch('/api/v1/approvals');if(!r.ok)throw new Error();const d=await r.json();if(!m)return;const qs=Array.isArray(d?.queues)?d.queues:[];setApprovals(qs);}catch{if(m)setApprovals([]);}};go();const id=setInterval(go,10000);return()=>{m=false;clearInterval(id);};},[]);
 
   const setCurSid=s=>setSidByA(p=>({...p,[tgt]:s}));
-  const loadSess=async s=>{const d=await api(`/api/v1/sessions/${s}`,null);if(d?.messages){setCurSid(s);setCh(d.messages.map(m=>s2u(tgt,m,auth.user)));}};
-  const newConv=()=>{setCurSid(`hirdforge-${tgt}-${Date.now()}`);setCh([]);};
+  const loadSess=async(s,meta)=>{const d=await api(`/api/v1/sessions/${s}`,null);if(d?.messages){setCurSid(s);setSessionMeta({source:d.source||meta?.source||"",task_ref:d.task_ref||meta?.task_ref||"",id:d.id||s});setCh(d.messages.map(m=>s2u(tgt,m,auth.user,d.source||meta?.source)));}};
+  const newConv=()=>{setCurSid(`hirdforge-${tgt}-${Date.now()}`);setSessionMeta(null);setCh([]);};
   const clearH=()=>{setCh([]);localStorage.removeItem(lck(auth.user,tgt));};
   const eStop=async()=>{await apiPost('/api/v1/agents/stop-all');setBusy(false);setCh(p=>{if(!p.length)return p;const u=[...p];const l={...u[u.length-1]};if(l.streaming){l.streaming=false;l.text=(l.text?l.text+"\n":"")+"[Stopped by Sovereign]";u[u.length-1]=l;}return u;});setToast("All agents stopped");setTimeout(()=>setToast(""),1800);};
   const refreshApprovals=async()=>{try{const r=await fetch('/api/v1/approvals');if(!r.ok)throw new Error();const d=await r.json();setApprovals(Array.isArray(d?.queues)?d.queues:[]);}catch{setApprovals([]);}};
   const decideApproval=async(queueID,approved)=>{if(!queueID)return;setApprovalBusy(p=>({...p,[queueID]:true}));const path=approved?'/api/v1/approvals/approve':'/api/v1/approvals/reject';const out=await apiPostJSON(path,{queue_id:queueID});if(out?.error){setToast(out.error);}else{setToast(approved?"Approval granted":"Approval rejected");setTimeout(()=>setToast(""),1500);}await refreshApprovals();setApprovalBusy(p=>({...p,[queueID]:false}));};
   const summarizeApprovalParams=params=>{try{const txt=JSON.stringify(params||{});return txt.length>120?txt.slice(0,120)+"…":txt;}catch{return "{}";}};
+  const queueInjection=(agent,content,session_id)=>apiPostJSON(`/api/v1/agents/${encodeURIComponent(agent)}/inject`,{content,session_id});
+  const togglePause=async(agentName,isPaused)=>{if(!agentName)return;const path=isPaused?`/api/v1/agents/${encodeURIComponent(agentName)}/resume`:`/api/v1/agents/${encodeURIComponent(agentName)}/pause`;const out=await apiPost(path);if(out?.error){setToast(out.error);}else{setToast(`${agentName} ${isPaused?"resumed":"paused"}`);}setTimeout(()=>setToast(""),1400);};
+  const showToast=t=>{setToast(t);setTimeout(()=>setToast(""),1800);};
 
   return<div className="app">
     <div className="header">
@@ -976,8 +1078,8 @@ function App(){
     </div>
     <div className="body">
       <div className="tab-content">
-        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsOk} chatHistory={ch} setChatHistory={setCh} msg={msg} setMsg={setMsg} target={tgt} setTarget={setTgt} sending={busy} setSending={setBusy} sessionId={curSid} setSessionId={setCurSid} sessionItems={sItems} onLoadSession={loadSess} onNewConversation={newConv} onClearHistory={clearH} onEmergencyStop={eStop} auth={auth}/>}
-        {tab==="fleet"&&<FleetView agents={agents} selected={sel} setSelected={setSel}/>}
+        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsOk} chatHistory={ch} setChatHistory={setCh} msg={msg} setMsg={setMsg} target={tgt} setTarget={setTgt} sending={busy} setSending={setBusy} sessionId={curSid} setSessionId={setCurSid} sessionItems={sItems} sessionFilter={sessionFilter} setSessionFilter={setSessionFilter} onLoadSession={loadSess} onNewConversation={newConv} onClearHistory={clearH} onEmergencyStop={eStop} auth={auth} fleetState={fleetState} onTogglePause={togglePause} onQueueInjection={queueInjection} showToast={showToast} sessionMeta={sessionMeta}/>}
+        {tab==="fleet"&&<FleetView agents={agents} selected={sel} setSelected={setSel} fleetState={fleetState} onTogglePause={togglePause}/>}
         {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} prs={prs} repos={repos}/>}
         {tab==="settings"&&<SettingsView agents={agents}/>}
       </div>
