@@ -636,6 +636,23 @@ async def health():
         return {"status": "error", "error": str(e)}
 
 
+
+@app.get("/collections")
+async def list_collections():
+    try:
+        collections = get_client().list_collections()
+        names = []
+        for item in collections:
+            if isinstance(item, str):
+                names.append(item)
+            else:
+                name = getattr(item, "name", "")
+                if name:
+                    names.append(name)
+        return {"collections": sorted(set(names))}
+    except Exception as e:
+        return {"collections": [], "error": str(e)}
+
 @app.get("/cognitive/status")
 async def cognitive_status():
     count = COGNITIVE_STATS["importance_count"]
