@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -20,6 +21,8 @@ type ChatMessage struct {
 type Session struct {
 	ID        string        `json:"id"`
 	Agent     string        `json:"agent"`
+	Source    string        `json:"source"`   // "comms", "cronjob", "delegation"
+	TaskRef   string        `json:"task_ref"` // Gitea issue ref if detected, e.g. "#24"
 	Messages  []ChatMessage `json:"messages"`
 	CreatedAt int64         `json:"created_at"`
 	UpdatedAt int64         `json:"updated_at"`
@@ -28,6 +31,8 @@ type Session struct {
 type SessionSummary struct {
 	ID           string `json:"id"`
 	Agent        string `json:"agent"`
+	Source       string `json:"source"`
+	TaskRef      string `json:"task_ref"`
 	MessageCount int    `json:"message_count"`
 	UpdatedAt    int64  `json:"updated_at"`
 	LastPreview  string `json:"last_preview"`
@@ -47,6 +52,31 @@ func (s *sessionStore) newID() string {
 	return fmt.Sprintf("sess-%d-%d", time.Now().Unix(), atomic.AddUint64(&s.seq, 1))
 }
 
+func detectSessionSource(sessionID string) string {
+	id := strings.ToLower(strings.TrimSpace(sessionID))
+	if strings.HasPrefix(id, "task-poll-") ||
+		strings.HasPrefix(id, "task-queue-") ||
+		strings.HasPrefix(id, "task-review-") ||
+		strings.HasPrefix(id, "briefing-") ||
+		strings.HasPrefix(id, "morning-") ||
+		strings.HasPrefix(id, "jeeves-morning-") {
+		return "cronjob"
+	}
+	if strings.HasPrefix(id, "delegation-") || strings.HasPrefix(id, "delegate-") {
+		return "delegation"
+	}
+	return "comms"
+}
+
+func extractTaskRef(content string) string {
+	// Match "#" followed by digits, common in task briefs.
+	re := regexp.MustCompile(`#(\d+)`)
+	if m := re.FindString(content); m != "" {
+		return m
+	}
+	return ""
+}
+
 func (s *sessionStore) ensureSession(id, agent string) *Session {
 	now := time.Now().Unix()
 	id = strings.TrimSpace(id)
@@ -57,11 +87,15 @@ func (s *sessionStore) ensureSession(id, agent string) *Session {
 		if sess.Agent == "" {
 			sess.Agent = agent
 		}
+		if sess.Source == "" {
+			sess.Source = detectSessionSource(id)
+		}
 		return sess
 	}
 	sess := &Session{
 		ID:        id,
 		Agent:     agent,
+		Source:    detectSessionSource(id),
 		Messages:  []ChatMessage{},
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -79,6 +113,9 @@ func (s *sessionStore) appendConversation(id, agent, userContent, assistantConte
 		ChatMessage{Role: "user", Content: userContent, Timestamp: now, Agent: agent},
 		ChatMessage{Role: "assistant", Content: assistantContent, Timestamp: now, Agent: agent},
 	)
+	if sess.TaskRef == "" {
+		sess.TaskRef = extractTaskRef(userContent)
+	}
 	sess.UpdatedAt = now
 	return sess.ID
 }
@@ -108,6 +145,8 @@ func (s *sessionStore) get(id string) (*Session, bool) {
 	out := &Session{
 		ID:        sess.ID,
 		Agent:     sess.Agent,
+		Source:    sess.Source,
+		TaskRef:   sess.TaskRef,
 		Messages:  append([]ChatMessage(nil), sess.Messages...),
 		CreatedAt: sess.CreatedAt,
 		UpdatedAt: sess.UpdatedAt,
@@ -125,12 +164,15 @@ func (s *sessionStore) delete(id string) bool {
 	return true
 }
 
-func (s *sessionStore) list(agent string) []SessionSummary {
+func (s *sessionStore) list(agent string, source string) []SessionSummary {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]SessionSummary, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		if agent != "" && sess.Agent != agent {
+			continue
+		}
+		if source != "" && sess.Source != source {
 			continue
 		}
 		preview := ""
@@ -143,6 +185,8 @@ func (s *sessionStore) list(agent string) []SessionSummary {
 		out = append(out, SessionSummary{
 			ID:           sess.ID,
 			Agent:        sess.Agent,
+			Source:       sess.Source,
+			TaskRef:      sess.TaskRef,
 			MessageCount: len(sess.Messages),
 			UpdatedAt:    sess.UpdatedAt,
 			LastPreview:  preview,
@@ -159,6 +203,23 @@ type ActiveRequest struct {
 	SessionID string
 	Cancel    context.CancelFunc
 	StartedAt time.Time
+}
+
+type AgentState struct {
+	Name      string `json:"name"`
+	Paused    bool   `json:"paused"`
+	Active    bool   `json:"active"`
+	SessionID string `json:"session_id,omitempty"`
+	TaskRef   string `json:"task_ref,omitempty"`
+	Source    string `json:"source,omitempty"`
+	Since     int64  `json:"since,omitempty"`
+}
+
+type InjectionMessage struct {
+	Agent     string `json:"agent"`
+	Content   string `json:"content"`
+	SessionID string `json:"session_id,omitempty"`
+	QueuedAt  int64  `json:"queued_at"`
 }
 
 func (g *gateway) setActiveRequest(agent, sessionID string, cancel context.CancelFunc) {
