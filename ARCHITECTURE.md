@@ -33,3 +33,9 @@ You CANNOT install packages at runtime.
 - go.mod, go.sum — Go dependencies
 - seidr/requirements.txt — Python dependencies
 - .gitea/workflows/build.yaml — CI pipeline
+
+## Seidr API
+
+| Path         | Method | Description                 |
+|--------------|--------|-----------------------------|
+| /collections | GET    | List all ChromaDB collections |
