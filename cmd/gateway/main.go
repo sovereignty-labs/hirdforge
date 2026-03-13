@@ -235,6 +235,9 @@ type gateway struct {
 	lastSession    map[string]string
 	arMu           sync.RWMutex
 	activeRequests map[string]*ActiveRequest
+	injectionMu    sync.Mutex
+	injections     map[string][]InjectionMessage // keyed by agent name
+	pausedAgents   map[string]bool
 }
 
 type settingsStore struct {
@@ -1449,6 +1452,8 @@ func main() {
 		notifCap:       100,
 		lastSession:    map[string]string{},
 		activeRequests: map[string]*ActiveRequest{},
+		injections:     map[string][]InjectionMessage{},
+		pausedAgents:   map[string]bool{},
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
 	gw.refreshAgentHealth()
@@ -1589,16 +1594,113 @@ func main() {
 			}
 		}
 	})
-	mux.HandleFunc("/api/v1/agents", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		writeJSON(w, http.StatusOK, gw.snapshotAgents())
-	})
 	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
 		switch {
+		case strings.HasSuffix(path, "/inject"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/inject")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			var req struct {
+				Content   string `json:"content"`
+				SessionID string `json:"session_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Content) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
+				return
+			}
+			gw.injectionMu.Lock()
+			gw.injections[name] = append(gw.injections[name], InjectionMessage{
+				Agent:     name,
+				Content:   req.Content,
+				SessionID: req.SessionID,
+				QueuedAt:  time.Now().Unix(),
+			})
+			gw.injectionMu.Unlock()
+			gw.addEvent("injection_queued", name, fmt.Sprintf("Sovereign queued injection for %s", name))
+			writeJSON(w, http.StatusOK, map[string]string{"status": "queued", "agent": name})
+		case strings.HasSuffix(path, "/pause"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/pause")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			gw.injectionMu.Lock()
+			gw.pausedAgents[name] = true
+			gw.injectionMu.Unlock()
+			gw.addEvent("agent_paused", name, fmt.Sprintf("%s paused by Sovereign", name))
+			writeJSON(w, http.StatusOK, map[string]string{"status": "paused", "agent": name})
+		case strings.HasSuffix(path, "/resume"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/resume")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			gw.injectionMu.Lock()
+			delete(gw.pausedAgents, name)
+			gw.injectionMu.Unlock()
+			gw.addEvent("agent_resumed", name, fmt.Sprintf("%s resumed by Sovereign", name))
+			writeJSON(w, http.StatusOK, map[string]string{"status": "resumed", "agent": name})
+		case strings.HasSuffix(path, "/state"):
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/state")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			state := AgentState{Name: name}
+			gw.injectionMu.Lock()
+			state.Paused = gw.pausedAgents[name]
+			gw.injectionMu.Unlock()
+			gw.arMu.RLock()
+			if ar, ok := gw.activeRequests[name]; ok {
+				state.Active = true
+				state.SessionID = ar.SessionID
+				state.Source = detectSessionSource(ar.SessionID)
+				state.Since = ar.StartedAt.Unix()
+				if sess, ok := gw.sessionStore.get(ar.SessionID); ok {
+					state.TaskRef = sess.TaskRef
+				}
+			}
+			gw.arMu.RUnlock()
+			writeJSON(w, http.StatusOK, state)
 		case strings.HasSuffix(path, "/configure"):
 			if r.Method != http.MethodPost {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1681,6 +1783,13 @@ func main() {
 			http.NotFound(w, r)
 		}
 	})
+	mux.HandleFunc("/api/v1/agents", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, gw.snapshotAgents())
+	})
 	mux.HandleFunc("/api/v1/agents/stop-all", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1695,7 +1804,37 @@ func main() {
 			return
 		}
 		agent := strings.TrimSpace(r.URL.Query().Get("agent"))
-		writeJSON(w, http.StatusOK, gw.sessionStore.list(agent))
+		source := strings.TrimSpace(r.URL.Query().Get("source"))
+		writeJSON(w, http.StatusOK, gw.sessionStore.list(agent, source))
+	})
+	mux.HandleFunc("/api/v1/fleet/state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		states := make([]AgentState, 0, len(gw.order))
+		paused := make(map[string]bool, len(gw.order))
+		gw.injectionMu.Lock()
+		for _, name := range gw.order {
+			paused[name] = gw.pausedAgents[name]
+		}
+		gw.injectionMu.Unlock()
+		gw.arMu.RLock()
+		for _, name := range gw.order {
+			state := AgentState{Name: name, Paused: paused[name]}
+			if ar, ok := gw.activeRequests[name]; ok {
+				state.Active = true
+				state.SessionID = ar.SessionID
+				state.Source = detectSessionSource(ar.SessionID)
+				state.Since = ar.StartedAt.Unix()
+				if sess, ok := gw.sessionStore.get(ar.SessionID); ok {
+					state.TaskRef = sess.TaskRef
+				}
+			}
+			states = append(states, state)
+		}
+		gw.arMu.RUnlock()
+		writeJSON(w, http.StatusOK, states)
 	})
 	mux.HandleFunc("/api/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/sessions/")
@@ -2499,11 +2638,21 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
 			return
 		}
+		sessionID := strings.TrimSpace(in.SessionID)
+		gw.injectionMu.Lock()
+		paused := gw.pausedAgents[in.Agent]
+		gw.injectionMu.Unlock()
+		if detectSessionSource(sessionID) == "cronjob" && paused {
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: {\"content\":\"Agent %s is paused by Sovereign. Skipping task.\"}\n\n", in.Agent)
+			fmt.Fprintf(w, "data: {\"done\":true}\n\n")
+			gw.addEvent("agent_paused_skip", in.Agent, fmt.Sprintf("CronJob poll skipped — %s is paused", in.Agent))
+			return
+		}
 		if !agent.Healthy {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent is unhealthy"})
 			return
 		}
-		sessionID := strings.TrimSpace(in.SessionID)
 		if sessionID == "" {
 			sessionID = fmt.Sprintf("hirdforge-%s-%d", in.Agent, time.Now().UnixNano())
 		}
@@ -2568,6 +2717,58 @@ func main() {
 		var contentBuf strings.Builder
 		var doneEvt map[string]interface{}
 		var saveOnce sync.Once
+		processInjectionQueue := func(baseSessionID string) {
+			gw.injectionMu.Lock()
+			pending := gw.injections[in.Agent]
+			if len(pending) == 0 {
+				gw.injectionMu.Unlock()
+				return
+			}
+			next := pending[0]
+			gw.injections[in.Agent] = pending[1:]
+			gw.injectionMu.Unlock()
+			injSessionID := strings.TrimSpace(next.SessionID)
+			if injSessionID == "" {
+				injSessionID = baseSessionID
+			}
+			go func() {
+				injBody, _ := json.Marshal(map[string]string{
+					"content":    next.Content,
+					"session_id": injSessionID,
+				})
+				injReq, err := http.NewRequest(http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(injBody))
+				if err != nil {
+					log.Printf("injection failed for %s: %v", in.Agent, err)
+					return
+				}
+				injReq.Header.Set("Content-Type", "application/json")
+				gw.addEvent("injection_sent", in.Agent, fmt.Sprintf("Sovereign injection delivered to %s", in.Agent))
+				resp, err := http.DefaultClient.Do(injReq)
+				if err != nil {
+					log.Printf("injection request failed for %s: %v", in.Agent, err)
+					return
+				}
+				defer resp.Body.Close()
+
+				var fullResp strings.Builder
+				scanner := bufio.NewScanner(resp.Body)
+				for scanner.Scan() {
+					line := scanner.Text()
+					if strings.HasPrefix(line, "data: ") {
+						chunk := strings.TrimPrefix(line, "data: ")
+						var obj map[string]interface{}
+						if json.Unmarshal([]byte(chunk), &obj) == nil {
+							if c, ok := obj["content"].(string); ok {
+								fullResp.WriteString(c)
+							}
+						}
+					}
+				}
+				cleaned := thinkTagRE.ReplaceAllString(fullResp.String(), "")
+				gw.sessionStore.appendConversation(injSessionID, in.Agent, next.Content, cleaned)
+				gw.addEvent("injection_complete", in.Agent, fmt.Sprintf("Sovereign injection response from %s", in.Agent))
+			}()
+		}
 		saveConversation := func() {
 			saveOnce.Do(func() {
 				raw := contentBuf.String()
@@ -2616,6 +2817,29 @@ func main() {
 						}
 						if typ, _ := evt["type"].(string); typ == "tool_call" {
 							gw.addEvent("tool_call", in.Agent, "Tool call observed")
+							evtBytes, _ := json.Marshal(evt)
+							evtBlob := strings.ToLower(string(evtBytes))
+							toolName := strings.ToLower(strings.TrimSpace(fmt.Sprint(evt["name"])))
+							if toolName == "" {
+								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+									toolName = strings.ToLower(strings.TrimSpace(fmt.Sprint(tc["name"])))
+									if toolName == "" {
+										if fn, ok := tc["function"].(map[string]interface{}); ok {
+											toolName = strings.ToLower(strings.TrimSpace(fmt.Sprint(fn["name"])))
+										}
+									}
+								}
+							}
+							switch {
+							case toolName == "exec" && strings.Contains(evtBlob, "cat /tmp/valhalla-personas"):
+								gw.addEvent("skill_loaded", in.Agent, "Loaded skill file")
+							case toolName == "git-clone":
+								gw.addEvent("recon_started", in.Agent, "Cloning repository")
+							case toolName == "gitea" && strings.Contains(evtBlob, "create-pr"):
+								gw.addEvent("pr_created", in.Agent, "Pull request created")
+							case toolName == "read" && strings.Contains(strings.ToUpper(string(evtBytes)), "ARCHITECTURE"):
+								gw.addEvent("recon_reading", in.Agent, "Reading ARCHITECTURE.md")
+							}
 						}
 						if typ == "done" {
 							doneEvt = evt
@@ -2626,6 +2850,7 @@ func main() {
 								return
 							}
 							saveConversation()
+							processInjectionQueue(sessionID)
 							if !forward(doneEvt) {
 								return
 							}
@@ -2643,6 +2868,7 @@ func main() {
 					return
 				}
 				saveConversation()
+				processInjectionQueue(sessionID)
 				if doneEvt != nil {
 					_ = forward(doneEvt)
 				} else {
