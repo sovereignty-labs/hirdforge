@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -96,7 +97,11 @@ func (t *GiteaAPITool) parseRepo(repo string) (string, string) {
 		parts := strings.SplitN(repo, "/", 2)
 		return parts[0], parts[1]
 	}
-	return "gitea_admin", repo
+	owner := os.Getenv("GITEA_DEFAULT_OWNER")
+	if owner == "" {
+		owner = "gitea_admin"
+	}
+	return owner, repo
 }
 
 func (t *GiteaAPITool) apiRequest(method, path string, body interface{}) ([]byte, int, error) {
