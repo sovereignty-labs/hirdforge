@@ -94,10 +94,16 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 	cmdArgs = append(cmdArgs, cloneURL, repoDir)
 
 	if res := runGit(t.WorkDir, cmdArgs, 120*time.Second); res.Error != "" {
+		if cloneTargetExistsError(res) {
+			return ToolResult{Error: "Error: workspace already contains files. Run `exec: rm -rf /workspace/*` to clean, then retry git-clone."}
+		}
 		// If directory exists but clone failed (stale/corrupt workspace), remove and retry once
 		if _, statErr := os.Stat(repoDir); statErr == nil {
 			_ = os.RemoveAll(repoDir)
 			if res2 := runGit(t.WorkDir, cmdArgs, 120*time.Second); res2.Error != "" {
+				if cloneTargetExistsError(res2) {
+					return ToolResult{Error: "Error: workspace already contains files. Run `exec: rm -rf /workspace/*` to clean, then retry git-clone."}
+				}
 				return res2
 			}
 		} else {
@@ -180,6 +186,11 @@ func hasURLCredentials(raw string) bool {
 	return u.User != nil
 }
 
+func cloneTargetExistsError(res ToolResult) bool {
+	text := strings.ToLower(strings.TrimSpace(res.Output + "\n" + res.Error))
+	return strings.Contains(text, "already exists and is not an empty directory")
+}
+
 type GitCommitTool struct {
 	WorkDir  string
 	GiteaURL string
@@ -241,7 +252,7 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 
 	statusRes := runGit(repoDir, []string{"git", "status", "--porcelain"}, 10*time.Second)
 	if statusRes.Error == "" && strings.TrimSpace(statusRes.Output) == "" {
-		return ToolResult{Output: "no changes to commit"}
+		return ToolResult{Output: "Nothing to commit. Did you forget to use the write tool or exec to create/modify files? Use `exec: git status` to check workspace state."}
 	}
 
 	if res := runGit(repoDir, []string{"git", "commit", "-m", message}, 30*time.Second); res.Error != "" {
@@ -266,7 +277,7 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 }
 
 func (t *GitCommitTool) Verify(args map[string]interface{}, result ToolResult) error {
-	if result.Error != "" || strings.TrimSpace(result.Output) == "no changes to commit" {
+	if result.Error != "" || strings.HasPrefix(strings.TrimSpace(result.Output), "Nothing to commit.") {
 		return nil
 	}
 

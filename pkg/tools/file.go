@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 const maxFileSize = 1024 * 1024
@@ -74,6 +75,14 @@ func (t *ReadTool) Execute(args map[string]interface{}) ToolResult {
 
 	info, err := os.Stat(absPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			parentDir := filepath.Dir(path)
+			if parentDir == "." || parentDir == "" {
+				parentDir = "/workspace"
+			}
+			filename := filepath.Base(path)
+			return ToolResult{Error: fmt.Sprintf("Error: %s not found. Use `exec: ls %s` to see available files, or `exec: find /workspace -name '%s'` to search.", path, parentDir, filename)}
+		}
 		return ToolResult{Error: err.Error()}
 	}
 	if info.Size() > maxFileSize {
@@ -83,6 +92,9 @@ func (t *ReadTool) Execute(args map[string]interface{}) ToolResult {
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		return ToolResult{Error: err.Error()}
+	}
+	if bytesLookBinary(data) {
+		return ToolResult{Error: fmt.Sprintf("Error: binary file detected at %s. Use `exec: file %s` to check file type, or `exec: xxd %s | head -20` for hex inspection.", path, path, path)}
 	}
 	return ToolResult{Output: string(data)}
 }
@@ -132,7 +144,15 @@ func (t *WriteTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
-	return ToolResult{Output: fmt.Sprintf("wrote %d bytes to %s", len(content), path)}
+	output := fmt.Sprintf("wrote %d bytes to %s", len(content), path)
+	lineCount := 0
+	if content != "" {
+		lineCount = strings.Count(content, "\n") + 1
+	}
+	if lineCount > 200 {
+		output = fmt.Sprintf("Warning: wrote %d lines. For files >200 lines, consider `exec: sed` for targeted edits or `exec: python3 -c '...'` for insertions to avoid corruption risk.\n%s", lineCount, output)
+	}
+	return ToolResult{Output: output}
 }
 
 func (t *WriteTool) Verify(args map[string]interface{}, result ToolResult) error {
@@ -191,4 +211,23 @@ func findGitRepoRoot(startDir string) string {
 		}
 		dir = parent
 	}
+}
+
+func bytesLookBinary(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	if !utf8.Valid(data) {
+		return true
+	}
+	checkLen := len(data)
+	if checkLen > 4096 {
+		checkLen = 4096
+	}
+	for _, b := range data[:checkLen] {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
 }
