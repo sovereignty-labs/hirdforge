@@ -1,5 +1,7 @@
 package main
 
+// Build: force rebuild for git-clone credential fix
+
 import (
 	"bufio"
 	"bytes"
