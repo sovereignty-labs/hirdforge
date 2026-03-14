@@ -27,8 +27,7 @@ jobs:
             docker pull $REGISTRY/valhalla-agent:latest
             docker tag $REGISTRY/valhalla-agent:latest $REGISTRY/valhalla-agent:sha-$SHA_SHORT
           else
-            export DOCKER_BUILDKIT=1
-            docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-agent:latest -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
+            docker build -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-agent:latest
           fi
           docker push $REGISTRY/valhalla-agent:sha-$SHA_SHORT
@@ -50,8 +49,7 @@ jobs:
             docker pull $REGISTRY/valhalla-gateway:latest
             docker tag $REGISTRY/valhalla-gateway:latest $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
           else
-            export DOCKER_BUILDKIT=1
-            docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-gateway:latest -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
+            docker build -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-gateway:latest
           fi
           docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
@@ -73,8 +71,7 @@ jobs:
             docker pull $REGISTRY/valhalla-seidr:latest
             docker tag $REGISTRY/valhalla-seidr:latest $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
           else
-            export DOCKER_BUILDKIT=1
-            docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-seidr:latest -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
+            docker build -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-seidr:latest
           fi
           docker push $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
@@ -97,8 +94,7 @@ jobs:
               docker pull $REGISTRY/valhalla-lockbox:latest
               docker tag $REGISTRY/valhalla-lockbox:latest $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
             else
-              export DOCKER_BUILDKIT=1
-              docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-lockbox:latest -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
+              docker build -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
               docker push $REGISTRY/valhalla-lockbox:latest
             fi
             docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
