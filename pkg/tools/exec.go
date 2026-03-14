@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -44,11 +45,28 @@ func (t *ExecTool) Execute(args map[string]interface{}) ToolResult {
 	ctx, cancel := context.WithTimeout(context.Background(), t.Timeout)
 	defer cancel()
 
+	start := time.Now()
 	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
+	duration := time.Since(start)
+	byteCount := len(out)
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+	if ctx.Err() == context.DeadlineExceeded && exitCode < 0 {
+		exitCode = 124
+	}
+
 	output := string(out)
 	if len(out) > t.MaxOutput {
 		output = string(out[:t.MaxOutput]) + fmt.Sprintf("\n... output truncated at %d bytes", t.MaxOutput)
 	}
+	footer := fmt.Sprintf("[exit:%d | %.1fs | %d bytes]", exitCode, duration.Seconds(), byteCount)
+	output = output + "\n" + footer
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return ToolResult{
@@ -59,7 +77,7 @@ func (t *ExecTool) Execute(args map[string]interface{}) ToolResult {
 	if err != nil {
 		return ToolResult{
 			Output: output,
-			Error:  err.Error(),
+			Error:  strings.TrimSpace(err.Error()),
 		}
 	}
 	return ToolResult{Output: output}
