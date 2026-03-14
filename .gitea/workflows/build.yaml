@@ -75,6 +75,28 @@ jobs:
             docker push $REGISTRY/valhalla-seidr:latest
           fi
           docker push $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
+  build-codex:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-codex && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-codex
+      - name: Build and push codex
+        run: |
+          cd /src-codex
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(cmd/agent/|pkg/|Dockerfile\.codex$)'; then
+            docker pull $REGISTRY/valhalla-codex:latest
+            docker tag $REGISTRY/valhalla-codex:latest $REGISTRY/valhalla-codex:sha-$SHA_SHORT
+          else
+            docker build -f Dockerfile.codex -t $REGISTRY/valhalla-codex:latest -t $REGISTRY/valhalla-codex:sha-$SHA_SHORT .
+            docker push $REGISTRY/valhalla-codex:latest
+          fi
+          docker push $REGISTRY/valhalla-codex:sha-$SHA_SHORT
   build-lockbox:
     runs-on: ubuntu-latest
     steps:
@@ -101,7 +123,7 @@ jobs:
           fi
   update-infra:
     runs-on: ubuntu-latest
-    needs: [build-agent, build-gateway, build-seidr, build-lockbox]
+    needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox]
     steps:
       - name: Install tools
         run: apk add --no-cache curl jq python3
@@ -151,7 +173,8 @@ jobs:
           PY
           # For JSON-formatted deployment files, update only the image field via jq
           # so manually-added env vars/volumes are preserved.
-          for file in infrastructure/valhalla/deployment-*.yaml; do
+          for file in infrastructure/valhalla/deployment-*.yaml infrastructure/valhalla/deployment-codex.yaml; do
+            [ -f "$file" ] || continue
             if jq empty "$file" 2>/dev/null; then
               current_image=$(jq -r '.spec.template.spec.containers[0].image // empty' "$file")
               if [ -n "$current_image" ] && echo "$current_image" | grep -q "gitea_admin/valhalla-"; then
