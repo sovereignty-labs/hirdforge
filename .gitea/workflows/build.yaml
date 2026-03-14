@@ -22,8 +22,15 @@ jobs:
         run: |
           cd /src-agent
           SHA_SHORT=$(git rev-parse --short HEAD)
-          docker build --no-cache -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
-          docker push $REGISTRY/valhalla-agent:latest
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(cmd/agent/|pkg/|go\.mod$|go\.sum$|Dockerfile\.agent$)'; then
+            docker pull $REGISTRY/valhalla-agent:latest
+            docker tag $REGISTRY/valhalla-agent:latest $REGISTRY/valhalla-agent:sha-$SHA_SHORT
+          else
+            export DOCKER_BUILDKIT=1
+            docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-agent:latest -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
+            docker push $REGISTRY/valhalla-agent:latest
+          fi
           docker push $REGISTRY/valhalla-agent:sha-$SHA_SHORT
   build-gateway:
     runs-on: ubuntu-latest
@@ -38,8 +45,15 @@ jobs:
         run: |
           cd /src-gateway
           SHA_SHORT=$(git rev-parse --short HEAD)
-          docker build --no-cache -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
-          docker push $REGISTRY/valhalla-gateway:latest
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(cmd/gateway/|pkg/|go\.mod$|go\.sum$|Dockerfile\.gateway$|ui/)'; then
+            docker pull $REGISTRY/valhalla-gateway:latest
+            docker tag $REGISTRY/valhalla-gateway:latest $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+          else
+            export DOCKER_BUILDKIT=1
+            docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-gateway:latest -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
+            docker push $REGISTRY/valhalla-gateway:latest
+          fi
           docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
   build-seidr:
     runs-on: ubuntu-latest
@@ -54,8 +68,15 @@ jobs:
         run: |
           cd /src-seidr
           SHA_SHORT=$(git rev-parse --short HEAD)
-          docker build --no-cache -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
-          docker push $REGISTRY/valhalla-seidr:latest
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(seidr/|Dockerfile\.seidr$)'; then
+            docker pull $REGISTRY/valhalla-seidr:latest
+            docker tag $REGISTRY/valhalla-seidr:latest $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
+          else
+            export DOCKER_BUILDKIT=1
+            docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-seidr:latest -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
+            docker push $REGISTRY/valhalla-seidr:latest
+          fi
           docker push $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
   build-lockbox:
     runs-on: ubuntu-latest
@@ -71,8 +92,15 @@ jobs:
           cd /src-lockbox
           if [ -f Dockerfile.lockbox ]; then
             SHA_SHORT=$(git rev-parse --short HEAD)
-            docker build --no-cache -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
-            docker push $REGISTRY/valhalla-lockbox:latest
+            CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+            if ! echo "$CHANGED" | grep -Eq '^(cmd/lockbox/|pkg/|go\.mod$|go\.sum$|Dockerfile\.lockbox$)'; then
+              docker pull $REGISTRY/valhalla-lockbox:latest
+              docker tag $REGISTRY/valhalla-lockbox:latest $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
+            else
+              export DOCKER_BUILDKIT=1
+              docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from $REGISTRY/valhalla-lockbox:latest -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-lockbox:latest
+            fi
             docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
           fi
   update-infra:
@@ -101,7 +129,7 @@ jobs:
           new_tag = sys.argv[1].strip()
           root = pathlib.Path("infrastructure")
           image_re = re.compile(
-              r'(^\s*image:\s*)(["\']?)(10\.0\.60\.26:30637/gitea_admin/valhalla-[^:"\'\s]+):([^\s"\']+)(\2)(\s*(?:#.*)?$)',
+              r'^(\s*image:\s*)"?10\.0\.60\.26:30637/gitea_admin/(valhalla-[^:"\'\s]+):[^\s"\']*"?(\s*(?:#.*)?)$',
               re.MULTILINE,
           )
 
@@ -115,7 +143,7 @@ jobs:
                   continue
 
               def replace(m):
-                  return f"{m.group(1)}{m.group(2)}{m.group(3)}:{new_tag}{m.group(5)}{m.group(6)}"
+                  return f'{m.group(1)}"203.0.113.26:30637/gitea_admin/{m.group(2)}:{new_tag}"{m.group(3)}'
 
               new_text = image_re.sub(replace, text)
               if new_text != text:
@@ -130,7 +158,7 @@ jobs:
           for file in infrastructure/valhalla/deployment-*.yaml; do
             if jq empty "$file" 2>/dev/null; then
               current_image=$(jq -r '.spec.template.spec.containers[0].image // empty' "$file")
-              if [ -n "$current_image" ]; then
+              if [ -n "$current_image" ] && echo "$current_image" | grep -q "gitea_admin/valhalla-"; then
                 base_image="${current_image%%:*}"
                 new_image="$base_image:sha-$SHA_SHORT"
                 tmp_file="${file}.tmp"
