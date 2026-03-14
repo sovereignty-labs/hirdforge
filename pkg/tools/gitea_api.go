@@ -54,7 +54,7 @@ func (t *GiteaAPITool) Execute(args map[string]interface{}) ToolResult {
 	action = strings.TrimSpace(action)
 
 	if action == "" {
-		return ToolResult{Error: "Available gitea actions: create-pr, create-issue, list-issues, close-issue, comment, get-issue. Use `gitea {action}` for details."}
+		return ToolResult{Error: t.giteaOverviewUsage()}
 	}
 
 	if action == "get-issue" {
@@ -89,7 +89,7 @@ func (t *GiteaAPITool) Execute(args map[string]interface{}) ToolResult {
 	case "create-pr":
 		return t.createPR(owner, name, args)
 	default:
-		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %s. Available gitea actions: create-pr, create-issue, list-issues, close-issue, comment, get-issue.", action)}
+		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %q. Available actions: create-pr, create-issue, list-issues, close-issue, comment, get-issue.", action)}
 	}
 }
 
@@ -216,7 +216,10 @@ func (t *GiteaAPITool) comment(owner, repo string, args map[string]interface{}) 
 		return ToolResult{Error: t.actionUsage("comment")}
 	}
 
-	issueNum := t.extractNumber(args["issue"])
+	issueNum := t.extractNumber(args["index"])
+	if issueNum == 0 {
+		issueNum = t.extractNumber(args["issue"])
+	}
 	if issueNum == 0 {
 		return ToolResult{Error: t.actionUsage("comment")}
 	}
@@ -240,8 +243,8 @@ func (t *GiteaAPITool) listIssues(owner, repo string, args map[string]interface{
 	if state == "" {
 		state = "open"
 	}
-	if state != "open" && state != "closed" {
-		return ToolResult{Error: "state must be open or closed"}
+	if state != "open" && state != "closed" && state != "all" {
+		return ToolResult{Error: "state must be open, closed, or all"}
 	}
 	q := url.Values{}
 	q.Set("state", state)
@@ -398,7 +401,10 @@ func (t *GiteaAPITool) listBranches(owner, repo string) ToolResult {
 }
 
 func (t *GiteaAPITool) closeIssue(owner, repo string, args map[string]interface{}) ToolResult {
-	issueNum := t.extractNumber(args["issue"])
+	issueNum := t.extractNumber(args["index"])
+	if issueNum == 0 {
+		issueNum = t.extractNumber(args["issue"])
+	}
 	if issueNum == 0 {
 		return ToolResult{Error: t.actionUsage("close-issue")}
 	}
@@ -524,18 +530,61 @@ func (t *GiteaAPITool) extractNumber(v interface{}) int {
 func (t *GiteaAPITool) actionUsage(action string) string {
 	switch action {
 	case "create-pr":
-		return "Required: owner, repo, head, base, title. Optional: body. Example: gitea create-pr owner=kit repo=hirdforge-tasks head=feature/my-change base=main title='feat: my change'"
+		return `gitea create-pr — required params:
+owner    Repository owner (e.g., kit, gitea_admin)
+repo     Repository name
+head     Source branch name
+base     Target branch (usually: main)
+title    PR title
+body     (optional) PR description
+Example: gitea create-pr owner=kit repo=hirdforge-personas head=feature/new-skill base=main title="feat: add new skill" body="Adds code-modification skill"`
 	case "create-issue":
-		return "Required: repo, title. Optional: body, labels. Example: gitea create-issue repo=kit/hirdforge-tasks title='fix: update routing' body='details' labels='status/ready,priority/normal'"
+		return `gitea create-issue — required params:
+owner    Repository owner
+repo     Repository name
+title    Issue title
+body     Issue body (use body= prefix for multi-line content)
+labels   (optional) Comma-separated label names (resolved to IDs automatically)
+Example: gitea create-issue owner=kit repo=hirdforge-tasks title="Add health endpoint" body="TASK: Add /health to seidr..." labels="agent/leif,status/ready,priority/normal"`
 	case "comment":
-		return "Required: repo, issue, body. Example: gitea comment repo=kit/hirdforge-tasks issue=42 body='Progress update...'"
+		return `gitea comment — required params:
+owner    Repository owner
+repo     Repository name
+index    Issue or PR number
+body     Comment text
+Example: gitea comment owner=kit repo=hirdforge-tasks index=24 body="PR: http://..."`
 	case "close-issue":
-		return "Required: repo, issue. Example: gitea close-issue repo=kit/hirdforge-tasks issue=42"
+		return `gitea close-issue — required params:
+owner    Repository owner
+repo     Repository name
+index    Issue number
+Example: gitea close-issue owner=kit repo=hirdforge-tasks index=24`
 	case "get-issue":
-		return "Required: owner, repo, index. Example: gitea get-issue owner=kit repo=hirdforge-tasks index=42"
+		return `gitea get-issue — required params:
+owner    Repository owner
+repo     Repository name
+index    Issue number
+Example: gitea get-issue owner=kit repo=hirdforge-tasks index=24`
 	case "list-issues":
-		return "Required: repo. Optional: state, labels. Example: gitea list-issues repo=kit/hirdforge-tasks state=open labels='status/ready'"
+		return `gitea list-issues — required params:
+owner    Repository owner
+repo     Repository name
+state    (optional) open, closed, all (default: open)
+labels   (optional) Comma-separated label names to filter by
+Example: gitea list-issues owner=kit repo=hirdforge-tasks state=open labels="agent/leif,status/ready"`
 	default:
-		return "Available gitea actions: create-pr, create-issue, list-issues, close-issue, comment, get-issue. Use `gitea {action}` for details."
+		return t.giteaOverviewUsage()
 	}
+}
+
+func (t *GiteaAPITool) giteaOverviewUsage() string {
+	return `Gitea tool — available actions:
+create-pr      Create a pull request
+create-issue   Create an issue (supports label names)
+list-issues    List issues with state/label filters
+close-issue    Close an issue
+comment        Add comment to issue or PR
+get-issue      Get full issue details including body
+Usage: gitea {action} {params...}
+Example: gitea create-pr owner=kit repo=hirdforge-tasks head=my-branch base=main title="My PR"`
 }
