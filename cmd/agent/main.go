@@ -423,9 +423,7 @@ var (
 	selfImproveLastRun        = map[string]time.Time{}
 )
 
-const compactionSystemPrompt = `You are a context compactor. Summarize the provided conversation segment into concise, factual bullet points.
-Preserve decisions, concrete outputs, file names, commands, and unresolved follow-ups.
-Do not add new facts. Keep it short and useful for future continuation.`
+const compactionSystemPrompt = `Summarize the following conversation history into a concise context summary. Preserve: key decisions made, tools used and their outcomes, task progress, and any errors or lessons learned. Remove: repetitive content, verbose tool outputs, and conversational filler. Output only the summary, no preamble.`
 
 type delegateTool struct {
 	peers               map[string]string
@@ -433,6 +431,17 @@ type delegateTool struct {
 	giteaURL            string
 	maxDelegationTokens int
 	gates               []string
+}
+
+type compactTool struct{}
+
+func (t *compactTool) Name() string { return "compact" }
+func (t *compactTool) Description() string {
+	return "Compress older conversation history to free context space. Use when approaching context limits or before starting a complex multi-step task."
+}
+func (t *compactTool) Parameters() map[string]string { return map[string]string{} }
+func (t *compactTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	return toolpkg.ToolResult{Error: "compact tool must be invoked from an active session"}
 }
 
 type peerHealthResponse struct {
@@ -2862,7 +2871,7 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 func summarizeForCompaction(ctx context.Context, segment []message, inferenceURL, model, apiKey string) (string, error) {
 	var transcript strings.Builder
 	for _, m := range segment {
-		if m.Role != "user" && m.Role != "assistant" {
+		if strings.TrimSpace(m.Role) == "system" {
 			continue
 		}
 		transcript.WriteString(strings.ToUpper(m.Role))
@@ -2884,81 +2893,41 @@ func summarizeForCompaction(ctx context.Context, segment []message, inferenceURL
 	if summary == "" {
 		return "", fmt.Errorf("empty compaction summary")
 	}
+	summary = capSummaryWords(summary, 500)
 	return summary, nil
 }
 
-func compactHistory(sessionID string, history []message, maxContext, threshold, batch int, inferenceURL, model, apiKey, memoryURL, agentName string) []message {
-	if maxContext <= 0 {
-		return history
+func compactConversation(ctx context.Context, history []message, inferenceURL, model, apiKey string) ([]message, int, error) {
+	if len(history) < 4 {
+		return history, 0, nil
 	}
-	if threshold <= 0 {
-		threshold = maxContext - 4
+	olderCount := len(history) / 2
+	if olderCount < 2 {
+		return history, 0, nil
 	}
-	if threshold < 1 {
-		threshold = 1
-	}
-	if batch <= 0 {
-		batch = maxContext / 2
-		if batch > 8 {
-			batch = 8
-		}
-		if batch < 1 {
-			batch = 1
-		}
-	}
-	pairs := len(history) / 2
-	if pairs < threshold {
-		return history
-	}
-	segmentSize := batch * 2
-	if len(history) < segmentSize {
-		return history
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	summary, err := summarizeForCompaction(ctx, history[:segmentSize], inferenceURL, model, apiKey)
+	older := history[:olderCount]
+	recent := append([]message(nil), history[olderCount:]...)
+	summary, err := summarizeForCompaction(ctx, older, inferenceURL, model, apiKey)
 	if err != nil {
-		logJSON("warn", "context compaction failed; falling back to truncation", map[string]interface{}{"error": err.Error()})
-		return dropOldestHistoryPairs(history, maxContext)
+		return history, 0, err
 	}
 	marker := message{
-		Role:    "assistant",
-		Content: fmt.Sprintf("[Context compacted]\n%s", summary),
+		Role:    "system",
+		Content: "[Context Summary from earlier in this session]\n" + summary,
 	}
-	compacted := append([]message{marker}, history[segmentSize:]...)
-	storeCompactionSummary(memoryURL, agentName, sessionID, summary, batch)
-	logJSON("info", "context compacted", map[string]interface{}{"session_id": sessionID, "pairs_compacted": batch})
-	return compacted
+	compacted := append([]message{marker}, recent...)
+	return compacted, olderCount, nil
 }
 
-func storeCompactionSummary(memoryURL, agentName, sessionID, summary string, batch int) {
-	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || strings.TrimSpace(summary) == "" {
-		return
+func capSummaryWords(text string, maxWords int) string {
+	if maxWords <= 0 {
+		return ""
 	}
-	payload := map[string]interface{}{
-		"agent":      agentName,
-		"collection": fmt.Sprintf("%s-memory", agentName),
-		"content":    fmt.Sprintf("Compaction summary for session %s:\n%s", sessionID, summary),
-		"metadata": map[string]interface{}{
-			"agent":       agentName,
-			"type":        "compaction",
-			"session_id":  sessionID,
-			"batch_pairs": batch,
-			"timestamp":   time.Now().UTC().Format(time.RFC3339),
-		},
+	words := strings.Fields(strings.TrimSpace(text))
+	if len(words) <= maxWords {
+		return strings.TrimSpace(text)
 	}
-	body, _ := json.Marshal(payload)
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return
-	}
-	_ = resp.Body.Close()
+	return strings.Join(words[:maxWords], " ")
 }
 
 func agentNameFromSoulPath(path string) string {
@@ -3426,7 +3395,7 @@ func metricsText() string {
 	b.WriteString("# HELP valhalla_agent_stalls_total Total inference stalls detected\n")
 	b.WriteString("# TYPE valhalla_agent_stalls_total counter\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_stalls_total %d\n", atomic.LoadInt64(&metricsStallsTotal)))
-	b.WriteString("# HELP valhalla_agent_compactions_total Total SOUL compactions performed\n")
+	b.WriteString("# HELP valhalla_agent_compactions_total Total context compactions performed\n")
 	b.WriteString("# TYPE valhalla_agent_compactions_total counter\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_compactions_total %d\n", atomic.LoadInt64(&metricsCompactionsTotal)))
 	b.WriteString("# HELP valhalla_agent_uptime_seconds Agent uptime in seconds\n")
@@ -3446,8 +3415,7 @@ func main() {
 	model := flag.String("model", "qwen3:30b", "model name")
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
-	compactionThreshold := flag.Int("compaction-threshold", 0, "pair threshold to trigger context compaction (default: max-context-4)")
-	compactionBatch := flag.Int("compaction-batch", 0, "number of oldest pairs to compact at once (default: min(8,max-context/2))")
+	compactThreshold := flag.Float64("compact-threshold", 0.8, "fraction of max-context that triggers auto-compaction (0 disables; 1.0 disables auto and keeps manual compact tool)")
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
 	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
 	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
@@ -3557,6 +3525,7 @@ func main() {
 	}
 
 	reg := toolpkg.NewRegistry()
+	reg.Register(&compactTool{})
 	delegateExec := &delegateTool{
 		peers:               peers,
 		agentName:           agentName,
@@ -3680,11 +3649,6 @@ func main() {
 		}
 		sessionsMu.Unlock()
 
-		history = compactHistory(sessionID, history, *maxContext, *compactionThreshold, *compactionBatch, *inferenceURL, *model, *apiKey, *memoryURL, agentName)
-		sessionsMu.Lock()
-		sessions[sessionID] = append([]message(nil), history...)
-		sessionsMu.Unlock()
-
 		bootstrapContext := ""
 		bootstrapMemoryIDs := []string{}
 		reflectionContext := ""
@@ -3717,6 +3681,65 @@ func main() {
 		}
 		messages = append(messages, message{Role: "user", Content: content})
 
+		shouldAutoCompact := func() bool {
+			if *maxContext < 20 {
+				return false
+			}
+			if *compactThreshold <= 0 || *compactThreshold >= 1.0 {
+				return false
+			}
+			return true
+		}
+
+		runCompaction := func(trigger string) (int, int, int, error) {
+			if len(messages) <= 1 {
+				return 0, 0, 0, nil
+			}
+			before := len(messages) - 1
+			ctxCompact, cancelCompact := context.WithTimeout(ctx, 30*time.Second)
+			defer cancelCompact()
+			compacted, summarizedCount, err := compactConversation(ctxCompact, messages[1:], *inferenceURL, *model, *apiKey)
+			if err != nil {
+				return before, before, 0, err
+			}
+			if summarizedCount == 0 {
+				return before, before, 0, nil
+			}
+			messages = append([]message{messages[0]}, compacted...)
+			after := len(compacted)
+			summaryLen := 0
+			if len(compacted) > 0 {
+				summaryLen = len(compacted[0].Content)
+			}
+			atomic.AddInt64(&metricsCompactionsTotal, 1)
+			log.Printf("Auto-compacting: %d messages → %d messages", before, after)
+			logJSON("info", "context compacted", map[string]interface{}{
+				"agent":           agentName,
+				"session_id":      sessionID,
+				"trigger":         trigger,
+				"messages_before": before,
+				"messages_after":  after,
+				"summary_length":  summaryLen,
+			})
+			return before, after, summarizedCount, nil
+		}
+
+		ensureAutoCompaction := func() {
+			if !shouldAutoCompact() {
+				return
+			}
+			thresholdMessages := int(float64(*maxContext) * *compactThreshold)
+			if thresholdMessages < 1 {
+				return
+			}
+			if len(messages)-1 < thresholdMessages {
+				return
+			}
+			if _, _, _, err := runCompaction("auto"); err != nil {
+				logJSON("warn", "auto-compaction skipped", map[string]interface{}{"agent": agentName, "session_id": sessionID, "error": err.Error()})
+			}
+		}
+
 		shouldRetryTool := func(name string) bool {
 			switch name {
 			case "delegate", "broadcast", "recall", "remember", "task_status":
@@ -3743,6 +3766,24 @@ func main() {
 			runToolAttempt := func() toolpkg.ToolResult {
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
 				switch tc.Function.Name {
+				case "compact":
+					before, after, summarizedCount, err := runCompaction("manual")
+					if err != nil {
+						result = toolpkg.ToolResult{Error: "compact failed: " + err.Error()}
+						break
+					}
+					contextCap := *maxContext
+					if contextCap < 1 {
+						contextCap = len(messages) - 1
+					}
+					result = toolpkg.ToolResult{
+						Output: fmt.Sprintf("Compacted %d messages into summary. Context usage: %d/%d messages.", summarizedCount, after, contextCap),
+					}
+					if summarizedCount == 0 && before == after {
+						result = toolpkg.ToolResult{
+							Output: fmt.Sprintf("Compacted 0 messages into summary. Context usage: %d/%d messages.", after, contextCap),
+						}
+					}
 				case "delegate":
 					args["_task_id"] = sessionID
 					result = delegateExec.Execute(args)
@@ -3829,6 +3870,7 @@ func main() {
 		}
 
 		for i := 0; i < 10; i++ {
+			ensureAutoCompaction()
 			inferenceCtx, cancel := withInferenceTimeout(ctx)
 			resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, toolDefs, *inferenceURL, *model, *apiKey)
 			cancel()
@@ -3862,6 +3904,7 @@ func main() {
 		var xmlToolResults []string
 		insideThink := false
 		streamCtx, cancelStream := withInferenceTimeout(ctx)
+		ensureAutoCompaction()
 		for evt := range streamOllamaWithContext(streamCtx, messages, nil, *inferenceURL, *model, *apiKey) {
 			if evt.Err != nil {
 				errText := evt.Err.Error()
@@ -3974,6 +4017,7 @@ func main() {
 			resultMsg := "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
 			messages = append(messages, message{Role: "user", Content: resultMsg})
 			for i := 0; i < 3; i++ {
+				ensureAutoCompaction()
 				inferenceCtx, cancel := withInferenceTimeout(ctx)
 				resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, toolDefs, *inferenceURL, *model, *apiKey)
 				cancel()
