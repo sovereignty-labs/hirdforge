@@ -28,18 +28,20 @@ func NewGiteaAPITool(giteaURL, token string) *GiteaAPITool {
 func (t *GiteaAPITool) Name() string { return "gitea" }
 
 func (t *GiteaAPITool) Description() string {
-	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, list-branches, close-issue, create-pr"
+	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr"
 }
 
 func (t *GiteaAPITool) Parameters() map[string]string {
 	return map[string]string{
-		"action": "One of: create-issue, comment, list-issues, list-branches, close-issue, create-pr",
+		"action": "One of: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr",
+		"owner":  "Repository owner for get-issue (optional if repo is owner/repo)",
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
 		"title":  "Title for issue or PR (create-issue, create-pr)",
 		"body":   "Body text for issue, comment, or PR description",
 		"labels": "Comma-separated label names (create-issue, list-issues)",
 		"state":  "Issue state for list-issues: open or closed (default open)",
 		"issue":  "Issue or PR number (comment, close-issue)",
+		"index":  "Issue number for get-issue",
 		"head":   "Source branch for PR (create-pr)",
 		"base":   "Target branch for PR (create-pr, defaults to main)",
 	}
@@ -50,7 +52,20 @@ func (t *GiteaAPITool) Execute(args map[string]interface{}) ToolResult {
 	repo, _ := args["repo"].(string)
 
 	if action == "" {
-		return ToolResult{Error: "action is required (create-issue, comment, list-issues, list-branches, close-issue, create-pr)"}
+		return ToolResult{Error: "action is required (create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr)"}
+	}
+
+	if action == "get-issue" {
+		owner, _ := args["owner"].(string)
+		owner = strings.TrimSpace(owner)
+		name := strings.TrimSpace(repo)
+		if owner == "" {
+			owner, name = t.parseRepo(name)
+		}
+		if name == "" {
+			return ToolResult{Error: "repo is required"}
+		}
+		return t.getIssue(owner, name, args)
 	}
 	if repo == "" {
 		return ToolResult{Error: "repo is required"}
@@ -266,6 +281,83 @@ func (t *GiteaAPITool) listIssues(owner, repo string, args map[string]interface{
 		return ToolResult{Error: err.Error()}
 	}
 	return ToolResult{Output: string(out)}
+}
+
+func (t *GiteaAPITool) getIssue(owner, repo string, args map[string]interface{}) ToolResult {
+	issueNum := t.extractNumber(args["index"])
+	if issueNum == 0 {
+		issueNum = t.extractNumber(args["issue"])
+	}
+	if issueNum == 0 {
+		return ToolResult{Error: "index is required for get-issue"}
+	}
+
+	issueResp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, issueNum), nil)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	if status >= 400 {
+		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(issueResp))}
+	}
+
+	commentsResp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, issueNum), nil)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	if status >= 400 {
+		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(commentsResp))}
+	}
+
+	var issue map[string]interface{}
+	if err := json.Unmarshal(issueResp, &issue); err != nil {
+		return ToolResult{Error: fmt.Sprintf("failed to parse issue response: %v", err)}
+	}
+	var comments []map[string]interface{}
+	if err := json.Unmarshal(commentsResp, &comments); err != nil {
+		return ToolResult{Error: fmt.Sprintf("failed to parse comments response: %v", err)}
+	}
+
+	title, _ := issue["title"].(string)
+	state, _ := issue["state"].(string)
+	body, _ := issue["body"].(string)
+
+	labelNames := make([]string, 0)
+	if ls, ok := issue["labels"].([]interface{}); ok {
+		for _, l := range ls {
+			if lm, ok := l.(map[string]interface{}); ok {
+				if n, ok := lm["name"].(string); ok && n != "" {
+					labelNames = append(labelNames, n)
+				}
+			}
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Title: %s\n", title))
+	sb.WriteString(fmt.Sprintf("State: %s\n", state))
+	if len(labelNames) > 0 {
+		sb.WriteString(fmt.Sprintf("Labels: %s\n", strings.Join(labelNames, ", ")))
+	} else {
+		sb.WriteString("Labels: \n")
+	}
+	sb.WriteString("Body:\n")
+	sb.WriteString(body)
+	sb.WriteString("\n\nComments:\n")
+	if len(comments) == 0 {
+		sb.WriteString("(none)")
+		return ToolResult{Output: sb.String()}
+	}
+	for i, c := range comments {
+		author := "unknown"
+		if user, ok := c["user"].(map[string]interface{}); ok {
+			if login, ok := user["login"].(string); ok && login != "" {
+				author = login
+			}
+		}
+		commentBody, _ := c["body"].(string)
+		sb.WriteString(fmt.Sprintf("%d. %s:\n%s\n", i+1, author, commentBody))
+	}
+	return ToolResult{Output: sb.String()}
 }
 
 func (t *GiteaAPITool) listBranches(owner, repo string) ToolResult {
