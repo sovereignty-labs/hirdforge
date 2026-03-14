@@ -448,6 +448,8 @@ type peerHealthResponse struct {
 	Model string `json:"model"`
 }
 
+const agentCommTimeout = 120 * time.Second
+
 func (t *delegateTool) Name() string { return "delegate" }
 func (t *delegateTool) Description() string {
 	return "Send a task to another agent and get their response. Use this to delegate work to specialists."
@@ -527,7 +529,7 @@ func fetchPeerModel(peerURL string) string {
 	if strings.TrimSpace(peerURL) == "" {
 		return ""
 	}
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: agentCommTimeout}
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(peerURL, "/")+"/health", nil)
 	if err != nil {
 		return ""
@@ -558,7 +560,7 @@ func sendPeerAgentTask(agentName, peerURL, from, task string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: agentCommTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
@@ -669,7 +671,7 @@ func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: agentCommTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
@@ -3300,7 +3302,7 @@ func notifyGateway(gatewayURL, eventType, agentName, message string) {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 5 * time.Second}
+		client := &http.Client{Timeout: agentCommTimeout}
 		resp, err := client.Do(req)
 		if err != nil {
 			logJSON("warn", "gateway notify failed", map[string]interface{}{"error": err.Error()})

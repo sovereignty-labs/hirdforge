@@ -30,6 +30,8 @@ import (
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
+const agentRequestTimeout = 120 * time.Second
+
 //go:embed index.html
 var dashboardHTML string
 
@@ -494,7 +496,7 @@ func (g *gateway) notifyDelegatingAgent(evt taskSocketEvent) {
 	if err != nil {
 		return
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: agentRequestTimeout}
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
 	if err != nil {
 		log.Printf("task callback: build request failed for %s: %v", delegatedBy, err)
@@ -642,7 +644,7 @@ func (g *gateway) updateAgent(updated Agent) {
 }
 
 func (g *gateway) refreshAgentHealth() {
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 3 * time.Second}
 	g.mu.RLock()
 	names := append([]string(nil), g.order...)
 	urls := make(map[string]string, len(g.order))
@@ -1496,7 +1498,7 @@ func main() {
 		gw.addEvent("k8s_event", "cluster", "Kubernetes integration disabled")
 	}
 
-	proxyClient := &http.Client{}
+	proxyClient := &http.Client{Timeout: agentRequestTimeout}
 	giteaClient := &http.Client{Timeout: 10 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
