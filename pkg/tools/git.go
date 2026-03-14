@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +107,7 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 
 	runGit(repoDir, []string{"git", "config", "user.email", "agent@valhalla.local"}, 5*time.Second)
 	runGit(repoDir, []string{"git", "config", "user.name", "Valhalla Agent"}, 5*time.Second)
+	t.ensureCredentialedOrigin(repoDir, repo)
 
 	return ToolResult{Output: fmt.Sprintf("cloned %s to %s", repo, repoDir)}
 }
@@ -120,9 +122,62 @@ func (t *GitCloneTool) buildURL(repo string) string {
 		if strings.HasPrefix(base, "https://") {
 			scheme = "https://"
 		}
-		return fmt.Sprintf("%stoken:%s@%s/%s/%s.git", scheme, t.Token, stripped, owner, name)
+		return fmt.Sprintf("%swarband:%s@%s/%s/%s.git", scheme, t.Token, stripped, owner, name)
 	}
 	return fmt.Sprintf("%s/%s/%s.git", base, owner, name)
+}
+
+func (t *GitCloneTool) ensureCredentialedOrigin(repoDir, repo string) {
+	t.Token = resolveGiteaToken(t.Token)
+	if t.Token == "" {
+		return
+	}
+	giteaHost := hostFromURL(t.GiteaURL)
+	if giteaHost == "" {
+		return
+	}
+
+	originRes := runGit(repoDir, []string{"git", "remote", "get-url", "origin"}, 5*time.Second)
+	if originRes.Error != "" {
+		return
+	}
+	originURL := strings.TrimSpace(originRes.Output)
+	if originURL == "" {
+		return
+	}
+	if hostFromURL(originURL) != giteaHost {
+		return
+	}
+	if hasURLCredentials(originURL) {
+		return
+	}
+
+	if res := runGit(repoDir, []string{"git", "remote", "set-url", "origin", t.buildURL(repo)}, 5*time.Second); res.Error != "" {
+		log.Printf("git-clone: failed to set credentialed origin for %s: %s", repoDir, res.Error)
+	}
+}
+
+func hostFromURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Host)
+}
+
+func hasURLCredentials(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return u.User != nil
 }
 
 type GitCommitTool struct {
