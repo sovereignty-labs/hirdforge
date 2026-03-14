@@ -80,7 +80,7 @@ jobs:
     needs: [build-agent, build-gateway, build-seidr, build-lockbox]
     steps:
       - name: Install tools
-        run: apk add --no-cache curl jq
+        run: apk add --no-cache curl jq python3
       - name: Clone repos
         run: |
           rm -rf /src-code /src-infra
@@ -92,9 +92,39 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           NEW_TAG="sha-$SHA_SHORT"
           cd /src-infra
-          # Update only first-party valhalla images from our registry prefix.
-          sed -i "s|203.0.113.26:30637/gitea_admin/valhalla-\([a-z]*\):[^ ]*|203.0.113.26:30637/gitea_admin/valhalla-\1:${NEW_TAG}|g" infrastructure/valhalla/deployment-chuck.yaml infrastructure/valhalla/deployment-ivar.yaml infrastructure/valhalla/deployment-knut.yaml infrastructure/valhalla/deployment-orm.yaml infrastructure/valhalla/deployment-ragnar.yaml infrastructure/valhalla/deployment-val.yaml infrastructure/valhalla/deployment-freya.yaml infrastructure/valhalla/deployment-leif.yaml infrastructure/valhalla/deployment-sindri.yaml
-          sed -i "s|203.0.113.26:30637/gitea_admin/valhalla-\([a-z]*\):[^ ]*|203.0.113.26:30637/gitea_admin/valhalla-\1:${NEW_TAG}|g" infrastructure/valhalla/deployment-gateway.yaml
+          # Update first-party valhalla image tags in YAML manifests (non-JSON) using Python.
+          python3 - "$NEW_TAG" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          new_tag = sys.argv[1].strip()
+          root = pathlib.Path("infrastructure")
+          image_re = re.compile(
+              r'(^\s*image:\s*)(["\']?)(10\.0\.60\.26:30637/gitea_admin/valhalla-[^:"\'\s]+):([^\s"\']+)(\2)(\s*(?:#.*)?$)',
+              re.MULTILINE,
+          )
+
+          updated = []
+          for path in sorted(root.rglob("*")):
+              if path.suffix.lower() not in {".yaml", ".yml"}:
+                  continue
+              text = path.read_text(encoding="utf-8")
+              if text.lstrip().startswith("{"):
+                  # JSON-formatted manifests are handled by jq below.
+                  continue
+
+              def replace(m):
+                  return f"{m.group(1)}{m.group(2)}{m.group(3)}:{new_tag}{m.group(5)}{m.group(6)}"
+
+              new_text = image_re.sub(replace, text)
+              if new_text != text:
+                  path.write_text(new_text, encoding="utf-8")
+                  updated.append(str(path))
+
+          for file in updated:
+              print(f"updated: {file}")
+          PY
           # For JSON-formatted deployment files, update only the image field via jq
           # so manually-added env vars/volumes are preserved.
           for file in infrastructure/valhalla/deployment-*.yaml; do
