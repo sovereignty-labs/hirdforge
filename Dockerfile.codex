@@ -1,0 +1,23 @@
+# Build stage
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY pkg/ pkg/
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-agent ./cmd/agent/
+
+# Runtime stage
+FROM alpine:3.20
+RUN apk add --no-cache git curl jq python3 && adduser -D -u 1000 warrior
+RUN apk add --no-cache nodejs npm
+RUN npm install -g @openai/codex
+RUN mkdir -p /home/agent/.codex && chown warrior:warrior /home/agent /home/agent/.codex
+ENV HOME=/home/agent
+COPY scripts/apply_patch.py /usr/local/bin/apply_patch
+RUN chmod +x /usr/local/bin/apply_patch
+COPY --from=build /valhalla-agent /usr/local/bin/valhalla-agent
+USER warrior
+WORKDIR /workspace
+EXPOSE 8081
+ENTRYPOINT ["valhalla-agent"]
