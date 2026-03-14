@@ -13,8 +13,8 @@ import (
 )
 
 type HTTPTool struct {
-	Client         *http.Client
-	SecureClient   *http.Client
+	Client       *http.Client
+	SecureClient *http.Client
 }
 
 func NewHTTPTool() *HTTPTool {
@@ -112,6 +112,10 @@ func (t *HTTPTool) Execute(args map[string]interface{}) ToolResult {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		errText := strings.ToLower(err.Error())
+		if strings.Contains(errText, "connection refused") {
+			return ToolResult{Error: fmt.Sprintf("Connection refused at %s. Check if the service is running. Common internal URLs: gateway=http://gateway.valhalla.svc:8080, seidr=http://seidr.valhalla.svc:8082, gitea=http://gitea-http.gitea.svc.cluster.local:3000", urlStr)}
+		}
 		return ToolResult{Error: fmt.Sprintf("request failed: %s", err)}
 	}
 	defer resp.Body.Close()
@@ -119,6 +123,9 @@ func (t *HTTPTool) Execute(args map[string]interface{}) ToolResult {
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 32*1024))
 	if err != nil {
 		return ToolResult{Error: fmt.Sprintf("failed to read response: %s", err)}
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return ToolResult{Error: "Authentication failed. For Gitea API, ensure Authorization header uses $GITEA_TOKEN. For internal services, most don't require auth."}
 	}
 
 	output := fmt.Sprintf("HTTP %d %s\n\n%s", resp.StatusCode, resp.Status, string(respBody))
