@@ -85,13 +85,28 @@ class ConsolidateRequest(BaseModel):
 app = FastAPI(title="Seidr", description="Valhalla Knowledge Service")
 
 # ChromaDB's built-in embedding: all-MiniLM-L6-v2, CPU, ~80MB, auto-downloads
-if EMBEDDING_MODEL != "default":
-    embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name=EMBEDDING_MODEL,
-        device=EMBEDDING_DEVICE,
-    )
-else:
-    embed_fn = embedding_functions.DefaultEmbeddingFunction()
+class _LazyEmbeddingFunction:
+    """Defer ONNX model loading until first use to avoid startup deadlock under uvicorn."""
+
+    def __init__(self):
+        self._ef = None
+
+    def _init(self):
+        if EMBEDDING_MODEL != "default":
+            self._ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=EMBEDDING_MODEL,
+                device=EMBEDDING_DEVICE,
+            )
+        else:
+            self._ef = embedding_functions.DefaultEmbeddingFunction()
+
+    def __call__(self, input):
+        if self._ef is None:
+            self._init()
+        return self._ef(input)
+
+
+embed_fn = _LazyEmbeddingFunction()
 chroma_client = None
 collection_cache = {}
 
