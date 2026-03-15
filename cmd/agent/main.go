@@ -3084,6 +3084,19 @@ func maybeRememberAction(memoryURL, agentName, sessionID, toolName string, args 
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || result.Error != "" {
 		return
 	}
+	if toolName == "git-clone" {
+		repo := truncateMemoryValue(fmt.Sprint(args["repo"]), 200)
+		workspacePath := truncateMemoryValue(extractCloneWorkspacePath(result.Output), 300)
+		if repo == "" || workspacePath == "" {
+			return
+		}
+		rememberStructuredOutcome(memoryURL, agentName, sessionID, toolName, fmt.Sprintf(
+			`CLONED: repo=%q to=%q`,
+			repo,
+			workspacePath,
+		))
+		return
+	}
 	if toolName != "git-commit" && toolName != "write" && toolName != "exec" {
 		return
 	}
@@ -3099,16 +3112,60 @@ func maybeRememberAction(memoryURL, agentName, sessionID, toolName string, args 
 	if !matched {
 		return
 	}
-	argsJSON, _ := json.Marshal(args)
-	argsStr := string(argsJSON)
-	if len(argsStr) > 180 {
-		argsStr = argsStr[:180] + "..."
+	repo := truncateMemoryValue(fmt.Sprint(args["repo"]), 200)
+	snippet := truncateMemoryValue(result.Output, 100)
+	content := fmt.Sprintf(
+		`TOOL_SUCCESS: tool=%q repo=%q result=%q`,
+		toolName,
+		repo,
+		snippet,
+	)
+	rememberStructuredOutcome(memoryURL, agentName, sessionID, toolName, content)
+}
+
+func truncateMemoryValue(raw string, limit int) string {
+	cleaned := strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	if cleaned == "<nil>" {
+		return ""
 	}
-	snippet := strings.TrimSpace(result.Output)
-	if len(snippet) > 240 {
-		snippet = snippet[:240] + "..."
+	if limit <= 0 {
+		return cleaned
 	}
-	content := fmt.Sprintf("%s args=%s result=%s", toolName, argsStr, snippet)
+	runes := []rune(cleaned)
+	if len(runes) <= limit {
+		return cleaned
+	}
+	return string(runes[:limit])
+}
+
+func extractCloneWorkspacePath(output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(output, " to "); idx >= 0 {
+		return strings.TrimSpace(output[idx+4:])
+	}
+	if idx := strings.LastIndex(output, " in "); idx >= 0 {
+		return strings.TrimSpace(output[idx+4:])
+	}
+	lines := strings.Split(output, "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+func extractFirstURL(output string) string {
+	for _, field := range strings.Fields(output) {
+		if strings.HasPrefix(field, "http://") || strings.HasPrefix(field, "https://") {
+			return strings.TrimRight(field, ".,);]")
+		}
+	}
+	return ""
+}
+
+func rememberStructuredOutcome(memoryURL, agentName, sessionID, toolName, content string) {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || strings.TrimSpace(content) == "" {
+		return
+	}
 	go func() {
 		payload := map[string]interface{}{
 			"agent":      agentName,
@@ -3116,20 +3173,21 @@ func maybeRememberAction(memoryURL, agentName, sessionID, toolName string, args 
 			"content":    content,
 			"metadata": map[string]interface{}{
 				"agent":      agentName,
-				"type":       "action_log",
+				"type":       "action_success",
 				"tool":       toolName,
 				"session_id": sessionID,
 				"timestamp":  time.Now().UTC().Format(time.RFC3339),
 			},
 		}
 		body, _ := json.Marshal(payload)
-		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
 		if err != nil {
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		client := &http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Do(req)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return
 		}
@@ -3892,6 +3950,37 @@ func main() {
 			} else {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
 				validateContextMemoriesAsync(*memoryURL, sessionID, "success")
+				if tc.Function.Name == "gitea" {
+					action := strings.TrimSpace(fmt.Sprint(args["action"]))
+					repo := truncateMemoryValue(fmt.Sprint(args["repo"]), 200)
+					switch action {
+					case "create-pr":
+						head := truncateMemoryValue(fmt.Sprint(args["head"]), 200)
+						title := truncateMemoryValue(fmt.Sprint(args["title"]), 200)
+						prURL := truncateMemoryValue(extractFirstURL(result.Output), 300)
+						if repo != "" && head != "" && title != "" && prURL != "" {
+							rememberStructuredOutcome(*memoryURL, agentName, sessionID, tc.Function.Name, fmt.Sprintf(
+								`PR_CREATED: repo=%q branch=%q title=%q pr_url=%q`,
+								repo,
+								head,
+								title,
+								prURL,
+							))
+						}
+					case "close-issue":
+						issueNum := truncateMemoryValue(fmt.Sprint(args["issue"]), 50)
+						if issueNum == "" || issueNum == "<nil>" {
+							issueNum = truncateMemoryValue(fmt.Sprint(args["index"]), 50)
+						}
+						if repo != "" && issueNum != "" && issueNum != "<nil>" {
+							rememberStructuredOutcome(*memoryURL, agentName, sessionID, tc.Function.Name, fmt.Sprintf(
+								`ISSUE_CLOSED: repo=%q issue=%q`,
+								repo,
+								issueNum,
+							))
+						}
+					}
+				}
 			}
 			if logTool != nil {
 				inputBytes, _ := json.Marshal(args)
