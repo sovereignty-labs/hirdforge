@@ -2356,9 +2356,10 @@ func validateContextMemoriesAsync(memoryURL, sessionID, outcome string) {
 }
 
 type recalledMemory struct {
-	ID       string
-	Text     string
-	Metadata map[string]interface{}
+	ID         string
+	Text       string
+	Similarity float64
+	Metadata   map[string]interface{}
 }
 
 func recallMemories(memoryURL string, payload map[string]interface{}, timeout time.Duration) []recalledMemory {
@@ -2382,10 +2383,11 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 	}
 
 	type recallItem struct {
-		ID       string                 `json:"id"`
-		Content  string                 `json:"content"`
-		Text     string                 `json:"text"`
-		Metadata map[string]interface{} `json:"metadata"`
+		ID         string                 `json:"id"`
+		Content    string                 `json:"content"`
+		Text       string                 `json:"text"`
+		Similarity float64                `json:"similarity"`
+		Metadata   map[string]interface{} `json:"metadata"`
 	}
 	var out struct {
 		Results  []recallItem `json:"results"`
@@ -2409,12 +2411,43 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 			continue
 		}
 		memories = append(memories, recalledMemory{
-			ID:       strings.TrimSpace(item.ID),
-			Text:     text,
-			Metadata: item.Metadata,
+			ID:         strings.TrimSpace(item.ID),
+			Text:       text,
+			Similarity: item.Similarity,
+			Metadata:   item.Metadata,
 		})
 	}
 	return memories
+}
+
+func appendCloneMemoryContext(memoryURL, agentName, repoName string, result toolpkg.ToolResult) toolpkg.ToolResult {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || strings.TrimSpace(repoName) == "" || result.Error != "" {
+		return result
+	}
+	memories := recallMemories(memoryURL, map[string]interface{}{
+		"agent": agentName,
+		"query": repoName,
+		"limit": 3,
+	}, 3*time.Second)
+	if len(memories) == 0 {
+		return result
+	}
+	var contextLines []string
+	for _, memory := range memories {
+		if memory.Similarity <= 0.5 {
+			continue
+		}
+		content := strings.TrimSpace(memory.Text)
+		if content == "" {
+			continue
+		}
+		contextLines = append(contextLines, "- "+content)
+	}
+	if len(contextLines) == 0 {
+		return result
+	}
+	result.Output += "\n\n[MEMORY CONTEXT for " + repoName + "]\n" + strings.Join(contextLines, "\n") + "\n"
+	return result
 }
 
 func selfImprovementAllowed(agentName string, now time.Time) bool {
@@ -3939,6 +3972,12 @@ func main() {
 						rememberToolRecovery(*memoryURL, agentName, sessionID, tc.Function.Name, args, attempt+1)
 						break
 					}
+				}
+			}
+			if result.Error == "" && tc.Function.Name == "git-clone" && strings.TrimSpace(*memoryURL) != "" {
+				repoName := strings.TrimSpace(fmt.Sprint(args["repo"]))
+				if repoName != "" && repoName != "<nil>" {
+					result = appendCloneMemoryContext(*memoryURL, agentName, repoName, result)
 				}
 			}
 			if result.Error != "" {
