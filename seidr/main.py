@@ -91,6 +91,9 @@ class _LazyEmbeddingFunction:
     def __init__(self):
         self._ef = None
 
+    def name(self):
+        return "default"
+
     def _init(self):
         if EMBEDDING_MODEL != "default":
             self._ef = embedding_functions.SentenceTransformerEmbeddingFunction(
