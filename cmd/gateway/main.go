@@ -31,6 +31,7 @@ import (
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 const agentRequestTimeout = 120 * time.Second
+const streamingAgentTimeout = 300 * time.Second
 
 //go:embed index.html
 var dashboardHTML string
@@ -1499,6 +1500,7 @@ func main() {
 	}
 
 	proxyClient := &http.Client{Timeout: agentRequestTimeout}
+	streamClient := &http.Client{Timeout: streamingAgentTimeout}
 	giteaClient := &http.Client{Timeout: 10 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -2663,31 +2665,32 @@ func main() {
 		gw.lastSessionMu.Unlock()
 		gw.addEvent("message", in.Agent, fmt.Sprintf("Message sent to %s", in.Agent))
 
-		ctx, cancel := context.WithCancel(r.Context())
-		defer cancel()
-		gw.setActiveRequest(in.Agent, sessionID, cancel)
-		defer gw.clearActiveRequest(in.Agent, cancel)
+		agentCtx, agentCancel := context.WithTimeout(context.Background(), streamingAgentTimeout)
+		defer agentCancel()
+		gw.setActiveRequest(in.Agent, sessionID, agentCancel)
+		defer gw.clearActiveRequest(in.Agent, agentCancel)
 
 		body, _ := json.Marshal(map[string]string{"content": in.Content, "session_id": sessionID})
-		uReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
+		uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
 			return
 		}
 		uReq.Header.Set("Content-Type", "application/json")
-		uResp, err := proxyClient.Do(uReq)
+		uResp, err := streamClient.Do(uReq)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
 			return
 		}
-		defer uResp.Body.Close()
 		if uResp.StatusCode < 200 || uResp.StatusCode >= 300 {
 			b, _ := io.ReadAll(io.LimitReader(uResp.Body, 4096))
+			uResp.Body.Close()
 			writeJSON(w, uResp.StatusCode, map[string]string{"error": strings.TrimSpace(string(b))})
 			return
 		}
 		flusher, ok := w.(http.Flusher)
 		if !ok {
+			uResp.Body.Close()
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
 			return
 		}
@@ -2709,7 +2712,7 @@ func main() {
 					flusher.Flush()
 				case <-keepaliveDone:
 					return
-				case <-ctx.Done():
+				case <-agentCtx.Done():
 					return
 				}
 			}
@@ -2778,6 +2781,20 @@ func main() {
 				gw.sessionStore.appendConversation(sessionID, in.Agent, in.Content, cleaned)
 			})
 		}
+		drainAgentResponse := func() {
+			go func() {
+				defer uResp.Body.Close()
+				defer agentCancel()
+				for {
+					line, err := reader.ReadBytes('\n')
+					if err != nil {
+						break
+					}
+					_ = line
+				}
+				saveConversation()
+			}()
+		}
 		forward := func(evt map[string]interface{}) bool {
 			b, err := json.Marshal(evt)
 			if err != nil {
@@ -2813,6 +2830,8 @@ func main() {
 								contentBuf.WriteString(content)
 							}
 							if !forward(evt) {
+								// Client disconnected - drain agent response in background
+								drainAgentResponse()
 								return
 							}
 							goto lineDone
@@ -2849,16 +2868,23 @@ func main() {
 								doneEvt["session_id"] = sessionID
 							}
 							if !forwardReplaceIfNeeded() {
+								// Client disconnected - drain agent response in background
+								drainAgentResponse()
 								return
 							}
 							saveConversation()
 							processInjectionQueue(sessionID)
 							if !forward(doneEvt) {
+								// Client disconnected - drain agent response in background
+								drainAgentResponse()
 								return
 							}
+							uResp.Body.Close()
 							return
 						}
 						if !forward(evt) {
+							// Client disconnected - drain agent response in background
+							drainAgentResponse()
 							return
 						}
 					}
@@ -2867,6 +2893,7 @@ func main() {
 			}
 			if err == io.EOF {
 				if !forwardReplaceIfNeeded() {
+					uResp.Body.Close()
 					return
 				}
 				saveConversation()
@@ -2876,9 +2903,11 @@ func main() {
 				} else {
 					_ = forward(map[string]interface{}{"type": "done", "done": true, "session_id": sessionID})
 				}
+				uResp.Body.Close()
 				return
 			}
 			if err != nil {
+				uResp.Body.Close()
 				return
 			}
 		}
