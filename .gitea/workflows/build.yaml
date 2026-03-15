@@ -178,7 +178,7 @@ jobs:
             if jq empty "$file" 2>/dev/null; then
               current_image=$(jq -r '.spec.template.spec.containers[0].image // empty' "$file")
               if [ -n "$current_image" ] && echo "$current_image" | grep -q "gitea_admin/valhalla-"; then
-                base_image="${current_image%%:*}"
+                base_image="${current_image%:*}"
                 new_image="$base_image:sha-$SHA_SHORT"
                 tmp_file="${file}.tmp"
                 jq --arg img "$new_image" '.spec.template.spec.containers[0].image = $img' "$file" > "$tmp_file" && mv "$tmp_file" "$file"
