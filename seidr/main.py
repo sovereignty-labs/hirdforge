@@ -1062,4 +1062,5 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8082"))
     log("info", "seidr starting", {"port": port, "chroma": f"{CHROMA_HOST}:{CHROMA_PORT}"})
     embed_fn._init()
+    embed_fn(["warmup"])
     uvicorn.run(app, host="0.0.0.0", port=port)
