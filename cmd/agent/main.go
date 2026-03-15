@@ -3650,6 +3650,64 @@ func main() {
 			injectSkillNudge = true
 		}
 		sessionsMu.Unlock()
+		sanitizeHistory := func(history []message) []message {
+			if len(history) == 0 {
+				return history
+			}
+			openToolCalls := map[string]int{}
+			assistantWithToolCalls := map[int]bool{}
+			assistantMatchedToolResponse := map[int]bool{}
+			removeIdx := map[int]bool{}
+			for i, msg := range history {
+				switch msg.Role {
+				case "assistant":
+					if len(msg.ToolCalls) == 0 {
+						continue
+					}
+					assistantWithToolCalls[i] = true
+					for _, tc := range msg.ToolCalls {
+						tcID := strings.TrimSpace(tc.ID)
+						if tcID == "" {
+							continue
+						}
+						openToolCalls[tcID] = i
+					}
+				case "tool":
+					tcID := strings.TrimSpace(msg.ToolCallID)
+					if tcID == "" {
+						removeIdx[i] = true
+						continue
+					}
+					assistantIdx, ok := openToolCalls[tcID]
+					if !ok {
+						removeIdx[i] = true
+						continue
+					}
+					delete(openToolCalls, tcID)
+					assistantMatchedToolResponse[assistantIdx] = true
+				}
+			}
+			for assistantIdx := range assistantWithToolCalls {
+				if !assistantMatchedToolResponse[assistantIdx] {
+					removeIdx[assistantIdx] = true
+				}
+			}
+			if len(removeIdx) == 0 {
+				return history
+			}
+			removed := 0
+			out := make([]message, 0, len(history)-len(removeIdx))
+			for i, msg := range history {
+				if removeIdx[i] {
+					removed++
+					continue
+				}
+				out = append(out, msg)
+			}
+			logJSON("info", "sanitized orphaned tool messages", map[string]interface{}{"removed": removed, "session_id": sessionID})
+			return out
+		}
+		history = sanitizeHistory(history)
 
 		bootstrapContext := ""
 		bootstrapMemoryIDs := []string{}
