@@ -7,6 +7,7 @@ import asyncio
 import os
 import json
 import re
+import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -645,23 +646,21 @@ def consolidate_agent_memories(agent: str) -> dict:
 
     return {"agent": agent, "consolidated": consolidated, "remaining": col.count()}
 
+def background_prune_loop():
+    """Background thread for periodic memory maintenance. Runs independently of the event loop."""
+    # Wait 60 seconds after startup before first prune to let ChromaDB stabilize
+    time.sleep(60)
+    while True:
+        try:
+            prune_expired_memories()
+            for name in list_agent_collections():
+                agent = name[len(f"{COLLECTION}_"):]
+                consolidate_agent_memories(agent)
+        except Exception as e:
+            log("error", "memory prune failed", {"error": str(e)})
+        time.sleep(6 * 60 * 60)
 
 # --- Endpoints ---
-
-@app.on_event("startup")
-async def startup_prune_task():
-    log("info", "embedding config", {"model": EMBEDDING_MODEL, "device": EMBEDDING_DEVICE})
-    async def prune_loop():
-        while True:
-            try:
-                prune_expired_memories()
-                for name in list_agent_collections():
-                    agent = name[len(f"{COLLECTION}_"):]
-                    consolidate_agent_memories(agent)
-            except Exception as e:
-                log("error", "memory prune failed", {"error": str(e)})
-            await asyncio.sleep(6 * 60 * 60)
-    asyncio.create_task(prune_loop())
 
 @app.get("/health")
 async def health():
@@ -1077,4 +1076,9 @@ if __name__ == "__main__":
     log("info", "seidr starting", {"port": port, "chroma": f"{CHROMA_HOST}:{CHROMA_PORT}"})
     embed_fn._init()
     embed_fn(["warmup"])
+    log("info", "embedding initialized", {"model": EMBEDDING_MODEL, "device": EMBEDDING_DEVICE})
+    # Start background prune/consolidation thread — daemon=True so it exits with the process
+    prune_thread = threading.Thread(target=background_prune_loop, daemon=True)
+    prune_thread.start()
+    log("info", "background prune thread started")
     uvicorn.run(app, host="0.0.0.0", port=port)
