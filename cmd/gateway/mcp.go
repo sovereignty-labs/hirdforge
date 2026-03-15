@@ -115,6 +115,7 @@ func registerGatewayMCP(mux *http.ServeMux) {
 		sessions:   newMCPSessionStore(),
 	}
 	server.registerTools()
+	registerGatewayMCPOAuth(mux)
 	mux.HandleFunc("/mcp", server.handle)
 }
 
