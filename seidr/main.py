@@ -424,7 +424,18 @@ async def cognition_chat(system_prompt: str, user_prompt: str) -> Optional[str]:
 
 async def extract_atomic_facts(content: str) -> list[str]:
     system = (
-        "You are a fact extraction engine. Given text, extract individual atomic facts. "
+        "Extract operational facts from the following agent memory. Focus ONLY on:\n"
+        "- Tool outcomes: which tools succeeded or failed, with what parameters\n"
+        "- Task completions: what was built, which repo, which branch, PR numbers\n"
+        "- Failure patterns: what went wrong and why\n"
+        "- Recovery patterns: what fixed a problem\n"
+        "- Code patterns: file paths, language used, architectural decisions\n\n"
+        "DO NOT extract:\n"
+        "- Agent identity or personality descriptions\n"
+        "- Communication style observations\n"
+        "- Role descriptions or team structure\n"
+        "- Anything that starts with 'I am' or describes who someone is\n\n"
+        "Output each fact on its own line. Each fact should be actionable — something that would help an agent avoid a mistake or replicate a success. "
         "Return ONLY a JSON array of strings, each being one fact. No other text."
     )
     reply = await cognition_chat(system, content)
@@ -440,6 +451,9 @@ async def extract_atomic_facts(content: str) -> list[str]:
 async def score_importance(fact: str) -> tuple[float, str]:
     system = (
         "Score the importance of this fact for a software development team's institutional memory. "
+        "Facts about tool failures, PR completions, and recovery patterns should usually score 0.7 or higher. "
+        "Facts about personality, identity, or who someone is should score 0.1 or lower, and should be dropped entirely when possible. "
+        "Prefer higher scores for actionable operational knowledge, code patterns, and repeatable task outcomes. "
         "Return ONLY a JSON object: {\"importance\": 0.0-1.0, \"scope\": \"universal|project|session\"}. No other text."
     )
     reply = await cognition_chat(system, fact)
