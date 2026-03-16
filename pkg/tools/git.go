@@ -3,8 +3,10 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -145,11 +147,131 @@ func (t *GitCloneTool) AppendProjectAwareness(repo string, output string) string
 		repoName = repo[i+1:]
 	}
 	repoDir := filepath.Join(t.WorkDir, repoName)
-	section := buildProjectAwarenessSection(repoDir)
-	if section == "" {
+	structureSection := buildProjectAwarenessSection(repoDir)
+	activitySection := t.buildRecentActivitySection(repo)
+	if structureSection == "" && activitySection == "" {
 		return output
 	}
-	return output + section
+	var b strings.Builder
+	b.WriteString(output)
+	if structureSection != "" {
+		b.WriteString(structureSection)
+	}
+	if activitySection != "" {
+		b.WriteString(activitySection)
+	}
+	return b.String()
+}
+
+func (t *GitCloneTool) buildRecentActivitySection(repo string) string {
+	token := strings.TrimSpace(resolveGiteaToken(t.Token))
+	if token == "" {
+		return ""
+	}
+	owner, repoName := resolveRepoOwnerName(repo)
+	if owner == "" || repoName == "" {
+		return ""
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	base := "http://gitea-http.gitea.svc.cluster.local:3000/api/v1/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repoName)
+
+	type prItem struct {
+		Number   int    `json:"number"`
+		Title    string `json:"title"`
+		Merged   bool   `json:"merged"`
+		MergedAt string `json:"merged_at"`
+	}
+	var prs []prItem
+	if err := fetchGiteaJSON(client, token, base+"/pulls?state=closed&sort=updated&limit=5", &prs); err != nil {
+		return ""
+	}
+
+	type issueLabel struct {
+		Name string `json:"name"`
+	}
+	type issueItem struct {
+		Number      int               `json:"number"`
+		Title       string            `json:"title"`
+		Labels      []issueLabel      `json:"labels"`
+		PullRequest map[string]string `json:"pull_request"`
+	}
+	var issues []issueItem
+	if err := fetchGiteaJSON(client, token, base+"/issues?state=open&sort=updated&limit=5", &issues); err != nil {
+		return ""
+	}
+
+	var mergedLines []string
+	for _, pr := range prs {
+		if !pr.Merged && strings.TrimSpace(pr.MergedAt) == "" {
+			continue
+		}
+		mergedLines = append(mergedLines, fmt.Sprintf("    #%d %s", pr.Number, strings.TrimSpace(pr.Title)))
+		if len(mergedLines) == 5 {
+			break
+		}
+	}
+
+	var issueLines []string
+	for _, issue := range issues {
+		if len(issue.PullRequest) > 0 {
+			continue
+		}
+		labels := make([]string, 0, len(issue.Labels))
+		for _, label := range issue.Labels {
+			name := strings.TrimSpace(label.Name)
+			if name != "" {
+				labels = append(labels, name)
+			}
+		}
+		if len(labels) > 0 {
+			issueLines = append(issueLines, fmt.Sprintf("    #%d %s (%s)", issue.Number, strings.TrimSpace(issue.Title), strings.Join(labels, ", ")))
+		} else {
+			issueLines = append(issueLines, fmt.Sprintf("    #%d %s", issue.Number, strings.TrimSpace(issue.Title)))
+		}
+		if len(issueLines) == 5 {
+			break
+		}
+	}
+
+	if len(mergedLines) == 0 && len(issueLines) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n---\nRecent activity:\n")
+	b.WriteString("  Merged PRs:\n")
+	if len(mergedLines) == 0 {
+		b.WriteString("    (none)\n")
+	} else {
+		b.WriteString(strings.Join(mergedLines, "\n"))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n  Open issues:\n")
+	if len(issueLines) == 0 {
+		b.WriteString("    (none)\n")
+	} else {
+		b.WriteString(strings.Join(issueLines, "\n"))
+		b.WriteString("\n")
+	}
+	b.WriteString("---")
+	return b.String()
+}
+
+func fetchGiteaJSON(client *http.Client, token, rawURL string, out interface{}) error {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "token "+token)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("http %d", resp.StatusCode)
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 func buildProjectAwarenessSection(repoDir string) string {
