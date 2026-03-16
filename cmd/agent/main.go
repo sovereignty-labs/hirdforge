@@ -580,7 +580,63 @@ func sendPeerAgentTask(agentName, peerURL, from, task string) (string, error) {
 	if out.ID == "" {
 		return "", fmt.Errorf("peer returned empty task id")
 	}
-	return fmt.Sprintf("Task submitted to %s: %s", agentName, out.ID), nil
+	return waitForPeerAgentTask(agentName, peerURL, out.ID)
+}
+
+func waitForPeerAgentTask(agentName, peerURL, taskID string) (string, error) {
+	deadline := time.Now().Add(agentCommTimeout)
+	for {
+		status, result, err := fetchPeerAgentTask(peerURL, taskID)
+		if err != nil {
+			return "", err
+		}
+		switch status {
+		case "completed":
+			if strings.TrimSpace(result) == "" {
+				return "", fmt.Errorf("peer %s completed task %s with empty result", agentName, taskID)
+			}
+			return result, nil
+		case "failed":
+			if strings.TrimSpace(result) == "" {
+				result = "delegated task failed"
+			}
+			return "", fmt.Errorf("peer %s task %s failed: %s", agentName, taskID, result)
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("timed out waiting for %s task %s", agentName, taskID)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func fetchPeerAgentTask(peerURL, taskID string) (string, string, error) {
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(peerURL, "/")+"/tasks/"+url.PathEscape(taskID), nil)
+	if err != nil {
+		return "", "", err
+	}
+	client := &http.Client{Timeout: agentCommTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", "", fmt.Errorf("peer returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var taskResp struct {
+		Status string `json:"status"`
+		Result string `json:"result"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &taskResp); err != nil {
+		return "", "", err
+	}
+	result := strings.TrimSpace(taskResp.Result)
+	if result == "" && strings.TrimSpace(taskResp.Error) != "" {
+		result = strings.TrimSpace(taskResp.Error)
+	}
+	return strings.TrimSpace(taskResp.Status), result, nil
 }
 
 type broadcastTool struct {
