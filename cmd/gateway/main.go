@@ -31,7 +31,7 @@ import (
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 const agentRequestTimeout = 120 * time.Second
-const streamingAgentTimeout = 300 * time.Second
+const streamingAgentTimeout = 600 * time.Second
 
 //go:embed index.html
 var dashboardHTML string
