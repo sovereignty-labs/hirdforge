@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -329,6 +330,90 @@ func cloneTargetExistsError(res ToolResult) bool {
 	return strings.Contains(text, "already exists and is not an empty directory")
 }
 
+func validateStagedFilesForCommit(repoDir string) error {
+	if _, err := exec.LookPath("python3"); err != nil {
+		return nil
+	}
+
+	stagedRes := runGit(repoDir, []string{"git", "diff", "--cached", "--name-only"}, 10*time.Second)
+	if stagedRes.Error != "" {
+		return nil
+	}
+	for _, file := range strings.Split(stagedRes.Output, "\n") {
+		file = strings.TrimSpace(file)
+		if file == "" || strings.HasPrefix(file, ".git/") {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(file))
+		switch ext {
+		case ".py", ".yaml", ".yml", ".json":
+		default:
+			continue
+		}
+		absPath := filepath.Join(repoDir, file)
+		info, err := os.Stat(absPath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if binary, err := fileLooksBinary(absPath); err == nil && binary {
+			continue
+		}
+
+		errOutput, failed, timedOut := runFileValidation(repoDir, file, ext)
+		if timedOut {
+			continue
+		}
+		if failed {
+			if errOutput == "" {
+				errOutput = "validation failed with no output"
+			}
+			return fmt.Errorf("Commit blocked: syntax error in %s:\n%s\nFix the error and try git-commit again.", file, errOutput)
+		}
+	}
+	return nil
+}
+
+func runFileValidation(repoDir, file, ext string) (errOutput string, failed bool, timedOut bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	switch ext {
+	case ".py":
+		cmd = exec.CommandContext(ctx, "python3", "-m", "py_compile", file)
+	case ".yaml", ".yml":
+		cmd = exec.CommandContext(ctx, "python3", "-c", "import yaml,sys; yaml.safe_load(open(sys.argv[1]))", file)
+	case ".json":
+		cmd = exec.CommandContext(ctx, "python3", "-c", "import json,sys; json.load(open(sys.argv[1]))", file)
+	default:
+		return "", false, false
+	}
+	cmd.Dir = repoDir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", false, true
+	}
+	if err != nil {
+		return strings.TrimSpace(string(out)), true, false
+	}
+	return "", false, false
+}
+
+func fileLooksBinary(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, 4096)
+	n, err := f.Read(buf)
+	if n <= 0 {
+		return false, err
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0, nil
+}
+
 type GitCommitTool struct {
 	WorkDir  string
 	GiteaURL string
@@ -392,6 +477,17 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 	if statusRes.Error == "" && strings.TrimSpace(statusRes.Output) == "" {
 		return ToolResult{Output: "Nothing to commit. Did you forget to use the write tool or exec to create/modify files? Use `exec: git status` to check workspace state."}
 	}
+	if err := validateStagedFilesForCommit(repoDir); err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	diffStatRes := runGit(repoDir, []string{"git", "diff", "--cached", "--stat"}, 10*time.Second)
+	if diffStatRes.Error != "" {
+		log.Printf("git-commit diff --stat failed in %s: %s (%s)", repoDir, diffStatRes.Error, strings.TrimSpace(diffStatRes.Output))
+	}
+	shortStatRes := runGit(repoDir, []string{"git", "diff", "--cached", "--shortstat"}, 10*time.Second)
+	if shortStatRes.Error != "" {
+		log.Printf("git-commit diff --shortstat failed in %s: %s (%s)", repoDir, shortStatRes.Error, strings.TrimSpace(shortStatRes.Output))
+	}
 
 	if res := runGit(repoDir, []string{"git", "commit", "-m", message}, 30*time.Second); res.Error != "" {
 		return res
@@ -411,7 +507,15 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 	if branch != "" {
 		target = branch
 	}
-	return ToolResult{Output: fmt.Sprintf("committed and pushed to %s: %s", target, message)}
+	out := fmt.Sprintf("Committed: %s", message)
+	if diff := strings.TrimSpace(diffStatRes.Output); diff != "" {
+		out += "\n\n" + diff
+	}
+	if short := strings.TrimSpace(shortStatRes.Output); short != "" {
+		out += "\n\n" + short
+	}
+	out += fmt.Sprintf("\n\nPushed to %s", target)
+	return ToolResult{Output: out}
 }
 
 func (t *GitCommitTool) Verify(args map[string]interface{}, result ToolResult) error {
