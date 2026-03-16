@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +28,21 @@ func runGit(dir string, args []string, timeout time.Duration) ToolResult {
 		return ToolResult{Output: output, Error: err.Error()}
 	}
 	return ToolResult{Output: output}
+}
+
+func runShellCapture(dir, command string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", ctx.Err()
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 type GitCloneTool struct {
@@ -116,6 +132,128 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 	t.ensureCredentialedOrigin(repoDir, repo)
 
 	return ToolResult{Output: fmt.Sprintf("cloned %s to %s", repo, repoDir)}
+}
+
+func (t *GitCloneTool) AppendProjectAwareness(repo string, output string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return output
+	}
+	repoName := repo
+	if i := strings.LastIndex(repo, "/"); i >= 0 {
+		repoName = repo[i+1:]
+	}
+	repoDir := filepath.Join(t.WorkDir, repoName)
+	section := buildProjectAwarenessSection(repoDir)
+	if section == "" {
+		return output
+	}
+	return output + section
+}
+
+func buildProjectAwarenessSection(repoDir string) string {
+	totalFilesOutput, _ := runShellCapture(repoDir, "find . -not -path './.git/*' -type f | wc -l", 5*time.Second)
+	fileCountsOutput, _ := runShellCapture(repoDir, "find . -not -path './.git/*' -type f | sed 's/.*\\.//' | sort | uniq -c | sort -rn | head -10", 8*time.Second)
+	recentCommitsOutput, _ := runShellCapture(repoDir, "git log --oneline -5", 5*time.Second)
+	largeFilesOutput, _ := runShellCapture(repoDir, "find . -not -path './.git/*' -type f \\( -name '*.go' -o -name '*.py' -o -name '*.js' -o -name '*.yaml' \\) | head -20 | xargs wc -l 2>/dev/null | sort -rn | head -10", 8*time.Second)
+
+	var sections []string
+	if filesLine := formatFileSummary(totalFilesOutput, fileCountsOutput); filesLine != "" {
+		sections = append(sections, "  "+filesLine)
+	}
+	if largeFilesSection := formatLargeFilesSection(largeFilesOutput); largeFilesSection != "" {
+		sections = append(sections, "\n  Largest source files:\n"+largeFilesSection)
+	}
+	if commitsSection := formatRecentCommitsSection(recentCommitsOutput); commitsSection != "" {
+		sections = append(sections, "\n  Recent commits:\n"+commitsSection)
+	}
+	if len(sections) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n---\nProject structure:\n")
+	for _, section := range sections {
+		b.WriteString(section)
+		b.WriteString("\n")
+	}
+	if _, err := os.Stat(filepath.Join(repoDir, "ARCHITECTURE.md")); err == nil {
+		b.WriteString("\n  Read ARCHITECTURE.md for full codebase map.\n")
+	}
+	b.WriteString("---")
+	return b.String()
+}
+
+func formatFileSummary(totalFilesOutput, fileCountsOutput string) string {
+	totalFiles, err := strconv.Atoi(strings.TrimSpace(totalFilesOutput))
+	if err != nil || totalFiles <= 0 {
+		return ""
+	}
+
+	type extCount struct {
+		ext   string
+		count int
+	}
+	var counts []extCount
+	for _, line := range strings.Split(fileCountsOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		count, err := strconv.Atoi(fields[0])
+		if err != nil || count <= 0 {
+			continue
+		}
+		ext := fields[len(fields)-1]
+		if strings.Contains(ext, "/") {
+			continue
+		}
+		counts = append(counts, extCount{ext: ext, count: count})
+		if len(counts) == 4 {
+			break
+		}
+	}
+
+	parts := make([]string, 0, len(counts)+1)
+	shownCount := 0
+	for _, item := range counts {
+		shownCount += item.count
+		parts = append(parts, fmt.Sprintf("%d .%s", item.count, item.ext))
+	}
+	if otherCount := totalFiles - shownCount; otherCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d other", otherCount))
+	}
+	if len(parts) == 0 {
+		return fmt.Sprintf("Files: %d", totalFiles)
+	}
+	return fmt.Sprintf("Files: %d (%s)", totalFiles, strings.Join(parts, ", "))
+}
+
+func formatLargeFilesSection(largeFilesOutput string) string {
+	var lines []string
+	for _, line := range strings.Split(largeFilesOutput, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] == "total" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("    %s (%s lines)", fields[1], fields[0]))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatRecentCommitsSection(recentCommitsOutput string) string {
+	var lines []string
+	for _, line := range strings.Split(strings.TrimSpace(recentCommitsOutput), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, "    "+line)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (t *GitCloneTool) buildURL(repo string) string {

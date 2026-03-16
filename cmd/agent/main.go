@@ -3974,10 +3974,19 @@ func main() {
 					}
 				}
 			}
-			if result.Error == "" && tc.Function.Name == "git-clone" && strings.TrimSpace(*memoryURL) != "" {
+			if result.Error == "" && tc.Function.Name == "git-clone" {
 				repoName := strings.TrimSpace(fmt.Sprint(args["repo"]))
 				if repoName != "" && repoName != "<nil>" {
-					result = appendCloneMemoryContext(*memoryURL, agentName, repoName, result)
+					if strings.TrimSpace(*memoryURL) != "" {
+						result = appendCloneMemoryContext(*memoryURL, agentName, repoName, result)
+					}
+					if cloneTool, ok := reg.Get(tc.Function.Name); ok {
+						if awarenessTool, ok := cloneTool.(interface {
+							AppendProjectAwareness(repo string, output string) string
+						}); ok {
+							result.Output = awarenessTool.AppendProjectAwareness(repoName, result.Output)
+						}
+					}
 				}
 			}
 			if result.Error != "" {
