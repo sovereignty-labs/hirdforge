@@ -387,7 +387,16 @@ def ensure_pool():
 
 
 def row_to_metadata(row) -> dict:
-    meta = dict(row["metadata"] or {})
+    raw = row["metadata"]
+    if isinstance(raw, str):
+        try:
+            meta = json.loads(raw)
+        except Exception:
+            meta = {}
+    elif isinstance(raw, dict):
+        meta = dict(raw)
+    else:
+        meta = {}
     meta["agent"] = meta.get("agent", row["agent"])
     meta["source"] = meta.get("source", row["source"])
     meta["type"] = meta.get("type", row["type"])
