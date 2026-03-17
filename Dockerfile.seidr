@@ -7,3 +7,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY seidr/main.py .
 EXPOSE 8082
 CMD ["python", "main.py"]
+# Seidr v2 rebuild trigger
