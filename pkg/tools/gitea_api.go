@@ -29,20 +29,20 @@ func NewGiteaAPITool(giteaURL, token string) *GiteaAPITool {
 func (t *GiteaAPITool) Name() string { return "gitea" }
 
 func (t *GiteaAPITool) Description() string {
-	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr"
+	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, update-labels"
 }
 
 func (t *GiteaAPITool) Parameters() map[string]string {
 	return map[string]string{
-		"action": "One of: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr",
+		"action": "One of: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, update-labels",
 		"owner":  "Repository owner for get-issue (optional if repo is owner/repo)",
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
 		"title":  "Title for issue or PR (create-issue, create-pr)",
 		"body":   "Body text for issue, comment, or PR description",
-		"labels": "Comma-separated label names (create-issue, list-issues)",
+		"labels": "Comma-separated label names (create-issue, list-issues, update-labels)",
 		"state":  "Issue state for list-issues: open or closed (default open)",
-		"issue":  "Issue or PR number (comment, close-issue)",
-		"index":  "Issue number for get-issue",
+		"issue":  "Issue or PR number (comment, close-issue, update-labels)",
+		"index":  "Issue number for get-issue or update-labels",
 		"head":   "Source branch for PR (create-pr)",
 		"base":   "Target branch for PR (create-pr, defaults to main)",
 	}
@@ -88,8 +88,10 @@ func (t *GiteaAPITool) Execute(args map[string]interface{}) ToolResult {
 		return t.closeIssue(owner, name, args)
 	case "create-pr":
 		return t.createPR(owner, name, args)
+	case "update-labels":
+		return t.updateLabels(owner, name, args)
 	default:
-		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %q. Available actions: create-pr, create-issue, list-issues, close-issue, comment, get-issue.", action)}
+		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %q. Available actions: create-pr, create-issue, list-issues, close-issue, comment, get-issue, update-labels.", action)}
 	}
 }
 
@@ -421,6 +423,30 @@ func (t *GiteaAPITool) closeIssue(owner, repo string, args map[string]interface{
 	return ToolResult{Output: fmt.Sprintf("closed issue #%d", issueNum)}
 }
 
+func (t *GiteaAPITool) updateLabels(owner, repo string, args map[string]interface{}) ToolResult {
+	issueNum := t.extractNumber(args["index"])
+	if issueNum == 0 {
+		issueNum = t.extractNumber(args["issue"])
+	}
+	if issueNum == 0 {
+		return ToolResult{Error: t.actionUsage("update-labels")}
+	}
+	labelsCSV, _ := args["labels"].(string)
+	labelIDs, err := t.resolveLabelIDs(owner, repo, labelsCSV)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	payload := map[string]interface{}{"labels": labelIDs}
+	resp, status, err := t.apiRequest("PUT", fmt.Sprintf("/repos/%s/%s/issues/%d/labels", owner, repo, issueNum), payload)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	if status >= 400 {
+		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(resp))}
+	}
+	return ToolResult{Output: fmt.Sprintf("updated labels on issue #%d to: %s", issueNum, labelsCSV)}
+}
+
 func (t *GiteaAPITool) createPR(owner, repo string, args map[string]interface{}) ToolResult {
 	title, _ := args["title"].(string)
 	body, _ := args["body"].(string)
@@ -456,6 +482,87 @@ func (t *GiteaAPITool) createPR(owner, repo string, args map[string]interface{})
 	num, _ := result["number"].(float64)
 	url, _ := result["html_url"].(string)
 	return ToolResult{Output: fmt.Sprintf("created PR #%d: %s\n%s", int(num), title, url)}
+}
+
+func (t *GiteaAPITool) ReplaceLabels(owner, repo string, issueNum int, labelNames []string) error {
+	labelsCSV := strings.Join(labelNames, ",")
+	labelIDs, err := t.resolveLabelIDs(owner, repo, labelsCSV)
+	if err != nil {
+		return err
+	}
+	payload := map[string]interface{}{"labels": labelIDs}
+	resp, status, err := t.apiRequest("PUT", fmt.Sprintf("/repos/%s/%s/issues/%d/labels", owner, repo, issueNum), payload)
+	if err != nil {
+		return err
+	}
+	if status >= 400 {
+		return fmt.Errorf("HTTP %d: %s", status, string(resp))
+	}
+	return nil
+}
+
+func (t *GiteaAPITool) PostComment(owner, repo string, issueNum int, body string) error {
+	payload := map[string]string{"body": body}
+	resp, status, err := t.apiRequest("POST", fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, issueNum), payload)
+	if err != nil {
+		return err
+	}
+	if status >= 400 {
+		return fmt.Errorf("HTTP %d: %s", status, string(resp))
+	}
+	return nil
+}
+
+func (t *GiteaAPITool) CloseIssue(owner, repo string, issueNum int) error {
+	payload := map[string]string{"state": "closed"}
+	resp, status, err := t.apiRequest("PATCH", fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, issueNum), payload)
+	if err != nil {
+		return err
+	}
+	if status >= 400 {
+		return fmt.Errorf("HTTP %d: %s", status, string(resp))
+	}
+	return nil
+}
+
+func (t *GiteaAPITool) GetIssueLabels(owner, repo string, issueNum int) ([]string, error) {
+	resp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/issues/%d", owner, repo, issueNum), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, string(resp))
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal(resp, &issue); err != nil {
+		return nil, err
+	}
+	var names []string
+	if ls, ok := issue["labels"].([]interface{}); ok {
+		for _, l := range ls {
+			if lm, ok := l.(map[string]interface{}); ok {
+				if name, ok := lm["name"].(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+		}
+	}
+	return names, nil
+}
+
+func (t *GiteaAPITool) GetComments(owner, repo string, issueNum int) ([]map[string]interface{}, error) {
+	resp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, issueNum), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, string(resp))
+	}
+	var comments []map[string]interface{}
+	if err := json.Unmarshal(resp, &comments); err != nil {
+		return nil, err
+	}
+	return comments, nil
 }
 
 func (t *GiteaAPITool) Verify(args map[string]interface{}, result ToolResult) error {
@@ -572,6 +679,13 @@ repo     Repository name
 state    (optional) open, closed, all (default: open)
 labels   (optional) Comma-separated label names to filter by
 Example: gitea list-issues owner=kit repo=hirdforge-tasks state=open labels="agent/leif,status/ready"`
+	case "update-labels":
+		return `gitea update-labels — required params:
+owner    Repository owner
+repo     Repository name
+index    Issue number
+labels   Comma-separated label names (replaces all labels on the issue)
+Example: gitea update-labels owner=kit repo=hirdforge-tasks index=42 labels="status/done,agent/val,priority/normal,tier/autonomous"`
 	default:
 		return t.giteaOverviewUsage()
 	}
@@ -583,6 +697,7 @@ create-pr      Create a pull request
 create-issue   Create an issue (supports label names)
 list-issues    List issues with state/label filters
 close-issue    Close an issue
+update-labels  Replace all labels on an issue
 comment        Add comment to issue or PR
 get-issue      Get full issue details including body
 Usage: gitea {action} {params...}

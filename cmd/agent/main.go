@@ -394,12 +394,25 @@ type (
 )
 
 var sessionsMu sync.Mutex
+
+type trackedTask struct {
+	IssueNumber  int
+	IssueOwner   string
+	IssueRepo    string
+	PRCreated    bool
+	PRUrl        string
+	ToolRetries  int
+	FilesWritten []string
+	BranchName   string
+}
+
 var sessions = map[string][]message{}
 var seenSessions = map[string]bool{}
 var skillNudgeInjected = map[string]bool{}
 var sessionContextMemoryIDs = map[string]map[string]struct{}{}
 var sessionValidatedIDs = map[string]map[string]bool{}
 var episodicStates = map[string]string{} // sessionID -> loaded narrative
+var trackedTasks = map[string]*trackedTask{}
 var (
 	startTime         = time.Now()
 	requestCount      int64
@@ -3769,6 +3782,7 @@ func main() {
 	}
 
 	reg := toolpkg.NewRegistry()
+	var giteaTool *toolpkg.GiteaAPITool
 	delegateExec := &delegateTool{
 		peers:               peers,
 		agentName:           agentName,
@@ -3815,7 +3829,8 @@ func main() {
 			reg.Register(toolpkg.NewGitDiffTool(*workspace))
 		}
 		if enabled["gitea"] {
-			reg.Register(toolpkg.NewGiteaAPITool(*giteaURL, giteaToken))
+			giteaTool = toolpkg.NewGiteaAPITool(*giteaURL, giteaToken)
+			reg.Register(giteaTool)
 		}
 	}
 	if enabled["delegate"] || len(peers) > 0 {
@@ -3877,6 +3892,73 @@ func main() {
 				return
 			}
 			go checkSelfImprovementTrigger(*memoryURL, agentName, reg, *soulMaxLines)
+		}()
+		defer func() {
+			sessionsMu.Lock()
+			ttPtr := trackedTasks[sessionID]
+			var tt trackedTask
+			if ttPtr != nil {
+				tt = *ttPtr
+				tt.FilesWritten = append([]string(nil), ttPtr.FilesWritten...)
+			}
+			delete(trackedTasks, sessionID)
+			sessionsMu.Unlock()
+			if ttPtr == nil || tt.IssueNumber == 0 || tt.PRCreated {
+				return
+			}
+			go func(owner, repoName string, issueNum int, tt trackedTask) {
+				if giteaTool == nil {
+					return
+				}
+				retryCount := 0
+				comments, err := giteaTool.GetComments(owner, repoName, issueNum)
+				if err == nil {
+					for _, c := range comments {
+						body, _ := c["body"].(string)
+						if strings.Contains(body, "## Retry Context") {
+							retryCount++
+						}
+					}
+				}
+				filesStr := "none"
+				if len(tt.FilesWritten) > 0 {
+					filesStr = strings.Join(tt.FilesWritten, ", ")
+				}
+				branchStr := "none"
+				if tt.BranchName != "" {
+					branchStr = tt.BranchName
+				}
+				comment := fmt.Sprintf(
+					"## Retry Context (attempt %d)\n**Agent:** %s\n**Failed at:** session ended without PR\n**Branch:** %s\n**Files written:** %s\n**Suggested approach:** Check if branch exists, verify files, complete remaining steps (commit, push, create PR)",
+					retryCount+1,
+					agentName,
+					branchStr,
+					filesStr,
+				)
+				if err := giteaTool.PostComment(owner, repoName, issueNum, comment); err != nil {
+					logJSON("warn", "dlq: comment failed", map[string]interface{}{"issue": issueNum, "error": err.Error()})
+				}
+				labels, err := giteaTool.GetIssueLabels(owner, repoName, issueNum)
+				if err != nil {
+					labels = []string{}
+				}
+				newLabels := make([]string, 0, len(labels)+1)
+				for _, l := range labels {
+					if !strings.HasPrefix(l, "status/") {
+						newLabels = append(newLabels, l)
+					}
+				}
+				if retryCount+1 >= 3 {
+					newLabels = append(newLabels, "status/failed")
+					logJSON("warn", "dlq: issue permanently failed after 3 attempts", map[string]interface{}{"issue": issueNum})
+				} else {
+					newLabels = append(newLabels, "status/retry")
+					logJSON("info", "dlq: issue marked for retry", map[string]interface{}{"issue": issueNum, "attempt": retryCount + 1})
+				}
+				if err := giteaTool.ReplaceLabels(owner, repoName, issueNum, newLabels); err != nil {
+					logJSON("warn", "dlq: label update failed", map[string]interface{}{"issue": issueNum, "error": err.Error()})
+				}
+			}(tt.IssueOwner, tt.IssueRepo, tt.IssueNumber, tt)
 		}()
 
 		sessionsMu.Lock()
@@ -4058,6 +4140,11 @@ func main() {
 			}
 			if result.Error != "" && *maxToolRetries > 0 && shouldRetryTool(tc.Function.Name) {
 				for attempt := 1; attempt <= *maxToolRetries; attempt++ {
+					sessionsMu.Lock()
+					if trackedTasks[sessionID] != nil {
+						trackedTasks[sessionID].ToolRetries++
+					}
+					sessionsMu.Unlock()
 					log.Printf("[RETRY] tool=%s attempt=%d err=%s", tc.Function.Name, attempt, result.Error)
 					time.Sleep(2 * time.Second)
 					result = runToolAttempt()
@@ -4092,6 +4179,16 @@ func main() {
 			} else {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
 				validateContextMemoriesAsync(*memoryURL, sessionID, "success")
+				if tc.Function.Name == "write" {
+					path := strings.TrimSpace(fmt.Sprint(args["path"]))
+					if path != "" && path != "<nil>" {
+						sessionsMu.Lock()
+						if trackedTasks[sessionID] != nil {
+							trackedTasks[sessionID].FilesWritten = append(trackedTasks[sessionID].FilesWritten, path)
+						}
+						sessionsMu.Unlock()
+					}
+				}
 				if tc.Function.Name == "gitea" {
 					action := strings.TrimSpace(fmt.Sprint(args["action"]))
 					repo := truncateMemoryValue(fmt.Sprint(args["repo"]), 200)
@@ -4109,6 +4206,44 @@ func main() {
 								prURL,
 							))
 						}
+						var issueOwner, issueRepoName string
+						var issueNum int
+						sessionsMu.Lock()
+						if trackedTasks[sessionID] != nil {
+							trackedTasks[sessionID].PRCreated = true
+							trackedTasks[sessionID].PRUrl = prURL
+							trackedTasks[sessionID].BranchName = head
+							issueOwner = trackedTasks[sessionID].IssueOwner
+							issueRepoName = trackedTasks[sessionID].IssueRepo
+							issueNum = trackedTasks[sessionID].IssueNumber
+						}
+						sessionsMu.Unlock()
+						if issueNum > 0 && giteaTool != nil {
+							go func(owner, repoName string, issueNum int, prURL string) {
+								labels, err := giteaTool.GetIssueLabels(owner, repoName, issueNum)
+								if err != nil {
+									logJSON("warn", "auto-complete: get labels failed", map[string]interface{}{"issue": issueNum, "error": err.Error()})
+									labels = []string{}
+								}
+								newLabels := []string{"status/done"}
+								for _, l := range labels {
+									if !strings.HasPrefix(l, "status/") {
+										newLabels = append(newLabels, l)
+									}
+								}
+								if err := giteaTool.ReplaceLabels(owner, repoName, issueNum, newLabels); err != nil {
+									logJSON("warn", "auto-complete: label update failed", map[string]interface{}{"issue": issueNum, "error": err.Error()})
+								}
+								if err := giteaTool.PostComment(owner, repoName, issueNum, fmt.Sprintf("PR delivered: %s", prURL)); err != nil {
+									logJSON("warn", "auto-complete: comment failed", map[string]interface{}{"issue": issueNum, "error": err.Error()})
+								}
+								if err := giteaTool.CloseIssue(owner, repoName, issueNum); err != nil {
+									logJSON("warn", "auto-complete: close failed", map[string]interface{}{"issue": issueNum, "error": err.Error()})
+								} else {
+									logJSON("info", "auto-complete: issue "+fmt.Sprint(issueNum)+" closed with PR", nil)
+								}
+							}(issueOwner, issueRepoName, issueNum, prURL)
+						}
 					case "close-issue":
 						issueNum := truncateMemoryValue(fmt.Sprint(args["issue"]), 50)
 						if issueNum == "" || issueNum == "<nil>" {
@@ -4120,6 +4255,50 @@ func main() {
 								repo,
 								issueNum,
 							))
+						}
+					case "get-issue", "list-issues":
+						issueIdx := 0
+						if v, ok := args["index"]; ok {
+							switch n := v.(type) {
+							case float64:
+								issueIdx = int(n)
+							case string:
+								fmt.Sscanf(strings.TrimPrefix(n, "#"), "%d", &issueIdx)
+							}
+						}
+						if issueIdx == 0 {
+							if v, ok := args["issue"]; ok {
+								switch n := v.(type) {
+								case float64:
+									issueIdx = int(n)
+								case string:
+									fmt.Sscanf(strings.TrimPrefix(n, "#"), "%d", &issueIdx)
+								}
+							}
+						}
+						issueOwner := strings.TrimSpace(fmt.Sprint(args["owner"]))
+						issueRepoName := strings.TrimSpace(fmt.Sprint(args["repo"]))
+						if issueOwner == "" || issueOwner == "<nil>" {
+							issueOwner = "kit"
+						}
+						if issueRepoName == "" || issueRepoName == "<nil>" {
+							issueRepoName = "hirdforge-tasks"
+						}
+						if strings.Contains(issueRepoName, "/") {
+							parts := strings.SplitN(issueRepoName, "/", 2)
+							issueOwner = parts[0]
+							issueRepoName = parts[1]
+						}
+						if issueIdx > 0 {
+							sessionsMu.Lock()
+							if trackedTasks[sessionID] == nil {
+								trackedTasks[sessionID] = &trackedTask{}
+							}
+							trackedTasks[sessionID].IssueNumber = issueIdx
+							trackedTasks[sessionID].IssueOwner = issueOwner
+							trackedTasks[sessionID].IssueRepo = issueRepoName
+							sessionsMu.Unlock()
+							logJSON("info", "task tracking: issue detected", map[string]interface{}{"session_id": sessionID, "issue": issueIdx, "owner": issueOwner, "repo": issueRepoName})
 						}
 					}
 				}
@@ -4445,6 +4624,7 @@ func main() {
 			delete(sessionContextMemoryIDs, sessionID)
 			delete(sessionValidatedIDs, sessionID)
 			delete(episodicStates, sessionID)
+			delete(trackedTasks, sessionID)
 			sessionsMu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
