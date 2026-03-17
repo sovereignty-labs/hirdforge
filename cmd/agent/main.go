@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -398,6 +399,7 @@ var seenSessions = map[string]bool{}
 var skillNudgeInjected = map[string]bool{}
 var sessionContextMemoryIDs = map[string]map[string]struct{}{}
 var sessionValidatedIDs = map[string]map[string]bool{}
+var episodicStates = map[string]string{} // sessionID -> loaded narrative
 var (
 	startTime         = time.Now()
 	requestCount      int64
@@ -414,7 +416,6 @@ var (
 	metricsToolCallsTotal     int64
 	metricsErrorsTotal        int64
 	metricsStallsTotal        int64
-	metricsCompactionsTotal   int64
 	metricsActiveRequests     int64
 	metricsLastRequestDurBits uint64
 	toolMetricMu              sync.Mutex
@@ -423,25 +424,12 @@ var (
 	selfImproveLastRun        = map[string]time.Time{}
 )
 
-const compactionSystemPrompt = `Summarize the following conversation history into a concise context summary. Preserve: key decisions made, tools used and their outcomes, task progress, and any errors or lessons learned. Remove: repetitive content, verbose tool outputs, and conversational filler. Output only the summary, no preamble.`
-
 type delegateTool struct {
 	peers               map[string]string
 	agentName           string
 	giteaURL            string
 	maxDelegationTokens int
 	gates               []string
-}
-
-type compactTool struct{}
-
-func (t *compactTool) Name() string { return "compact" }
-func (t *compactTool) Description() string {
-	return "Compress older conversation history to free context space. Use when approaching context limits or before starting a complex multi-step task."
-}
-func (t *compactTool) Parameters() map[string]string { return map[string]string{} }
-func (t *compactTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
-	return toolpkg.ToolResult{Error: "compact tool must be invoked from an active session"}
 }
 
 type peerHealthResponse struct {
@@ -2025,6 +2013,180 @@ func dropOldestHistoryPairs(history []message, maxPairs int) []message {
 	return append([]message(nil), trimmed[1:]...)
 }
 
+func truncateSessionStateText(text string, maxChars int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxChars {
+		return text
+	}
+	return string(runes[:maxChars])
+}
+
+func identifyMessageGroups(history []message) [][]message {
+	if len(history) == 0 {
+		return nil
+	}
+	groups := make([][]message, 0, len(history))
+	current := make([]message, 0, 4)
+	currentHasUser := false
+	for _, msg := range history {
+		if msg.Role == "user" && currentHasUser && len(current) > 0 {
+			groups = append(groups, current)
+			current = make([]message, 0, 4)
+			currentHasUser = false
+		}
+		current = append(current, msg)
+		if msg.Role == "user" {
+			currentHasUser = true
+		}
+	}
+	if len(current) > 0 {
+		groups = append(groups, current)
+	}
+	return groups
+}
+
+func extractRawSessionState(history []message, agentName string) string {
+	if len(history) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Agent: ")
+	b.WriteString(agentName)
+	b.WriteString("\nMessages: ")
+	b.WriteString(strconv.Itoa(len(history)))
+	b.WriteString("\n\n")
+	for _, msg := range history {
+		switch msg.Role {
+		case "system":
+			continue
+		case "user":
+			content := truncateSessionStateText(msg.Content, 200)
+			if content == "" {
+				continue
+			}
+			b.WriteString("TASK: ")
+			b.WriteString(content)
+			b.WriteString("\n")
+		case "assistant":
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					b.WriteString("CALLED: ")
+					b.WriteString(strings.TrimSpace(tc.Function.Name))
+					b.WriteString("(")
+					b.WriteString(truncateSessionStateText(tc.Function.Arguments, 50))
+					b.WriteString(")\n")
+				}
+				continue
+			}
+			content := truncateSessionStateText(msg.Content, 150)
+			if content == "" {
+				continue
+			}
+			b.WriteString("RESPONSE: ")
+			b.WriteString(content)
+			b.WriteString("\n")
+		case "tool":
+			content := truncateSessionStateText(msg.Content, 100)
+			if content == "" {
+				continue
+			}
+			b.WriteString("RESULT: ")
+			b.WriteString(content)
+			b.WriteString("\n")
+		}
+	}
+	raw := b.String()
+	if len(raw) > 2000 {
+		raw = raw[:2000]
+	}
+	return raw
+}
+
+func persistEpisodicState(memoryURL, agent, sessionID string, history []message, agentName string) {
+	if strings.TrimSpace(memoryURL) == "" {
+		return
+	}
+	rawText := extractRawSessionState(history, agentName)
+	if len(strings.TrimSpace(rawText)) < 50 {
+		return
+	}
+	payload := map[string]interface{}{
+		"agent":         agent,
+		"content":       rawText,
+		"session_id":    sessionID,
+		"message_count": len(history),
+	}
+	body, _ := json.Marshal(payload)
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/session-state", bytes.NewReader(body))
+	if err != nil {
+		logJSON("warn", "episodic state persist failed", map[string]interface{}{"agent": agent, "session_id": sessionID, "error": err.Error()})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		logJSON("warn", "episodic state persist failed", map[string]interface{}{"agent": agent, "session_id": sessionID, "error": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		logJSON("warn", "episodic state persist failed", map[string]interface{}{
+			"agent":      agent,
+			"session_id": sessionID,
+			"status":     resp.StatusCode,
+			"error":      strings.TrimSpace(string(body)),
+		})
+	}
+}
+
+func loadEpisodicState(memoryURL, agent string) string {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agent) == "" {
+		return ""
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(memoryURL, "/")+"/session-state?agent="+url.QueryEscape(agent), nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	var payload struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Content)
+}
+
+func progressiveTrim(history []message, maxMessages int) []message {
+	if len(history) == 0 || maxMessages <= 0 {
+		return history
+	}
+	groups := identifyMessageGroups(history)
+	if len(groups) <= 3 {
+		return history
+	}
+	trimmedGroups := groups[2:]
+	trimmed := make([]message, 0, len(history))
+	for _, group := range trimmedGroups {
+		trimmed = append(trimmed, group...)
+	}
+	return trimmed
+}
+
 func addSessionContextMemoryIDs(sessionID string, ids []string) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || len(ids) == 0 {
@@ -2910,7 +3072,6 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 	if countSoulLines(updatedSoul) > soulMaxLines {
 		compactedSoul := compactSoul(agentName, updatedSoul, soulMaxLines)
 		if compactedSoul != updatedSoul {
-			atomic.AddInt64(&metricsCompactionsTotal, 1)
 			updatedSoul = compactedSoul
 		}
 	}
@@ -2957,130 +3118,6 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 		return
 	}
 	logJSON("info", "self improvement PR created", map[string]interface{}{"agent": agentName, "tool": triggerTool, "branch": branch})
-}
-
-func summarizeForCompaction(ctx context.Context, segment []message, inferenceURL, model, apiKey string) (string, error) {
-	var transcript strings.Builder
-	for _, m := range segment {
-		if strings.TrimSpace(m.Role) == "system" {
-			continue
-		}
-		if strings.TrimSpace(m.Role) == "tool" {
-			continue
-		}
-		if strings.TrimSpace(m.Role) == "assistant" && len(m.ToolCalls) > 0 && strings.TrimSpace(m.Content) == "" {
-			continue
-		}
-		content := strings.TrimSpace(m.Content)
-		if content == "" {
-			continue
-		}
-		transcript.WriteString(strings.ToUpper(m.Role))
-		transcript.WriteString(": ")
-		transcript.WriteString(content)
-		transcript.WriteString("\n\n")
-	}
-	if strings.TrimSpace(transcript.String()) == "" {
-		return "", fmt.Errorf("no summarizable content")
-	}
-	resp, err := callOllamaNonStreamingWithContext(ctx, []message{
-		{Role: "system", Content: compactionSystemPrompt},
-		{Role: "user", Content: transcript.String()},
-	}, nil, inferenceURL, model, apiKey)
-	if err != nil {
-		return "", err
-	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("empty compaction response")
-	}
-	summary := strings.TrimSpace(stripThinkTags(resp.Choices[0].Message.Content))
-	if summary == "" {
-		return "", fmt.Errorf("empty compaction summary")
-	}
-	summary = capSummaryWords(summary, 500)
-	return summary, nil
-}
-
-func compactConversation(ctx context.Context, history []message, inferenceURL, model, apiKey string) ([]message, int, error) {
-	if len(history) < 4 {
-		return history, 0, nil
-	}
-	findOwningAssistant := func(msgs []message, toolIdx int) int {
-		if toolIdx < 0 || toolIdx >= len(msgs) {
-			return -1
-		}
-		if strings.TrimSpace(msgs[toolIdx].Role) != "tool" {
-			return -1
-		}
-		targetID := strings.TrimSpace(msgs[toolIdx].ToolCallID)
-		for i := toolIdx - 1; i >= 0; i-- {
-			if strings.TrimSpace(msgs[i].Role) != "assistant" || len(msgs[i].ToolCalls) == 0 {
-				continue
-			}
-			if targetID == "" {
-				return i
-			}
-			for _, tc := range msgs[i].ToolCalls {
-				if strings.TrimSpace(tc.ID) == targetID {
-					return i
-				}
-			}
-		}
-		return -1
-	}
-	adjustSplit := func(msgs []message, split int) int {
-		if split <= 0 || split >= len(msgs) {
-			return split
-		}
-		for split > 0 {
-			changed := false
-			if split < len(msgs) && strings.TrimSpace(msgs[split].Role) == "tool" {
-				if owner := findOwningAssistant(msgs, split); owner >= 0 && owner < split {
-					split = owner
-					changed = true
-				}
-			}
-			if split > 0 {
-				prev := msgs[split-1]
-				if strings.TrimSpace(prev.Role) == "assistant" && len(prev.ToolCalls) > 0 {
-					// Keep assistant tool calls and tool responses as an atomic block.
-					split = split - 1
-					changed = true
-				}
-			}
-			if !changed {
-				break
-			}
-		}
-		return split
-	}
-	olderCount := adjustSplit(history, len(history)/2)
-	if olderCount < 2 {
-		return history, 0, nil
-	}
-	older := history[:olderCount]
-	recent := append([]message(nil), history[olderCount:]...)
-	summary, err := summarizeForCompaction(ctx, older, inferenceURL, model, apiKey)
-	if err != nil {
-		return history, 0, err
-	}
-	marker := message{
-		Role:    "system",
-		Content: "[Context Summary from earlier in this session]\n" + summary,
-	}
-	compacted := append([]message{marker}, recent...)
-	return compacted, olderCount, nil
-}
-
-func capSummaryWords(text string, maxWords int) string {
-	if maxWords <= 0 {
-		return ""
-	}
-	words := strings.Fields(strings.TrimSpace(text))
-	if len(words) <= maxWords {
-		return strings.TrimSpace(text)
-	}
-	return strings.Join(words[:maxWords], " ")
 }
 
 func agentNameFromSoulPath(path string) string {
@@ -3606,9 +3643,6 @@ func metricsText() string {
 	b.WriteString("# HELP valhalla_agent_stalls_total Total inference stalls detected\n")
 	b.WriteString("# TYPE valhalla_agent_stalls_total counter\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_stalls_total %d\n", atomic.LoadInt64(&metricsStallsTotal)))
-	b.WriteString("# HELP valhalla_agent_compactions_total Total context compactions performed\n")
-	b.WriteString("# TYPE valhalla_agent_compactions_total counter\n")
-	b.WriteString(fmt.Sprintf("valhalla_agent_compactions_total %d\n", atomic.LoadInt64(&metricsCompactionsTotal)))
 	b.WriteString("# HELP valhalla_agent_uptime_seconds Agent uptime in seconds\n")
 	b.WriteString("# TYPE valhalla_agent_uptime_seconds gauge\n")
 	b.WriteString(fmt.Sprintf("valhalla_agent_uptime_seconds %d\n", int(time.Since(startTime).Seconds())))
@@ -3626,7 +3660,6 @@ func main() {
 	model := flag.String("model", "qwen3:30b", "model name")
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
-	compactThreshold := flag.Float64("compact-threshold", 0.8, "fraction of max-context that triggers auto-compaction (0 disables; 1.0 disables auto and keeps manual compact tool)")
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
 	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
 	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
@@ -3736,7 +3769,6 @@ func main() {
 	}
 
 	reg := toolpkg.NewRegistry()
-	reg.Register(&compactTool{})
 	delegateExec := &delegateTool{
 		peers:               peers,
 		agentName:           agentName,
@@ -3917,6 +3949,14 @@ func main() {
 			return out
 		}
 		history = sanitizeHistory(history)
+		if firstMessage && strings.TrimSpace(*memoryURL) != "" {
+			loaded := loadEpisodicState(*memoryURL, agentName)
+			if loaded != "" {
+				sessionsMu.Lock()
+				episodicStates[sessionID] = loaded
+				sessionsMu.Unlock()
+			}
+		}
 
 		bootstrapContext := ""
 		bootstrapMemoryIDs := []string{}
@@ -3941,6 +3981,19 @@ func main() {
 			systemContent += "\n\n" + reflectionContext
 		}
 		messages := []message{{Role: "system", Content: systemContent}}
+		sessionsMu.Lock()
+		episodicNarrative := episodicStates[sessionID]
+		sessionsMu.Unlock()
+		if strings.TrimSpace(episodicNarrative) != "" {
+			messages = append(messages, message{
+				Role:    "user",
+				Content: "Session context from your previous work session:\n" + episodicNarrative + "\n\nContinue from where you left off if relevant to the current task.",
+			})
+			messages = append(messages, message{
+				Role:    "assistant",
+				Content: "Understood, I have context from my previous session.",
+			})
+		}
 		messages = append(messages, history...)
 		if injectSkillNudge {
 			messages = append(messages, message{
@@ -3949,65 +4002,6 @@ func main() {
 			})
 		}
 		messages = append(messages, message{Role: "user", Content: content})
-
-		shouldAutoCompact := func() bool {
-			if *maxContext < 20 {
-				return false
-			}
-			if *compactThreshold <= 0 || *compactThreshold >= 1.0 {
-				return false
-			}
-			return true
-		}
-
-		runCompaction := func(trigger string) (int, int, int, error) {
-			if len(messages) <= 1 {
-				return 0, 0, 0, nil
-			}
-			before := len(messages) - 1
-			ctxCompact, cancelCompact := context.WithTimeout(ctx, 30*time.Second)
-			defer cancelCompact()
-			compacted, summarizedCount, err := compactConversation(ctxCompact, messages[1:], *inferenceURL, *model, *apiKey)
-			if err != nil {
-				return before, before, 0, err
-			}
-			if summarizedCount == 0 {
-				return before, before, 0, nil
-			}
-			messages = append([]message{messages[0]}, compacted...)
-			after := len(compacted)
-			summaryLen := 0
-			if len(compacted) > 0 {
-				summaryLen = len(compacted[0].Content)
-			}
-			atomic.AddInt64(&metricsCompactionsTotal, 1)
-			log.Printf("Auto-compacting: %d messages → %d messages", before, after)
-			logJSON("info", "context compacted", map[string]interface{}{
-				"agent":           agentName,
-				"session_id":      sessionID,
-				"trigger":         trigger,
-				"messages_before": before,
-				"messages_after":  after,
-				"summary_length":  summaryLen,
-			})
-			return before, after, summarizedCount, nil
-		}
-
-		ensureAutoCompaction := func() {
-			if !shouldAutoCompact() {
-				return
-			}
-			thresholdMessages := int(float64(*maxContext) * *compactThreshold)
-			if thresholdMessages < 1 {
-				return
-			}
-			if len(messages)-1 < thresholdMessages {
-				return
-			}
-			if _, _, _, err := runCompaction("auto"); err != nil {
-				logJSON("warn", "auto-compaction skipped", map[string]interface{}{"agent": agentName, "session_id": sessionID, "error": err.Error()})
-			}
-		}
 
 		shouldRetryTool := func(name string) bool {
 			switch name {
@@ -4035,24 +4029,6 @@ func main() {
 			runToolAttempt := func() toolpkg.ToolResult {
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
 				switch tc.Function.Name {
-				case "compact":
-					before, after, summarizedCount, err := runCompaction("manual")
-					if err != nil {
-						result = toolpkg.ToolResult{Error: "compact failed: " + err.Error()}
-						break
-					}
-					contextCap := *maxContext
-					if contextCap < 1 {
-						contextCap = len(messages) - 1
-					}
-					result = toolpkg.ToolResult{
-						Output: fmt.Sprintf("Compacted %d messages into summary. Context usage: %d/%d messages.", summarizedCount, after, contextCap),
-					}
-					if summarizedCount == 0 && before == after {
-						result = toolpkg.ToolResult{
-							Output: fmt.Sprintf("Compacted 0 messages into summary. Context usage: %d/%d messages.", after, contextCap),
-						}
-					}
 				case "delegate":
 					args["_task_id"] = sessionID
 					result = delegateExec.Execute(args)
@@ -4185,7 +4161,10 @@ func main() {
 		}
 
 		for i := 0; i < 10; i++ {
-			ensureAutoCompaction()
+			if *maxContext > 0 && len(messages)-1 > int(float64(*maxContext)*0.8) {
+				trimmed := progressiveTrim(messages[1:], *maxContext)
+				messages = append([]message{messages[0]}, trimmed...)
+			}
 			inferenceCtx, cancel := withInferenceTimeout(ctx)
 			resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, toolDefs, *inferenceURL, *model, *apiKey)
 			cancel()
@@ -4219,7 +4198,10 @@ func main() {
 		var xmlToolResults []string
 		insideThink := false
 		streamCtx, cancelStream := withInferenceTimeout(ctx)
-		ensureAutoCompaction()
+		if *maxContext > 0 && len(messages)-1 > int(float64(*maxContext)*0.8) {
+			trimmed := progressiveTrim(messages[1:], *maxContext)
+			messages = append([]message{messages[0]}, trimmed...)
+		}
 		for evt := range streamOllamaWithContext(streamCtx, messages, nil, *inferenceURL, *model, *apiKey) {
 			if evt.Err != nil {
 				errText := evt.Err.Error()
@@ -4332,7 +4314,10 @@ func main() {
 			resultMsg := "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
 			messages = append(messages, message{Role: "user", Content: resultMsg})
 			for i := 0; i < 3; i++ {
-				ensureAutoCompaction()
+				if *maxContext > 0 && len(messages)-1 > int(float64(*maxContext)*0.8) {
+					trimmed := progressiveTrim(messages[1:], *maxContext)
+					messages = append([]message{messages[0]}, trimmed...)
+				}
 				inferenceCtx, cancel := withInferenceTimeout(ctx)
 				resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, toolDefs, *inferenceURL, *model, *apiKey)
 				cancel()
@@ -4387,6 +4372,12 @@ func main() {
 		sessionsMu.Lock()
 		sessions[sessionID] = append(sessions[sessionID], message{Role: "user", Content: content}, message{Role: "assistant", Content: cleaned})
 		sessionsMu.Unlock()
+		if *memoryURL != "" && hadToolCalls {
+			sessionsMu.Lock()
+			currentHistory := append([]message(nil), sessions[sessionID]...)
+			sessionsMu.Unlock()
+			go persistEpisodicState(*memoryURL, agentName, sessionID, currentHistory, agentName)
+		}
 		return cleaned, nil
 	}
 
@@ -4441,6 +4432,27 @@ func main() {
 		_ = json.NewEncoder(w).Encode(statusPayload())
 	})
 	mux.HandleFunc("/sessions", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+			if sessionID == "" {
+				http.Error(w, "missing session_id", http.StatusBadRequest)
+				return
+			}
+			sessionsMu.Lock()
+			delete(sessions, sessionID)
+			delete(seenSessions, sessionID)
+			delete(skillNudgeInjected, sessionID)
+			delete(sessionContextMemoryIDs, sessionID)
+			delete(sessionValidatedIDs, sessionID)
+			delete(episodicStates, sessionID)
+			sessionsMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"deleted":    true,
+				"session_id": sessionID,
+			})
+			return
+		}
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
