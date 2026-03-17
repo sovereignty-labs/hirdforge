@@ -635,7 +635,7 @@ async def run_hybrid_search(query: str, limit: int = 5, agent: Optional[str] = N
     where_sql = " AND ".join(where_clauses) if where_clauses else "TRUE"
 
     vector_sql = f"""
-        SELECT id, content, type, layer, importance, confidence, scope, tags, source, metadata,
+        SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source, metadata,
                superseded_by, supersede_reason, valid_until, source_ids, validation_count,
                created_at, expires_at, access_count, last_accessed,
                1 - (embedding <=> ${idx}::vector) AS vector_score
