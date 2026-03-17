@@ -82,6 +82,13 @@ class MigrateRequest(BaseModel):
 class ConsolidateRequest(BaseModel):
     agent: str
 
+
+class SessionStateRequest(BaseModel):
+    agent: str
+    content: str
+    session_id: str = ""
+    message_count: int = 0
+
 # --- App ---
 app = FastAPI(title="Seidr", description="Valhalla Knowledge Service")
 
@@ -149,6 +156,10 @@ def get_named_collection(name: str):
 
 def get_collection(agent: Optional[str] = None):
     return get_named_collection(collection_name_for_agent(agent))
+
+
+def get_session_states_collection():
+    return get_named_collection("session_states")
 
 def list_agent_collections() -> list[str]:
     prefix = f"{COLLECTION}_"
@@ -646,6 +657,100 @@ def consolidate_agent_memories(agent: str) -> dict:
 
     return {"agent": agent, "consolidated": consolidated, "remaining": col.count()}
 
+
+def compress_one_sync(content: str) -> Optional[str]:
+    """Synchronous LLM call for session state compression. Runs in background thread."""
+    if not cognition_enabled():
+        return None
+    payload = {
+        "model": "qwen",
+        "temperature": 0.1,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Compress this agent work session log into a concise narrative summary. Focus on: what task was attempted, which repos/branches/files were touched, what tools succeeded or failed, what the final status was. Write in past tense. Keep under 150 words. Output only the summary, no preamble.",
+            },
+            {"role": "user", "content": content},
+        ],
+    }
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{COGNITION_INFERENCE_URL.rstrip('/')}/v1/chat/completions",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        choices = result.get("choices", [])
+        if not choices:
+            return None
+        text = choices[0].get("message", {}).get("content", "").strip()
+        return text if text else None
+    except Exception as e:
+        log("warn", "session state compression failed", {"error": str(e)})
+        return None
+
+
+def compress_session_states():
+    """Compress raw session states using cognitive brain. Runs in background thread."""
+    try:
+        col = get_session_states_collection()
+        total = col.count()
+        if total == 0:
+            return
+        results = col.get(
+            where={"compressed": "false"},
+            limit=5,
+            include=["documents", "metadatas"],
+        )
+        ids = results.get("ids", [])
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+        for doc_id, content, meta in zip(ids, docs, metas):
+            if not content or len(content) < 200:
+                continue
+            compressed = compress_one_sync(content)
+            if compressed is None:
+                continue
+            meta = dict(meta or {})
+            meta["compressed"] = "true"
+            meta["compressed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            col.upsert(documents=[compressed], metadatas=[meta], ids=[doc_id])
+            log("info", "session state compressed", {
+                "id": doc_id,
+                "agent": meta.get("agent", ""),
+                "original_len": len(content),
+                "compressed_len": len(compressed),
+            })
+    except Exception as e:
+        log("error", "session state compression failed", {"error": str(e)})
+
+
+def list_session_state_entries(agent: str, limit: int = 20) -> list[dict]:
+    col = get_session_states_collection()
+    results = col.get(
+        where={"agent": agent},
+        limit=limit,
+        include=["documents", "metadatas"],
+    )
+    ids = results.get("ids", [])
+    docs = results.get("documents", [])
+    metas = results.get("metadatas", [])
+    entries = []
+    for doc_id, document, meta in zip(ids, docs, metas):
+        entries.append({
+            "id": doc_id,
+            "document": document,
+            "metadata": dict(meta or {}),
+        })
+    entries.sort(
+        key=lambda item: parse_iso_datetime(item["metadata"].get("updated_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return entries
+
 def background_prune_loop():
     """Background thread for periodic memory maintenance. Runs independently of the event loop."""
     # Wait 60 seconds after startup before first prune to let ChromaDB stabilize
@@ -658,6 +763,10 @@ def background_prune_loop():
                 consolidate_agent_memories(agent)
         except Exception as e:
             log("error", "memory prune failed", {"error": str(e)})
+        try:
+            compress_session_states()
+        except Exception as e:
+            log("error", "session state compression failed", {"error": str(e)})
         time.sleep(6 * 60 * 60)
 
 # --- Endpoints ---
@@ -666,7 +775,11 @@ def background_prune_loop():
 async def health():
     try:
         count = sum(get_named_collection(name).count() for name in list_all_collection_names())
-        return {"status": "ok", "memories": count, "collections": list_all_collection_names()}
+        try:
+            ss_count = get_session_states_collection().count()
+        except Exception:
+            ss_count = 0
+        return {"status": "ok", "memories": count, "collections": list_all_collection_names(), "session_states": ss_count}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -859,6 +972,69 @@ async def remember(req: RememberRequest):
     if not stored_ids:
         return {"id": None, "stored": False, "reason": "duplicate", "similar_to": duplicate_hits[0] if duplicate_hits else None}
     return {"id": stored_ids[0], "ids": stored_ids, "stored": True, "facts_stored": len(stored_ids)}
+
+
+@app.post("/session-state")
+async def store_session_state(req: SessionStateRequest):
+    agent = sanitize_agent_name(req.agent)
+    col = get_session_states_collection()
+    while True:
+        doc_id = f"{agent}-{int(time.time())}"
+        existing = col.get(ids=[doc_id])
+        if not existing.get("ids"):
+            break
+        time.sleep(1)
+    updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    metadata = {
+        "agent": agent,
+        "session_id": req.session_id,
+        "updated_at": updated_at,
+        "message_count": int(req.message_count or 0),
+        "compressed": "false",
+    }
+    col.add(documents=[req.content], metadatas=[metadata], ids=[doc_id])
+
+    entries = list_session_state_entries(agent)
+    if len(entries) > 5:
+        col.delete(ids=[entry["id"] for entry in entries[5:]])
+        entries = entries[:5]
+
+    return {"stored": True, "agent": agent, "entries": len(entries)}
+
+
+@app.get("/session-state")
+async def get_session_state(agent: str):
+    sanitized_name = sanitize_agent_name(agent)
+    entries = list_session_state_entries(sanitized_name)
+    if not entries:
+        return {"agent": sanitized_name, "content": None, "entries_count": 0}
+
+    selected = None
+    for entry in entries:
+        if entry["metadata"].get("compressed") == "true":
+            selected = entry
+            break
+    if selected is None:
+        selected = entries[0]
+
+    meta = selected["metadata"]
+    return {
+        "agent": sanitized_name,
+        "content": selected["document"],
+        "session_id": meta.get("session_id", ""),
+        "updated_at": meta.get("updated_at", ""),
+        "compressed": meta.get("compressed") == "true",
+        "entries_count": len(entries),
+    }
+
+
+@app.delete("/session-state")
+async def delete_session_state(agent: str):
+    sanitized_name = sanitize_agent_name(agent)
+    entries = list_session_state_entries(sanitized_name)
+    if entries:
+        get_session_states_collection().delete(ids=[entry["id"] for entry in entries])
+    return {"deleted": True, "agent": sanitized_name, "count": len(entries)}
 
 @app.get("/memories")
 async def list_memories(agent: str = None, limit: int = 100, type: str = None):
