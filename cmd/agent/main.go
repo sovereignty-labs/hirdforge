@@ -2965,10 +2965,23 @@ func summarizeForCompaction(ctx context.Context, segment []message, inferenceURL
 		if strings.TrimSpace(m.Role) == "system" {
 			continue
 		}
+		if strings.TrimSpace(m.Role) == "tool" {
+			continue
+		}
+		if strings.TrimSpace(m.Role) == "assistant" && len(m.ToolCalls) > 0 && strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		content := strings.TrimSpace(m.Content)
+		if content == "" {
+			continue
+		}
 		transcript.WriteString(strings.ToUpper(m.Role))
 		transcript.WriteString(": ")
-		transcript.WriteString(m.Content)
+		transcript.WriteString(content)
 		transcript.WriteString("\n\n")
+	}
+	if strings.TrimSpace(transcript.String()) == "" {
+		return "", fmt.Errorf("no summarizable content")
 	}
 	resp, err := callOllamaNonStreamingWithContext(ctx, []message{
 		{Role: "system", Content: compactionSystemPrompt},
@@ -2992,7 +3005,56 @@ func compactConversation(ctx context.Context, history []message, inferenceURL, m
 	if len(history) < 4 {
 		return history, 0, nil
 	}
-	olderCount := len(history) / 2
+	findOwningAssistant := func(msgs []message, toolIdx int) int {
+		if toolIdx < 0 || toolIdx >= len(msgs) {
+			return -1
+		}
+		if strings.TrimSpace(msgs[toolIdx].Role) != "tool" {
+			return -1
+		}
+		targetID := strings.TrimSpace(msgs[toolIdx].ToolCallID)
+		for i := toolIdx - 1; i >= 0; i-- {
+			if strings.TrimSpace(msgs[i].Role) != "assistant" || len(msgs[i].ToolCalls) == 0 {
+				continue
+			}
+			if targetID == "" {
+				return i
+			}
+			for _, tc := range msgs[i].ToolCalls {
+				if strings.TrimSpace(tc.ID) == targetID {
+					return i
+				}
+			}
+		}
+		return -1
+	}
+	adjustSplit := func(msgs []message, split int) int {
+		if split <= 0 || split >= len(msgs) {
+			return split
+		}
+		for split > 0 {
+			changed := false
+			if split < len(msgs) && strings.TrimSpace(msgs[split].Role) == "tool" {
+				if owner := findOwningAssistant(msgs, split); owner >= 0 && owner < split {
+					split = owner
+					changed = true
+				}
+			}
+			if split > 0 {
+				prev := msgs[split-1]
+				if strings.TrimSpace(prev.Role) == "assistant" && len(prev.ToolCalls) > 0 {
+					// Keep assistant tool calls and tool responses as an atomic block.
+					split = split - 1
+					changed = true
+				}
+			}
+			if !changed {
+				break
+			}
+		}
+		return split
+	}
+	olderCount := adjustSplit(history, len(history)/2)
 	if olderCount < 2 {
 		return history, 0, nil
 	}
