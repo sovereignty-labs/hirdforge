@@ -120,6 +120,73 @@ func registerGatewayMCP(mux *http.ServeMux) {
 }
 
 func (s *gatewayMCPServer) registerTools() {
+	s.tools["close_issue"] = mcpToolHandler{
+		Name:        "close_issue",
+		Description: "Close a Gitea issue.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"owner": map[string]interface{}{"type": "string"},
+				"repo":  map[string]interface{}{"type": "string"},
+				"index": map[string]interface{}{"type": "integer"},
+			},
+			"required": []string{"owner", "repo", "index"},
+		},
+		WriteTier: "safe_write",
+		Handler: func(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+			owner, err := strParam(params, "owner", true)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := strParam(params, "repo", true)
+			if err != nil {
+				return nil, err
+			}
+			index, err := intParam(params, "index", true)
+			if err != nil {
+				return nil, err
+			}
+			payload := map[string]string{"state": "closed"}
+			path := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d", url.PathEscape(owner), url.PathEscape(repo), index)
+			return s.callGiteaJSON(ctx, http.MethodPatch, path, payload)
+		},
+	}
+	s.tools["comment_on_issue"] = mcpToolHandler{
+		Name:        "comment_on_issue",
+		Description: "Post a comment on a Gitea issue.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"owner": map[string]interface{}{"type": "string"},
+				"repo":  map[string]interface{}{"type": "string"},
+				"index": map[string]interface{}{"type": "integer"},
+				"body":  map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"owner", "repo", "index", "body"},
+		},
+		WriteTier: "safe_write",
+		Handler: func(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+			owner, err := strParam(params, "owner", true)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := strParam(params, "repo", true)
+			if err != nil {
+				return nil, err
+			}
+			index, err := intParam(params, "index", true)
+			if err != nil {
+				return nil, err
+			}
+			body, err := strParam(params, "body", true)
+			if err != nil {
+				return nil, err
+			}
+			payload := map[string]string{"body": body}
+			path := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d/comments", url.PathEscape(owner), url.PathEscape(repo), index)
+			return s.callGiteaJSON(ctx, http.MethodPost, path, payload)
+		},
+	}
 	s.tools["fleet_state"] = mcpToolHandler{
 		Name:        "fleet_state",
 		Description: "Return current gateway fleet state for all agents.",
@@ -248,7 +315,13 @@ func (s *gatewayMCPServer) registerTools() {
 			if labels, err := stringSliceParam(params, "labels"); err != nil {
 				return nil, err
 			} else if len(labels) > 0 {
-				payload["labels"] = labels
+				labelIDs, err := s.resolveGiteaLabelIDs(ctx, owner, repo, labels)
+				if err != nil {
+					return nil, err
+				}
+				if len(labelIDs) > 0 {
+					payload["labels"] = labelIDs
+				}
 			}
 			path := fmt.Sprintf("/api/v1/repos/%s/%s/issues", url.PathEscape(owner), url.PathEscape(repo))
 			return s.callGiteaJSON(ctx, http.MethodPost, path, payload)
@@ -389,6 +462,49 @@ func (s *gatewayMCPServer) registerTools() {
 				"sha":     resp.SHA,
 				"content": string(decoded),
 			}, nil
+		},
+	}
+	s.tools["update_issue"] = mcpToolHandler{
+		Name:        "update_issue",
+		Description: "Update labels on a Gitea issue. Replaces all existing labels with the provided list.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"owner": map[string]interface{}{"type": "string"},
+				"repo":  map[string]interface{}{"type": "string"},
+				"index": map[string]interface{}{"type": "integer"},
+				"labels": map[string]interface{}{
+					"type":  "array",
+					"items": map[string]interface{}{"type": "string"},
+				},
+			},
+			"required": []string{"owner", "repo", "index", "labels"},
+		},
+		WriteTier: "safe_write",
+		Handler: func(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+			owner, err := strParam(params, "owner", true)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := strParam(params, "repo", true)
+			if err != nil {
+				return nil, err
+			}
+			index, err := intParam(params, "index", true)
+			if err != nil {
+				return nil, err
+			}
+			labels, err := stringSliceParam(params, "labels")
+			if err != nil {
+				return nil, err
+			}
+			labelIDs, err := s.resolveGiteaLabelIDs(ctx, owner, repo, labels)
+			if err != nil {
+				return nil, err
+			}
+			payload := map[string]interface{}{"labels": labelIDs}
+			path := fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d/labels", url.PathEscape(owner), url.PathEscape(repo), index)
+			return s.callGiteaJSON(ctx, http.MethodPut, path, payload)
 		},
 	}
 }
@@ -618,6 +734,44 @@ func (s *gatewayMCPServer) callGiteaJSON(ctx context.Context, method, path strin
 		return nil, err
 	}
 	return out, nil
+}
+
+func (s *gatewayMCPServer) resolveGiteaLabelIDs(ctx context.Context, owner, repo string, labelNames []string) ([]int, error) {
+	if len(labelNames) == 0 {
+		return nil, nil
+	}
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/labels", url.PathEscape(owner), url.PathEscape(repo))
+	var labels []map[string]interface{}
+	if err := s.callGiteaInto(ctx, http.MethodGet, path, nil, &labels); err != nil {
+		return nil, fmt.Errorf("fetch labels: %w", err)
+	}
+	nameToID := map[string]int{}
+	for _, l := range labels {
+		name, _ := l["name"].(string)
+		if name == "" {
+			continue
+		}
+		idf, _ := l["id"].(float64)
+		nameToID[name] = int(idf)
+	}
+	var ids []int
+	var missing []string
+	for _, name := range labelNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		id, ok := nameToID[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("labels not found: %s", strings.Join(missing, ", "))
+	}
+	return ids, nil
 }
 
 func (s *gatewayMCPServer) callGiteaInto(ctx context.Context, method, path string, payload interface{}, out interface{}) error {
