@@ -886,6 +886,122 @@ func (t *rememberTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	return toolpkg.ToolResult{Output: "Remembered."}
 }
 
+type memoryEditTool struct {
+	memoryURL string
+}
+
+func (t *memoryEditTool) Name() string { return "memory-edit" }
+func (t *memoryEditTool) Description() string {
+	return "Edit your Seidr memories. Actions: update, delete, promote, reclassify."
+}
+func (t *memoryEditTool) Parameters() map[string]string {
+	return map[string]string{
+		"action":     "Memory action: update, delete, promote, or reclassify",
+		"memory_id":  "Memory ID to modify",
+		"content":    "Updated memory content for action=update (optional)",
+		"type":       "Memory type for action=update or action=reclassify (general, failure, recovery, lesson, fact, observation)",
+		"importance": "Importance value 0.0-1.0 for action=update (optional)",
+	}
+}
+func (t *memoryEditTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	action := strings.TrimSpace(fmt.Sprint(args["action"]))
+	memoryID := strings.TrimSpace(fmt.Sprint(args["memory_id"]))
+	if action == "" {
+		return toolpkg.ToolResult{Output: t.usage()}
+	}
+	switch action {
+	case "update":
+		if memoryID == "" || memoryID == "<nil>" {
+			return toolpkg.ToolResult{Output: t.usage()}
+		}
+		payload := map[string]interface{}{}
+		if content := strings.TrimSpace(fmt.Sprint(args["content"])); content != "" && content != "<nil>" {
+			payload["content"] = content
+		}
+		if memoryType := strings.TrimSpace(fmt.Sprint(args["type"])); memoryType != "" && memoryType != "<nil>" {
+			payload["type"] = memoryType
+		}
+		if importanceRaw := strings.TrimSpace(fmt.Sprint(args["importance"])); importanceRaw != "" && importanceRaw != "<nil>" {
+			importance, err := strconv.ParseFloat(importanceRaw, 64)
+			if err != nil {
+				return toolpkg.ToolResult{Error: "importance must be a float between 0.0 and 1.0"}
+			}
+			payload["importance"] = importance
+		}
+		if len(payload) == 0 {
+			return toolpkg.ToolResult{Output: t.usage()}
+		}
+		return t.patchMemory(memoryID, payload, "Memory updated.")
+	case "delete":
+		if memoryID == "" || memoryID == "<nil>" {
+			return toolpkg.ToolResult{Output: t.usage()}
+		}
+		req, err := http.NewRequest(http.MethodDelete, strings.TrimRight(t.memoryURL, "/")+"/memories/"+url.PathEscape(memoryID), nil)
+		if err != nil {
+			return toolpkg.ToolResult{Error: err.Error()}
+		}
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return toolpkg.ToolResult{Error: err.Error()}
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			return toolpkg.ToolResult{Error: strings.TrimSpace(string(b))}
+		}
+		return toolpkg.ToolResult{Output: "Memory deleted: " + memoryID}
+	case "promote":
+		if memoryID == "" || memoryID == "<nil>" {
+			return toolpkg.ToolResult{Output: t.usage()}
+		}
+		return t.patchMemory(memoryID, map[string]interface{}{"layer": "soul_candidate"}, "Memory promoted to soul_candidate.")
+	case "reclassify":
+		if memoryID == "" || memoryID == "<nil>" {
+			return toolpkg.ToolResult{Output: t.usage()}
+		}
+		memoryType := strings.TrimSpace(fmt.Sprint(args["type"]))
+		if memoryType == "" || memoryType == "<nil>" {
+			return toolpkg.ToolResult{Output: t.usage()}
+		}
+		return t.patchMemory(memoryID, map[string]interface{}{"type": memoryType}, "Memory reclassified.")
+	default:
+		return toolpkg.ToolResult{Output: t.usage()}
+	}
+}
+
+func (t *memoryEditTool) patchMemory(memoryID string, payload map[string]interface{}, successPrefix string) toolpkg.ToolResult {
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPatch, strings.TrimRight(t.memoryURL, "/")+"/memories/"+url.PathEscape(memoryID), bytes.NewReader(body))
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return toolpkg.ToolResult{Error: strings.TrimSpace(string(b))}
+	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if strings.TrimSpace(string(respBody)) == "" {
+		return toolpkg.ToolResult{Output: successPrefix + " " + memoryID}
+	}
+	return toolpkg.ToolResult{Output: successPrefix + "\n" + strings.TrimSpace(string(respBody))}
+}
+
+func (t *memoryEditTool) usage() string {
+	return strings.TrimSpace(`memory-edit usage:
+- update: action=update memory_id=<id> [content="..."] [type=general|failure|recovery|lesson|fact|observation] [importance=0.0-1.0]
+- delete: action=delete memory_id=<id>
+- promote: action=promote memory_id=<id>
+- reclassify: action=reclassify memory_id=<id> type=general|failure|recovery|lesson|fact|observation`)
+}
+
 func logJSON(level, msg string, fields map[string]interface{}) {
 	entry := map[string]interface{}{
 		"ts":    time.Now().UTC().Format(time.RFC3339),
@@ -3859,6 +3975,7 @@ func main() {
 		},
 	}
 	rememberExec := &rememberTool{memoryURL: *memoryURL, agentName: agentName}
+	memoryEditExec := &memoryEditTool{memoryURL: *memoryURL}
 	enabled := map[string]bool{}
 	for _, name := range strings.Split(*toolsFlag, ",") {
 		if name = strings.TrimSpace(name); name != "" {
@@ -3905,6 +4022,7 @@ func main() {
 	if strings.TrimSpace(*memoryURL) != "" {
 		reg.Register(recallExec)
 		reg.Register(rememberExec)
+		reg.Register(memoryEditExec)
 	}
 	// MCP tool discovery
 	if *mcpServers != "" {
