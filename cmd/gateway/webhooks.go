@@ -317,33 +317,43 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		log.Printf("webhook: task dispatch skipped after PR #%d on %s: issue payload missing number", pr.Number, pr.Repo)
 		return
 	}
-	agentName := ""
 	tierName := ""
 	for _, label := range task.Labels {
-		if strings.HasPrefix(label, "agent/") {
-			agentName = strings.TrimPrefix(label, "agent/")
-		}
 		if strings.HasPrefix(label, "tier/") {
 			tierName = strings.TrimPrefix(label, "tier/")
 		}
 	}
-	if agentName == "" {
-		log.Printf("webhook: task #%d skipped: no agent label", task.Number)
+
+	// Bifrost: intelligent agent selection
+	labelAgent := ""
+	for _, label := range task.Labels {
+		if strings.HasPrefix(label, "agent/") {
+			labelAgent = strings.TrimPrefix(label, "agent/")
+		}
+	}
+	selectedAgent, reason := g.selectAgentForTask(task)
+	if selectedAgent == "" {
+		selectedAgent = labelAgent
+		reason = "bifrost: no candidates, using label fallback"
+	}
+	if selectedAgent == "" {
+		log.Printf("webhook: task #%d skipped: no agent from bifrost or labels", task.Number)
 		return
 	}
+	log.Printf("webhook: bifrost selected %s for task #%d (%s)", selectedAgent, task.Number, reason)
 
-	targetAgent := agentName
+	targetAgent := selectedAgent
 	agent, ok := g.getAgent(targetAgent)
 	if !ok || !agent.Healthy {
-		if fallback, ok := g.pickHealthyTaskAgent(tierName, agentName); ok {
-			log.Printf("webhook: task #%d rerouted from %s to %s within tier %q", task.Number, agentName, fallback, tierName)
+		if fallback, ok := g.pickHealthyTaskAgent(tierName, targetAgent); ok {
+			log.Printf("webhook: task #%d rerouted from %s to %s within tier %q", task.Number, targetAgent, fallback, tierName)
 			targetAgent = fallback
 			agent, _ = g.getAgent(targetAgent)
 		} else {
-			log.Printf("webhook: task #%d skipped: assigned agent %q unhealthy and no healthy fallback for tier %q", task.Number, agentName, tierName)
+			log.Printf("webhook: task #%d skipped: assigned agent %q unhealthy and no healthy fallback for tier %q", task.Number, targetAgent, tierName)
 			g.sendDiscordWebhookNotification(
 				"Task Dispatch Skipped",
-				fmt.Sprintf("Task #%d could not be dispatched because `%s` was unavailable.", task.Number, agentName),
+				fmt.Sprintf("Task #%d could not be dispatched because `%s` was unavailable.", task.Number, targetAgent),
 				15548997,
 				[]discordField{
 					{Name: "Task", Value: fmt.Sprintf("%s#%d", g.taskRepo, task.Number), Inline: false},
