@@ -387,16 +387,7 @@ def ensure_pool():
 
 
 def row_to_metadata(row) -> dict:
-    raw = row["metadata"]
-    if isinstance(raw, str):
-        try:
-            meta = json.loads(raw)
-        except Exception:
-            meta = {}
-    elif isinstance(raw, dict):
-        meta = dict(raw)
-    else:
-        meta = {}
+    meta = safe_metadata(row["metadata"])
     meta["agent"] = meta.get("agent", row["agent"])
     meta["source"] = meta.get("source", row["source"])
     meta["type"] = meta.get("type", row["type"])
@@ -416,6 +407,23 @@ def row_to_metadata(row) -> dict:
     if "timestamp" not in meta:
         meta["timestamp"] = format_timestamp(row["created_at"])
     return meta
+
+
+def safe_metadata(raw) -> dict:
+    """Safely parse metadata that may be a JSON string, dict, or None."""
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    return {}
 
 
 def memory_row_to_result(row, vector_score: float = 0.0, keyword_score: float = 0.0, similarity: float = 0.0) -> dict:
@@ -927,7 +935,7 @@ async def consolidate_agent_memories(agent: str) -> dict:
             cluster_items = [items[i] for i in cluster_indices]
             merged_content = merge_cluster_documents([item["content"] for item in cluster_items])
             latest_item = max(cluster_items, key=lambda item: item["created_at"] or utcnow())
-            latest_meta = dict(latest_item["metadata"] or {})
+            latest_meta = safe_metadata(latest_item["metadata"])
             latest_meta["timestamp"] = format_timestamp(latest_item["created_at"])
             latest_meta["consolidated_from"] = len(cluster_items)
             tag_values = []
@@ -1307,7 +1315,7 @@ async def remember(req: RememberRequest):
         duplicate_rows = await fetch_similar_for_dedup(agent, memory_type, embedding_text, limit=3)
         for row in duplicate_rows:
             similarity = float(row["similarity"] or 0.0)
-            existing_meta = dict(row["metadata"] or {})
+            existing_meta = safe_metadata(row["metadata"])
             if existing_meta.get("type", "general") == memory_type and similarity > 0.92:
                 log("info", "memory deduplicated", {"agent": req.agent, "similar_to": row["id"]})
                 return None, row["id"]
@@ -1371,7 +1379,7 @@ async def remember(req: RememberRequest):
         duplicate_id = None
         for row in duplicate_rows:
             similarity = float(row["similarity"] or 0.0)
-            existing_meta = dict(row["metadata"] or {})
+            existing_meta = safe_metadata(row["metadata"])
             if existing_meta.get("type", "general") == memory_type and similarity > 0.92:
                 duplicate_id = row["id"]
                 break
