@@ -246,6 +246,7 @@ type gateway struct {
 	taskRepo          string
 	giteaURL          string
 	giteaToken        string
+	seidrURL          string
 	discordWebhookURL string
 }
 
@@ -1440,9 +1441,10 @@ func main() {
 	giteaRepo := flag.String("gitea-repo", "gitea_admin/project_valhalla", "Gitea repo in owner/name format")
 	lockboxURL := flag.String("lockbox-url", "", "Lockbox base URL for approval queue proxy")
 	discordWebhookURL := flag.String("discord-webhook-url", "", "Discord webhook URL for new approval notifications")
-	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for validating Gitea webhooks")
-	reviewAgent := flag.String("review-agent", "freya", "Agent to dispatch for automated PR reviews")
-	taskRepo := flag.String("task-repo", "kit/hirdforge-tasks", "Task board repository in owner/name format")
+	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for Gitea webhook validation (optional)")
+	reviewAgentFlag := flag.String("review-agent", "freya", "Agent to dispatch for PR reviews")
+	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
+	seidrURLFlag := flag.String("seidr-url", "http://seidr.valhalla.svc:8082", "Seidr memory service URL")
 	flag.Parse()
 	if strings.TrimSpace(*agentsFlag) == "" {
 		die("missing --agents", fmt.Errorf("required"))
@@ -1467,10 +1469,11 @@ func main() {
 		injections:        map[string][]InjectionMessage{},
 		pausedAgents:      map[string]bool{},
 		webhookSecret:     strings.TrimSpace(*webhookSecret),
-		reviewAgent:       strings.TrimSpace(*reviewAgent),
-		taskRepo:          strings.TrimSpace(*taskRepo),
+		reviewAgent:       strings.TrimSpace(*reviewAgentFlag),
+		taskRepo:          strings.TrimSpace(*taskRepoFlag),
 		giteaURL:          strings.TrimSpace(*giteaURL),
 		giteaToken:        resolveGatewayGiteaToken(*giteaToken),
+		seidrURL:          strings.TrimSpace(*seidrURLFlag),
 		discordWebhookURL: strings.TrimSpace(*discordWebhookURL),
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
@@ -2929,6 +2932,10 @@ func main() {
 	})
 	registerGatewayMCP(mux)
 	gw.registerWebhookHandlers(mux)
+	go func() {
+		time.Sleep(10 * time.Second)
+		gw.ensureGiteaWebhooks()
+	}()
 	mux.HandleFunc("/api/v1/ping", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3007,11 +3014,6 @@ func main() {
 			}
 		}()
 	}
-
-	go func() {
-		time.Sleep(10 * time.Second)
-		gw.ensureGiteaWebhooks()
-	}()
 
 	addr := ":" + *port
 	log.Printf("Valhalla Gateway listening on %s", addr)
