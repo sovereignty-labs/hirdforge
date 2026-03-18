@@ -3689,7 +3689,7 @@ func main() {
 	personaRepoFlag := flag.String("persona-repo", "", "git URL of persona repository")
 	toolsFile := flag.String("tools-file", "/etc/valhalla/tools.md", "path to tools context file")
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
-	toolsFlag := flag.String("tools", "exec,read,write", "comma-separated enabled tools")
+	toolsFlag := flag.String("tools", "exec,read,write,edit", "comma-separated enabled tools")
 	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
 	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
 	soulMaxLines := flag.Int("soul-max-lines", 80, "maximum number of lines allowed in a SOUL file")
@@ -3817,6 +3817,9 @@ func main() {
 	}
 	if enabled["write"] {
 		reg.Register(toolpkg.NewWriteTool(*workspace))
+	}
+	if enabled["edit"] {
+		reg.Register(toolpkg.NewEditTool(*workspace))
 	}
 	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] || enabled["gitea"] {
 		if enabled["git-clone"] {

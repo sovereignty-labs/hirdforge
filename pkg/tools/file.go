@@ -181,6 +181,74 @@ func (t *WriteTool) Verify(args map[string]interface{}, result ToolResult) error
 	return nil
 }
 
+// EditTool replaces an exact string match in a workspace file.
+type EditTool struct {
+	WorkDir string
+}
+
+func NewEditTool(workDir string) *EditTool {
+	return &EditTool{WorkDir: workDir}
+}
+
+func (t *EditTool) Name() string {
+	return "edit"
+}
+
+func (t *EditTool) Description() string {
+	return "Edit a file by replacing an exact string match. old_str must appear exactly once in the file."
+}
+
+func (t *EditTool) Parameters() map[string]string {
+	return map[string]string{
+		"path":    "File path relative to workspace",
+		"old_str": "Exact string to replace; must appear exactly once",
+		"new_str": "Replacement string; if empty, old_str is deleted",
+	}
+}
+
+func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
+	path, ok := args["path"].(string)
+	if !ok || path == "" {
+		return ToolResult{Error: "path is required"}
+	}
+	oldStr, ok := args["old_str"].(string)
+	if !ok {
+		return ToolResult{Error: "old_str is required"}
+	}
+	newStr, ok := args["new_str"].(string)
+	if !ok {
+		return ToolResult{Error: "new_str is required"}
+	}
+
+	absPath, err := resolvePath(t.WorkDir, path)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	if bytesLookBinary(data) {
+		return ToolResult{Error: fmt.Sprintf("Error: binary file detected at %s. Use `read` only with text files.", path)}
+	}
+
+	content := string(data)
+	occurrences := strings.Count(content, oldStr)
+	if occurrences == 0 {
+		return ToolResult{Error: "old_str not found in file. Use the read tool to check the current content."}
+	}
+	if occurrences > 1 {
+		return ToolResult{Error: fmt.Sprintf("old_str appears %d times. Make it more specific to match exactly once.", occurrences)}
+	}
+
+	updated := strings.Replace(content, oldStr, newStr, 1)
+	if err := os.WriteFile(absPath, []byte(updated), 0644); err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	autoStageWrittenFile(absPath)
+	return ToolResult{Output: fmt.Sprintf("Edited %s: replaced %d bytes with %d bytes", path, len(oldStr), len(newStr))}
+}
+
 func autoStageWrittenFile(absPath string) {
 	repoRoot := findGitRepoRoot(filepath.Dir(absPath))
 	if repoRoot == "" {
