@@ -17,7 +17,7 @@ from typing import Literal, Optional
 
 import asyncpg
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 
@@ -110,6 +110,7 @@ SCHEMA_STATEMENTS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_rel_agent ON relationships(agent);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_relationships_unique ON relationships(agent, entity_a, entity_b, relation_type);",
     """
     CREATE TABLE IF NOT EXISTS access_log (
         id SERIAL PRIMARY KEY,
@@ -181,6 +182,14 @@ class SessionStateRequest(BaseModel):
 class MigrateFromChromaRequest(BaseModel):
     chroma_host: str = "chromadb.valhalla.svc"
     chroma_port: int = 8000
+
+
+class UpdateMemoryRequest(BaseModel):
+    content: Optional[str] = None
+    type: Optional[str] = None
+    layer: Optional[str] = None
+    importance: Optional[float] = None
+    tags: Optional[str] = None
 
 
 # --- App ---
@@ -376,6 +385,23 @@ def parse_json_object_text(text: str) -> Optional[dict]:
     return parsed
 
 
+def parse_json_array_objects(text: str) -> Optional[list[dict]]:
+    fragment = extract_first_json_fragment(text.strip(), "[", "]")
+    if fragment is None:
+        return None
+    try:
+        parsed = json.loads(fragment)
+    except Exception:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    out = []
+    for item in parsed:
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
 def query_hash(agent: str, query: str) -> str:
     return hashlib.sha256(f"{agent}:{query}".encode("utf-8")).hexdigest()
 
@@ -559,6 +585,69 @@ async def detect_contradiction(old_fact: str, new_fact: str) -> tuple[bool, str]
     return contradicts, explanation
 
 
+async def extract_relationships(fact: str, agent: str):
+    try:
+        if not cognition_enabled() or not fact.strip():
+            return []
+        system = (
+            "Extract entity relationships from the fact. "
+            "Entity types may include: file, repo, agent, tool, concept. "
+            "Return ONLY a JSON array of objects with this exact shape: "
+            "[{\"source\": \"entity_a\", \"target\": \"entity_b\", \"relation\": \"type\", \"strength\": 0.0}] "
+            "Use strength in the range 0.0 to 1.0. Do not include any prose."
+        )
+        reply = await cognition_chat(system, fact)
+        if not reply:
+            return []
+        relationships = parse_json_array_objects(reply)
+        if not relationships:
+            return []
+        pool = ensure_pool()
+        stored = []
+        for item in relationships:
+            source = str(item.get("source", "")).strip()[:128]
+            target = str(item.get("target", "")).strip()[:128]
+            relation = str(item.get("relation", "")).strip()[:64]
+            if not source or not target or not relation:
+                continue
+            try:
+                strength = max(0.0, min(1.0, float(item.get("strength", 0.5))))
+            except Exception:
+                strength = 0.5
+            metadata = {
+                "fact": fact,
+                "timestamp": format_timestamp(),
+            }
+            await pool.execute(
+                """
+                INSERT INTO relationships (
+                    agent, entity_a, entity_b, relation_type, strength, evidence_count, last_observed, metadata
+                ) VALUES (
+                    $1, $2, $3, $4, $5, 1, NOW(), $6::jsonb
+                )
+                ON CONFLICT (agent, entity_a, entity_b, relation_type)
+                DO UPDATE SET
+                    strength = GREATEST(relationships.strength, EXCLUDED.strength),
+                    evidence_count = relationships.evidence_count + 1,
+                    last_observed = NOW(),
+                    metadata = EXCLUDED.metadata
+                """,
+                sanitize_agent_name(agent),
+                source,
+                target,
+                relation,
+                strength,
+                json.dumps(metadata),
+            )
+            stored.append({"source": source, "target": target, "relation": relation, "strength": strength})
+        if stored:
+            log("info", "relationships extracted", {"agent": sanitize_agent_name(agent), "count": len(stored)})
+        return stored
+    except Exception as e:
+        log("warn", "relationship extraction failed", {"agent": sanitize_agent_name(agent), "error": str(e)})
+        return []
+
+
 async def fetch_agent_names() -> list[str]:
     pool = ensure_pool()
     rows = await pool.fetch("SELECT DISTINCT agent FROM memories ORDER BY agent")
@@ -603,6 +692,45 @@ async def list_memories_for_agent(agent: Optional[str], limit: int = 100, memory
     sql += f" ORDER BY created_at DESC LIMIT ${idx}"
     params.append(limit)
     return await pool.fetch(sql, *params)
+
+
+async def get_co_access_scores(agent: str, memory_ids: list[str], limit: int = 10) -> dict[str, float]:
+    if not agent or not memory_ids:
+        return {}
+    pool = ensure_pool()
+    agent_name = sanitize_agent_name(agent)
+    count_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM access_log WHERE agent = $1", agent_name)
+    if int(count_row["count"] or 0) < 5:
+        return {}
+    rows = await pool.fetch(
+        """
+        SELECT a2.memory_id AS partner_memory_id, COUNT(*)::float AS co_count
+        FROM access_log a1
+        JOIN access_log a2
+          ON a1.agent = a2.agent
+         AND a1.query_hash = a2.query_hash
+        WHERE a1.agent = $1
+          AND a1.memory_id = ANY($2::text[])
+          AND a2.memory_id IS NOT NULL
+          AND a2.memory_id <> a1.memory_id
+        GROUP BY a2.memory_id
+        ORDER BY co_count DESC
+        LIMIT $3
+        """,
+        agent_name,
+        memory_ids,
+        limit,
+    )
+    if not rows:
+        return {}
+    max_count = max(float(row["co_count"] or 0.0) for row in rows) or 1.0
+    scores = {}
+    for row in rows:
+        partner_id = row["partner_memory_id"]
+        if not partner_id:
+            continue
+        scores[str(partner_id)] = float(row["co_count"] or 0.0) / max_count
+    return scores
 
 
 async def run_hybrid_search(query: str, limit: int = 5, agent: Optional[str] = None, where: Optional[dict] = None):
@@ -670,12 +798,25 @@ async def run_hybrid_search(query: str, limit: int = 5, agent: Optional[str] = N
         pool.fetch(keyword_sql, *keyword_params),
     )
     keyword_score_by_id = {row["id"]: float(row["keyword_score"] or 0.0) for row in keyword_rows}
+    max_keyword_score = max(keyword_score_by_id.values()) if keyword_score_by_id else 1.0
+    candidate_ids = [row["id"] for row in vector_rows if row["id"]]
+    co_access_scores = {}
+    use_four_signal = False
+    if agent and candidate_ids:
+        co_access_scores = await get_co_access_scores(agent, candidate_ids, limit=max(limit * 3, 10))
+        use_four_signal = bool(co_access_scores)
     merged = []
     for row in vector_rows:
-        vector_score = max(0.0, float(row["vector_score"] or 0.0))
-        keyword_score = max(0.0, keyword_score_by_id.get(row["id"], 0.0))
-        combined = 0.6 * vector_score + 0.4 * keyword_score
-        merged.append(memory_row_to_result(row, vector_score=vector_score, keyword_score=keyword_score, similarity=combined))
+        vector_score = max(0.0, min(1.0, float(row["vector_score"] or 0.0)))
+        raw_keyword_score = max(0.0, keyword_score_by_id.get(row["id"], 0.0))
+        normalized_keyword = raw_keyword_score / max_keyword_score if max_keyword_score > 0 else 0.0
+        importance_score = max(0.0, min(1.0, float(row["importance"] or 0.0)))
+        co_access_score = max(0.0, min(1.0, float(co_access_scores.get(row["id"], 0.0))))
+        if use_four_signal:
+            combined = 0.50 * vector_score + 0.30 * normalized_keyword + 0.10 * importance_score + 0.10 * co_access_score
+        else:
+            combined = 0.6 * vector_score + 0.4 * normalized_keyword
+        merged.append(memory_row_to_result(row, vector_score=vector_score, keyword_score=normalized_keyword, similarity=combined))
     merged.sort(key=lambda item: item["similarity"], reverse=True)
     return merged[:limit]
 
@@ -1239,6 +1380,62 @@ async def cognitive_status():
     }
 
 
+@app.get("/relationships")
+async def get_relationships(agent: str, entity: Optional[str] = None, limit: int = 20):
+    pool = ensure_pool()
+    agent_name = sanitize_agent_name(agent)
+    limit = max(1, min(int(limit), 200))
+    if entity:
+        rows = await pool.fetch(
+            """
+            SELECT id, agent, entity_a, entity_b, relation_type, strength, evidence_count, last_observed, metadata
+            FROM relationships
+            WHERE agent = $1 AND (entity_a = $2 OR entity_b = $2)
+            ORDER BY strength DESC, evidence_count DESC, last_observed DESC
+            LIMIT $3
+            """,
+            agent_name,
+            entity,
+            limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, agent, entity_a, entity_b, relation_type, strength, evidence_count, last_observed, metadata
+            FROM relationships
+            WHERE agent = $1
+            ORDER BY strength DESC, evidence_count DESC, last_observed DESC
+            LIMIT $2
+            """,
+            agent_name,
+            limit,
+        )
+    relationships = []
+    for row in rows:
+        relationships.append(
+            {
+                "id": row["id"],
+                "agent": row["agent"],
+                "entity_a": row["entity_a"],
+                "entity_b": row["entity_b"],
+                "relation_type": row["relation_type"],
+                "strength": float(row["strength"] or 0.0),
+                "evidence_count": int(row["evidence_count"] or 0),
+                "last_observed": format_timestamp(row["last_observed"]) if row["last_observed"] else "",
+                "metadata": safe_metadata(row["metadata"]),
+            }
+        )
+    return {"relationships": relationships, "count": len(relationships)}
+
+
+@app.get("/co-access")
+async def co_access(agent: str, memory_id: str, limit: int = 10):
+    scores = await get_co_access_scores(agent, [memory_id], limit=max(1, min(int(limit), 100)))
+    items = [{"memory_id": memory_id, "score": round(float(score), 4)} for memory_id, score in scores.items()]
+    items.sort(key=lambda item: item["score"], reverse=True)
+    return {"agent": sanitize_agent_name(agent), "memory_id": memory_id, "associations": items[:limit], "count": len(items[:limit])}
+
+
 @app.post("/query")
 async def query(req: QueryRequest):
     where = req.where.copy() if req.where else {}
@@ -1367,7 +1564,19 @@ async def remember(req: RememberRequest):
         embedding_text = vector_literal(embedding_values)
         importance_task = score_importance(fact)
         contradictions_task = detect_fact_contradictions(agent, fact, embedding_text)
-        importance_scope, contradictions = await asyncio.gather(importance_task, contradictions_task)
+        relationships_task = extract_relationships(fact, agent)
+        importance_scope, contradictions, _ = await asyncio.gather(
+            importance_task,
+            contradictions_task,
+            relationships_task,
+            return_exceptions=True,
+        )
+        if isinstance(importance_scope, Exception):
+            log("warn", "importance scoring failed", {"agent": agent, "error": str(importance_scope)})
+            importance_scope = (0.5, "session")
+        if isinstance(contradictions, Exception):
+            log("warn", "contradiction detection failed", {"agent": agent, "error": str(contradictions)})
+            contradictions = []
         importance, scope = importance_scope
         fact_meta["importance"] = round(importance, 4)
         fact_meta["scope"] = scope
@@ -1491,6 +1700,78 @@ async def list_memories(agent: str = None, limit: int = 100, type: str = None):
     memories.sort(key=lambda x: x["timestamp"], reverse=True)
     memories = memories[:limit]
     return {"memories": memories, "count": len(memories)}
+
+
+@app.patch("/memories/{memory_id}")
+async def update_memory(memory_id: str, req: UpdateMemoryRequest):
+    row = await find_memory_record(memory_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="memory not found")
+    if req.type is not None and req.type not in MEMORY_TYPES:
+        raise HTTPException(status_code=400, detail="invalid memory type")
+    if req.layer is not None and req.layer not in COGNITIVE_LAYERS:
+        raise HTTPException(status_code=400, detail="invalid cognitive layer")
+    if req.importance is not None and not (0.0 <= float(req.importance) <= 1.0):
+        raise HTTPException(status_code=400, detail="importance must be between 0.0 and 1.0")
+
+    content = row["content"]
+    memory_type = row["type"]
+    layer = row["layer"]
+    importance = float(row["importance"] or 0.5)
+    tags = row["tags"] or ""
+    embedding_text = None
+    expires_at = row["expires_at"]
+    metadata = row_to_metadata(row)
+
+    if req.content is not None:
+        content = req.content
+        embedding_values = (await embed([content]))[0]
+        embedding_text = vector_literal(embedding_values)
+        metadata["content_updated_at"] = format_timestamp()
+    if req.type is not None:
+        memory_type = req.type
+        metadata["type"] = req.type
+    if req.layer is not None:
+        layer = req.layer
+        expires_at = expires_at_for_layer(layer)
+        metadata["layer"] = req.layer
+    if req.importance is not None:
+        importance = max(0.0, min(1.0, float(req.importance)))
+        metadata["importance"] = round(importance, 4)
+    if req.tags is not None:
+        tags = req.tags
+        metadata["tags"] = req.tags
+
+    metadata["updated_at"] = format_timestamp()
+    if embedding_text is None:
+        existing_embedding = await ensure_pool().fetchrow("SELECT embedding FROM memories WHERE id = $1", memory_id)
+        embedding_text = str(existing_embedding["embedding"])
+
+    await ensure_pool().execute(
+        """
+        UPDATE memories
+        SET content = $2,
+            embedding = $3::vector,
+            type = $4,
+            layer = $5,
+            importance = $6,
+            tags = $7,
+            metadata = $8::jsonb,
+            expires_at = $9
+        WHERE id = $1
+        """,
+        memory_id,
+        content,
+        embedding_text,
+        memory_type,
+        layer,
+        importance,
+        tags,
+        json.dumps(metadata),
+        expires_at,
+    )
+    updated = await find_memory_record(memory_id)
+    return {"updated": True, "memory": memory_row_to_result(updated)}
 
 
 @app.post("/prune")
