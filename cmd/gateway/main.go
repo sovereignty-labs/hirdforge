@@ -220,27 +220,33 @@ type agentHealthResponse struct {
 }
 
 type gateway struct {
-	mu             sync.RWMutex
-	agents         map[string]*Agent
-	order          []string
-	eventMu        sync.Mutex
-	events         []Event
-	eventCap       int
-	k8s            *k8sState
-	wsMu           sync.Mutex
-	wsConns        []*wsClient
-	sessionStore   *sessionStore
-	settings       *settingsStore
-	notifMu        sync.Mutex
-	notifications  []Notification
-	notifCap       int
-	lastSessionMu  sync.RWMutex
-	lastSession    map[string]string
-	arMu           sync.RWMutex
-	activeRequests map[string]*ActiveRequest
-	injectionMu    sync.Mutex
-	injections     map[string][]InjectionMessage // keyed by agent name
-	pausedAgents   map[string]bool
+	mu                sync.RWMutex
+	agents            map[string]*Agent
+	order             []string
+	eventMu           sync.Mutex
+	events            []Event
+	eventCap          int
+	k8s               *k8sState
+	wsMu              sync.Mutex
+	wsConns           []*wsClient
+	sessionStore      *sessionStore
+	settings          *settingsStore
+	notifMu           sync.Mutex
+	notifications     []Notification
+	notifCap          int
+	lastSessionMu     sync.RWMutex
+	lastSession       map[string]string
+	arMu              sync.RWMutex
+	activeRequests    map[string]*ActiveRequest
+	injectionMu       sync.Mutex
+	injections        map[string][]InjectionMessage // keyed by agent name
+	pausedAgents      map[string]bool
+	webhookSecret     string
+	reviewAgent       string
+	taskRepo          string
+	giteaURL          string
+	giteaToken        string
+	discordWebhookURL string
 }
 
 type settingsStore struct {
@@ -1434,6 +1440,9 @@ func main() {
 	giteaRepo := flag.String("gitea-repo", "gitea_admin/project_valhalla", "Gitea repo in owner/name format")
 	lockboxURL := flag.String("lockbox-url", "", "Lockbox base URL for approval queue proxy")
 	discordWebhookURL := flag.String("discord-webhook-url", "", "Discord webhook URL for new approval notifications")
+	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for validating Gitea webhooks")
+	reviewAgent := flag.String("review-agent", "freya", "Agent to dispatch for automated PR reviews")
+	taskRepo := flag.String("task-repo", "kit/hirdforge-tasks", "Task board repository in owner/name format")
 	flag.Parse()
 	if strings.TrimSpace(*agentsFlag) == "" {
 		die("missing --agents", fmt.Errorf("required"))
@@ -1444,19 +1453,25 @@ func main() {
 		die("failed to parse --agents", err)
 	}
 	gw := &gateway{
-		agents:         agents,
-		order:          order,
-		events:         make([]Event, 0, 200),
-		eventCap:       200,
-		k8s:            initK8s(),
-		sessionStore:   newSessionStore(),
-		settings:       newSettingsStore(),
-		notifications:  make([]Notification, 0, 100),
-		notifCap:       100,
-		lastSession:    map[string]string{},
-		activeRequests: map[string]*ActiveRequest{},
-		injections:     map[string][]InjectionMessage{},
-		pausedAgents:   map[string]bool{},
+		agents:            agents,
+		order:             order,
+		events:            make([]Event, 0, 200),
+		eventCap:          200,
+		k8s:               initK8s(),
+		sessionStore:      newSessionStore(),
+		settings:          newSettingsStore(),
+		notifications:     make([]Notification, 0, 100),
+		notifCap:          100,
+		lastSession:       map[string]string{},
+		activeRequests:    map[string]*ActiveRequest{},
+		injections:        map[string][]InjectionMessage{},
+		pausedAgents:      map[string]bool{},
+		webhookSecret:     strings.TrimSpace(*webhookSecret),
+		reviewAgent:       strings.TrimSpace(*reviewAgent),
+		taskRepo:          strings.TrimSpace(*taskRepo),
+		giteaURL:          strings.TrimSpace(*giteaURL),
+		giteaToken:        resolveGatewayGiteaToken(*giteaToken),
+		discordWebhookURL: strings.TrimSpace(*discordWebhookURL),
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
 	gw.refreshAgentHealth()
@@ -2913,6 +2928,7 @@ func main() {
 		}
 	})
 	registerGatewayMCP(mux)
+	gw.registerWebhookHandlers(mux)
 	mux.HandleFunc("/api/v1/ping", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2991,6 +3007,11 @@ func main() {
 			}
 		}()
 	}
+
+	go func() {
+		time.Sleep(10 * time.Second)
+		gw.ensureGiteaWebhooks()
+	}()
 
 	addr := ":" + *port
 	log.Printf("Valhalla Gateway listening on %s", addr)
