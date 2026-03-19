@@ -292,7 +292,7 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 
 	giteaClient := &http.Client{Timeout: 10 * time.Second}
 	issuePath := fmt.Sprintf(
-		"/api/v1/repos/%s/%s/issues?type=issues&state=open&labels=%s&sort=oldest&limit=1",
+		"/api/v1/repos/%s/%s/issues?type=issues&state=open&labels=%s&sort=oldest&limit=10",
 		url.PathEscape(taskOwner),
 		url.PathEscape(taskRepoName),
 		url.QueryEscape("status/ready"),
@@ -312,9 +312,30 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		return
 	}
 
-	task := parseWebhookIssue(issues[0])
-	if task.Number == 0 {
-		log.Printf("webhook: task dispatch skipped after PR #%d on %s: issue payload missing number", pr.Number, pr.Repo)
+	var task webhookIssue
+	foundDispatchable := false
+	for _, rawIssue := range issues {
+		candidate := parseWebhookIssue(rawIssue)
+		if candidate.Number == 0 {
+			continue
+		}
+		skip := false
+		for _, label := range candidate.Labels {
+			if label == "tier/codex" {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			log.Printf("webhook: skipping tier/codex task #%d during dispatch scan", candidate.Number)
+			continue
+		}
+		task = candidate
+		foundDispatchable = true
+		break
+	}
+	if !foundDispatchable {
+		log.Printf("webhook: no dispatchable tasks after PR #%d on %s", pr.Number, pr.Repo)
 		return
 	}
 	tierName := ""
@@ -391,7 +412,7 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 	}
 
 	taskReqBody, err := json.Marshal(map[string]string{
-		"content":    task.Body,
+		"content":    wrapTaskForDispatch(task.Body, task.Number),
 		"session_id": fmt.Sprintf("webhook-task-%d", task.Number),
 	})
 	if err != nil {
@@ -620,6 +641,34 @@ func parseWebhookIssue(raw map[string]interface{}) webhookIssue {
 		}
 	}
 	return issue
+}
+
+func wrapTaskForDispatch(taskBody string, taskNumber int64) string {
+	return fmt.Sprintf(`AUTONOMOUS TASK DISPATCH - Issue #%d
+
+CRITICAL RULES:
+1. Execute EVERY step as a tool call. Do NOT describe or narrate steps - CALL THE TOOL.
+2. If you find yourself writing "I will now..." - STOP and make the actual tool call.
+3. After EVERY tool call, check the output before proceeding.
+4. If any step fails, try to fix it. If you cannot fix it after 2 attempts, stop.
+
+ENVIRONMENT: This container runs Alpine sh (POSIX). No bash. No associative arrays. Use sort/uniq/awk.
+
+VERIFICATION REQUIRED:
+- After git push: run `+"`"+`git ls-remote origin <branch>`+"`"+` to verify the branch exists on remote.
+- After gitea create-pr: confirm the tool returned a PR URL.
+- If push or PR creation fails, debug and retry.
+
+The task is NOT done until a PR URL is confirmed.
+
+--- TASK BODY ---
+
+%s
+
+--- END TASK BODY ---
+
+Remember: Execute tools, don't narrate. Verify push with ls-remote. Confirm PR URL.
+`, taskNumber, taskBody)
 }
 
 func (g *gateway) pickHealthyTaskAgent(tierName, preferred string) (string, bool) {
