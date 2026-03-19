@@ -3746,6 +3746,52 @@ func notifyGateway(gatewayURL, eventType, agentName, message string) {
 	}()
 }
 
+func verifyPRExists(giteaURL, giteaToken, prURL string) (bool, error) {
+	prURL = strings.TrimSpace(prURL)
+	if strings.TrimSpace(giteaURL) == "" || prURL == "" {
+		return false, nil
+	}
+	prRE := regexp.MustCompile(`https?://[^/]+/([^/]+)/([^/]+)/pulls/(\d+)`)
+	matches := prRE.FindStringSubmatch(prURL)
+	if len(matches) != 4 {
+		return false, fmt.Errorf("invalid PR URL: %s", prURL)
+	}
+	owner := matches[1]
+	repo := matches[2]
+	number := matches[3]
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		strings.TrimRight(giteaURL, "/")+"/api/v1/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo)+"/pulls/"+url.PathEscape(number),
+		nil,
+	)
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(giteaToken) != "" {
+		req.Header.Set("Authorization", "token "+strings.TrimSpace(giteaToken))
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+	var out struct {
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return false, err
+	}
+	state := strings.TrimSpace(strings.ToLower(out.State))
+	return state == "open" || state == "closed", nil
+}
+
 func statusPayload() map[string]interface{} {
 	return map[string]interface{}{
 		"status":          "ready",
@@ -5029,10 +5075,24 @@ func main() {
 					break
 				}
 				if gateResult.Passed {
-					if record, completeErr := taskTracker.Complete(trackerKey, result, true); completeErr == nil {
-						reportTrackedState(record)
+					prRE := regexp.MustCompile(`https?://[^\s]+/[^/]+/[^/]+/pulls/\d+`)
+					prURL := prRE.FindString(result)
+					if prURL != "" && strings.TrimSpace(*giteaURL) != "" {
+						exists, verifyErr := verifyPRExists(*giteaURL, giteaToken, prURL)
+						if verifyErr != nil {
+							log.Printf("PR verification error: %v", verifyErr)
+						} else if !exists {
+							gateResult.Passed = false
+							gateResult.Nudges = []string{"VERIFICATION FAILED: The PR URL you reported does not exist in Gitea. You must actually create the PR using the gitea create-pr tool or exec+curl. Do not report a PR URL unless the tool confirmed creation. Try again."}
+							log.Printf("PR verification failed: %s does not exist", prURL)
+						}
 					}
-					break
+					if gateResult.Passed {
+						if record, completeErr := taskTracker.Complete(trackerKey, result, true); completeErr == nil {
+							reportTrackedState(record)
+						}
+						break
+					}
 				}
 				record, ok := taskTracker.Task(trackerKey)
 				if !ok {
