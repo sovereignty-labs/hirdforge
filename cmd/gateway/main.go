@@ -31,7 +31,7 @@ import (
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 const agentRequestTimeout = 120 * time.Second
-const streamingAgentTimeout = 600 * time.Second
+var streamTimeout = 600 * time.Second
 
 //go:embed index.html
 var dashboardHTML string
@@ -1446,6 +1446,16 @@ func main() {
 	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
 	seidrURLFlag := flag.String("seidr-url", "http://seidr.valhalla.svc:8082", "Seidr memory service URL")
 	flag.Parse()
+	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err != nil {
+			log.Printf("invalid GATEWAY_STREAM_TIMEOUT_SECONDS=%q: %v", raw, err)
+		} else if n > 0 {
+			streamTimeout = time.Duration(n) * time.Second
+		} else {
+			log.Printf("ignoring non-positive GATEWAY_STREAM_TIMEOUT_SECONDS=%q", raw)
+		}
+	}
+	log.Printf("gateway stream timeout configured to %s", streamTimeout)
 	if strings.TrimSpace(*agentsFlag) == "" {
 		die("missing --agents", fmt.Errorf("required"))
 	}
@@ -1518,7 +1528,7 @@ func main() {
 	}
 
 	proxyClient := &http.Client{Timeout: agentRequestTimeout}
-	streamClient := &http.Client{Timeout: streamingAgentTimeout}
+	streamClient := &http.Client{Timeout: streamTimeout}
 	giteaClient := &http.Client{Timeout: 10 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -2683,7 +2693,7 @@ func main() {
 		gw.lastSessionMu.Unlock()
 		gw.addEvent("message", in.Agent, fmt.Sprintf("Message sent to %s", in.Agent))
 
-		agentCtx, agentCancel := context.WithTimeout(context.Background(), streamingAgentTimeout)
+		agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
 		defer agentCancel()
 		gw.setActiveRequest(in.Agent, sessionID, agentCancel)
 		defer gw.clearActiveRequest(in.Agent, agentCancel)

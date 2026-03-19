@@ -219,7 +219,7 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	agentClient := &http.Client{Timeout: streamingAgentTimeout}
+	agentClient := &http.Client{Timeout: streamTimeout}
 	agentResp, err := agentClient.Do(req)
 	if err != nil {
 		log.Printf("webhook: review dispatch failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
