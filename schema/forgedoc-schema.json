@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hirdforge.dev/schema/forgedoc-schema.json",
+  "title": "Hirdforge Forgedoc Configuration Schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["domain", "agents"],
+  "properties": {
+    "domain": {
+      "type": "string",
+      "description": "Primary domain for the Hirdforge deployment"
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": { "type": "string" },
+        "clientId": { "type": "string" },
+        "clientSecretRef": { "type": "string" },
+        "callbackPath": { "type": "string" }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": { "type": "string" },
+        "issuer": { "type": "string" }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "description": "Named secrets referenced by other sections (e.g. auth, git)",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string" },
+          "ref": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "monitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": { "type": "string" },
+        "endpoint": { "type": "string" }
+      }
+    },
+    "inference": {
+      "type": "object",
+      "description": "Global inference configuration",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "apiKeyRef": { "type": "string" },
+        "baseUrl": { "type": "string", "format": "uri" }
+      }
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "role", "model"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Agent name (e.g. val, leif, chuck)"
+          },
+          "role": {
+            "type": "string",
+            "description": "High-level responsibility of the agent",
+            "enum": ["builder", "reviewer", "orchestrator", "observer", "utility"]
+          },
+          "model": {
+            "type": "string",
+            "description": "Model identifier used for this agent"
+          },
+          "tools": {
+            "type": "array",
+            "description": "Tools available to this agent",
+            "items": {
+              "type": "string",
+              "enum": [
+                "exec",
+                "read",
+                "write",
+                "edit",
+                "git-clone",
+                "git-commit",
+                "git-diff",
+                "gitea",
+                "http",
+                "delegate",
+                "broadcast",
+                "remember",
+                "recall",
+                "memory-edit"
+              ]
+            },
+            "uniqueItems": true
+          },
+          "memory": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": { "type": "boolean" },
+              "collection": { "type": "string" }
+            }
+          },
+          "inference": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "provider": { "type": "string" },
+              "model": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "description": "Global memory configuration",
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string" },
+        "baseUrl": { "type": "string", "format": "uri" }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": { "type": "string" },
+        "tokenRef": { "type": "string" },
+        "defaultOwner": { "type": "string" }
+      }
+    }
+  }
+}
