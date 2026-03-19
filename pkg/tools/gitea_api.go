@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -122,9 +123,12 @@ func (t *GiteaAPITool) apiRequest(method, path string, body interface{}) ([]byte
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	t.Token = resolveGiteaToken(t.Token)
-	if t.Token != "" {
-		req.Header.Set("Authorization", "token "+t.Token)
+	token := t.Token
+	if token == "" {
+		token = resolveGiteaToken("")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "token "+token)
 	}
 
 	resp, err := t.Client.Do(req)
@@ -144,6 +148,21 @@ func (t *GiteaAPITool) createIssue(owner, repo string, args map[string]interface
 	title, _ := args["title"].(string)
 	body, _ := args["body"].(string)
 	labelsCSV, _ := args["labels"].(string)
+	if title == "" {
+		if v, ok := args["title"]; ok {
+			title = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	if body == "" {
+		if v, ok := args["body"]; ok {
+			body = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	if labelsCSV == "" {
+		if v, ok := args["labels"]; ok {
+			labelsCSV = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
 	if title == "" {
 		return ToolResult{Error: t.actionUsage("create-issue")}
 	}
@@ -214,6 +233,11 @@ func (t *GiteaAPITool) resolveLabelIDs(owner, repo, labelsCSV string) ([]int, er
 
 func (t *GiteaAPITool) comment(owner, repo string, args map[string]interface{}) ToolResult {
 	body, _ := args["body"].(string)
+	if body == "" {
+		if v, ok := args["body"]; ok {
+			body = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
 	if body == "" {
 		return ToolResult{Error: t.actionUsage("comment")}
 	}
@@ -452,6 +476,27 @@ func (t *GiteaAPITool) createPR(owner, repo string, args map[string]interface{})
 	body, _ := args["body"].(string)
 	head, _ := args["head"].(string)
 	base, _ := args["base"].(string)
+	if title == "" {
+		if v, ok := args["title"]; ok {
+			title = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	if head == "" {
+		if v, ok := args["head"]; ok {
+			head = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	if body == "" {
+		if v, ok := args["body"]; ok {
+			body = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	if base == "" {
+		if v, ok := args["base"]; ok {
+			base = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	log.Printf("gitea: create-pr owner=%s repo=%s title=%q head=%q base=%q token_len=%d", owner, repo, title, head, base, len(t.Token))
 
 	if title == "" {
 		return ToolResult{Error: t.actionUsage("create-pr")}
@@ -472,6 +517,9 @@ func (t *GiteaAPITool) createPR(owner, repo string, args map[string]interface{})
 	resp, status, err := t.apiRequest("POST", fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), payload)
 	if err != nil {
 		return ToolResult{Error: err.Error()}
+	}
+	if status == 404 {
+		return ToolResult{Error: fmt.Sprintf("HTTP 404: branch %q may not exist on remote, or token lacks permission. Push the branch first, then retry. Raw: %s", head, string(resp))}
 	}
 	if status >= 400 {
 		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(resp))}
