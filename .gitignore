@@ -21,3 +21,5 @@ dist/
 cmd/gateway/index.html.bak
 cmd/gateway/index.html.pre-s6
 /gateway
+
+__pycache__/
