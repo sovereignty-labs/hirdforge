@@ -3912,6 +3912,7 @@ func main() {
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write,edit", "comma-separated enabled tools")
 	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
+	maxToolRounds := flag.Int("max-tool-rounds", 30, "maximum LLM inference rounds in the tool-calling loop")
 	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
 	soulMaxLines := flag.Int("soul-max-lines", 80, "maximum number of lines allowed in a SOUL file")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
@@ -4570,7 +4571,7 @@ func main() {
 			}
 		}
 
-		for i := 0; i < 10; i++ {
+		for i := 0; i < *maxToolRounds; i++ {
 			if *maxContext > 0 && len(messages)-1 > int(float64(*maxContext)*0.8) {
 				trimmed := progressiveTrim(messages[1:], *maxContext)
 				messages = append([]message{messages[0]}, trimmed...)
@@ -4597,7 +4598,8 @@ func main() {
 			}
 			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
 			executeToolCalls(assistant.ToolCalls)
-			if i == 19 {
+			if i == *maxToolRounds-1 {
+				log.Printf("[TOOL_LIMIT] agent=%s model=%s session=%s — reached %d tool rounds", agentName, *model, sessionID, *maxToolRounds)
 				_ = emit(sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
 			}
 		}
