@@ -44,9 +44,11 @@ def get_memory_count(base_url, agent):
     data, err = fetch_json(url)
     if err:
         return None, err
-    if not isinstance(data, list):
-        return None, f"unexpected response type: {type(data).__name__}"
-    return len(data), None
+    if isinstance(data, dict):
+        return data.get("count", 0), None
+    if isinstance(data, list):
+        return len(data), None
+    return None, f"unexpected response type: {type(data).__name__}"
 
 
 def get_total_count(base_url):
