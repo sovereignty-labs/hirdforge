@@ -223,6 +223,8 @@ type gateway struct {
 	mu                sync.RWMutex
 	agents            map[string]*Agent
 	order             []string
+	prReviewMu        sync.RWMutex
+	prReviewState     map[string]prReviewState
 	eventMu           sync.Mutex
 	events            []Event
 	eventCap          int
@@ -1475,6 +1477,7 @@ func main() {
 		notifications:     make([]Notification, 0, 100),
 		notifCap:          100,
 		lastSession:       map[string]string{},
+		prReviewState:     map[string]prReviewState{},
 		activeRequests:    map[string]*ActiveRequest{},
 		injections:        map[string][]InjectionMessage{},
 		pausedAgents:      map[string]bool{},

@@ -32,6 +32,7 @@ type webhookPR struct {
 	Title   string
 	Body    string
 	Repo    string
+	Base    string
 	Head    string
 	HTMLURL string
 	User    string
@@ -49,6 +50,21 @@ type webhookIssue struct {
 	Title  string
 	Body   string
 	Labels []string
+}
+
+type webhookPRReview struct {
+	PRNumber    int64
+	PRTitle     string
+	PRHead      string
+	Repo        string
+	ReviewBody  string
+	ReviewState string
+	Reviewer    string
+}
+
+type prReviewState struct {
+	PeerReviewed bool
+	PeerAgent    string
 }
 
 func (g *gateway) validateWebhookSignature(body []byte, signature string) bool {
@@ -87,7 +103,8 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
-	if strings.TrimSpace(r.Header.Get("X-Gitea-Event")) != "pull_request" {
+	giteaEvent := strings.TrimSpace(r.Header.Get("X-Gitea-Event"))
+	if giteaEvent != "pull_request" && giteaEvent != "pull_request_review" {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
 		return
 	}
@@ -113,6 +130,7 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 				} `json:"repo"`
 			} `json:"head"`
 			Base struct {
+				Ref  string `json:"ref"`
 				Repo struct {
 					FullName string `json:"full_name"`
 				} `json:"repo"`
@@ -136,24 +154,102 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		Title:   strings.TrimSpace(payload.PullRequest.Title),
 		Body:    payload.PullRequest.Body,
 		Repo:    repo,
+		Base:    strings.TrimSpace(payload.PullRequest.Base.Ref),
 		Head:    strings.TrimSpace(payload.PullRequest.Head.Ref),
 		HTMLURL: strings.TrimSpace(payload.PullRequest.HTMLURL),
 		User:    strings.TrimSpace(payload.PullRequest.User.Login),
 		Merged:  payload.PullRequest.Merged,
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+	if giteaEvent == "pull_request" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 
-	switch {
-	case strings.TrimSpace(payload.Action) == "opened":
-		go g.handleAgentPROpened(pr)
-	case strings.TrimSpace(payload.Action) == "closed" && pr.Merged:
-		go g.handlePRMerged(pr)
+		switch {
+		case strings.TrimSpace(payload.Action) == "opened":
+			go g.handleAgentPROpened(pr)
+		case strings.TrimSpace(payload.Action) == "synchronized":
+			go g.handleAgentPRSynchronized(pr)
+		case strings.TrimSpace(payload.Action) == "closed" && pr.Merged:
+			go g.handlePRMerged(pr)
+		}
+		return
+	}
+
+	if giteaEvent == "pull_request_review" {
+		var reviewPayload struct {
+			Action     string `json:"action"`
+			Repository struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+			Review struct {
+				Number int64 `json:"number"`
+				State  string `json:"state"`
+				Body   string `json:"body"`
+				User   struct {
+					Login string `json:"login"`
+				} `json:"user"`
+			} `json:"review"`
+			PullRequest struct {
+				Number  int64 `json:"number"`
+				Title   string `json:"title"`
+				Head    struct {
+					Ref string `json:"ref"`
+				} `json:"head"`
+				Base struct {
+					Ref  string `json:"ref"`
+					Repo struct {
+						FullName string `json:"full_name"`
+					} `json:"repo"`
+				} `json:"base"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal(body, &reviewPayload); err != nil {
+			log.Printf("webhook: failed to parse pull_request_review payload: %v", err)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "error"})
+			return
+		}
+
+		repo := strings.TrimSpace(reviewPayload.PullRequest.Base.Repo.FullName)
+		if repo == "" {
+			repo = strings.TrimSpace(reviewPayload.Repository.FullName)
+		}
+
+		if strings.TrimSpace(reviewPayload.Action) == "submitted" && reviewPayload.Review.State == "approved" {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+			go g.handlePRReviewApproved(webhookPRReview{
+				PRNumber:    reviewPayload.PullRequest.Number,
+				PRTitle:     strings.TrimSpace(reviewPayload.PullRequest.Title),
+				PRHead:      strings.TrimSpace(reviewPayload.PullRequest.Head.Ref),
+				Repo:        repo,
+				ReviewBody:  strings.TrimSpace(reviewPayload.Review.Body),
+				ReviewState: reviewPayload.Review.State,
+				Reviewer:    strings.TrimSpace(reviewPayload.Review.User.Login),
+			})
+		} else if strings.TrimSpace(reviewPayload.Action) == "submitted" && reviewPayload.Review.State == "changes_requested" {
+			rpr := webhookPRReview{
+				PRNumber:    reviewPayload.PullRequest.Number,
+				PRTitle:     strings.TrimSpace(reviewPayload.PullRequest.Title),
+				PRHead:      strings.TrimSpace(reviewPayload.PullRequest.Head.Ref),
+				Repo:        repo,
+				ReviewBody:  strings.TrimSpace(reviewPayload.Review.Body),
+				ReviewState: reviewPayload.Review.State,
+				Reviewer:    strings.TrimSpace(reviewPayload.Review.User.Login),
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+			go g.handleFreyaReviewFeedback(rpr)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
+		}
+		return
 	}
 }
 
 func (g *gateway) handleAgentPROpened(pr webhookPR) {
 	log.Printf("webhook: agent PR opened repo=%s number=%d author=%s", pr.Repo, pr.Number, pr.User)
+	if strings.EqualFold(pr.Base, "develop") {
+		g.dispatchPeerReview(pr)
+		return
+	}
 	if strings.HasPrefix(pr.Head, "ci/") {
 		log.Printf("webhook: review skipped for PR #%d on %s: ci branch %s", pr.Number, pr.Repo, pr.Head)
 		return
@@ -210,6 +306,16 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 	}
 	log.Printf("webhook: review completed for PR #%d on %s via freya: %s", pr.Number, pr.Repo, reviewText)
 	g.addEvent("webhook_review", "freya", fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
+}
+
+func (g *gateway) handleAgentPRSynchronized(pr webhookPR) {
+	if !strings.EqualFold(pr.Base, "develop") {
+		return
+	}
+	key := g.prReviewKey(pr.Repo, pr.Number)
+	g.clearPRReviewState(key)
+	log.Printf("webhook: reset review pipeline state for PR #%d on %s after synchronize", pr.Number, pr.Repo)
+	g.dispatchPeerReview(pr)
 }
 
 func (g *gateway) handlePRMerged(pr webhookPR) {
@@ -389,6 +495,253 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 	)
 }
 
+func (g *gateway) builderFromBranch(branch string) string {
+	candidate := strings.TrimSpace(strings.SplitN(branch, "/", 2)[0])
+	if candidate == "" {
+		return ""
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if _, ok := g.agents[candidate]; ok {
+		return candidate
+	}
+	return ""
+}
+
+func (g *gateway) prReviewKey(repo string, number int64) string {
+	return fmt.Sprintf("%s:%d", strings.TrimSpace(repo), number)
+}
+
+func (g *gateway) getPRReviewState(key string) (prReviewState, bool) {
+	g.prReviewMu.RLock()
+	defer g.prReviewMu.RUnlock()
+	state, ok := g.prReviewState[key]
+	return state, ok
+}
+
+func (g *gateway) setPRReviewState(key string, state prReviewState) {
+	g.prReviewMu.Lock()
+	defer g.prReviewMu.Unlock()
+	g.prReviewState[key] = state
+}
+
+func (g *gateway) clearPRReviewState(key string) {
+	g.prReviewMu.Lock()
+	defer g.prReviewMu.Unlock()
+	delete(g.prReviewState, key)
+}
+
+func (g *gateway) selectPeerReviewer(author string) (*Agent, bool) {
+	author = strings.TrimSpace(author)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, name := range g.order {
+		if name == "" || name == author || name == "freya" || name == "ragnar" {
+			continue
+		}
+		agent, ok := g.agents[name]
+		if !ok || agent == nil || !agent.Healthy {
+			continue
+		}
+		cp := *agent
+		return &cp, true
+	}
+	return nil, false
+}
+
+func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr webhookPR, prompt string, eventType string) error {
+	sessionID := fmt.Sprintf("webhook-review-%s-%d-%s", sanitizeWebhookToken(pr.Repo), pr.Number, sanitizeWebhookToken(agentName))
+	payload, err := json.Marshal(map[string]string{
+		"content":    prompt,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal review request: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agentURL, "/")+"/message", bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("create review request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return fmt.Errorf("dispatch review request: %w", err)
+	}
+	reviewText, err := readAgentSSEContent(resp)
+	if err != nil {
+		return fmt.Errorf("read review response: %w", err)
+	}
+	reviewText = strings.TrimSpace(thinkTagRE.ReplaceAllString(reviewText, ""))
+	log.Printf("webhook: %s completed for PR #%d on %s by %s: %s", eventType, pr.Number, pr.Repo, agentName, reviewText)
+	g.addEvent(eventType, agentName, fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
+	return nil
+}
+
+func (g *gateway) dispatchPeerReview(pr webhookPR) {
+	author := g.builderFromBranch(pr.Head)
+	if author == "" {
+		log.Printf("webhook: peer review skipped for PR #%d on %s: unable to detect author from %s", pr.Number, pr.Repo, pr.Head)
+		return
+	}
+	peer, ok := g.selectPeerReviewer(author)
+	if !ok {
+		log.Printf("webhook: peer review skipped for PR #%d on %s: no healthy peer reviewer available", pr.Number, pr.Repo)
+		return
+	}
+	key := g.prReviewKey(pr.Repo, pr.Number)
+	g.setPRReviewState(key, prReviewState{PeerAgent: peer.Name})
+	prompt := fmt.Sprintf(
+		"Review PR #%d on %s: %q. Read the diff using gitea tool with action list-pr-files on repo %s pr %d. Assess correctness, code quality, and style. Submit a formal PR review using gitea tool with action create-review on repo %s index %d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
+		pr.Number,
+		pr.Repo,
+		pr.Title,
+		pr.Repo,
+		pr.Number,
+		pr.Repo,
+		pr.Number,
+	)
+	if err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review"); err != nil {
+		g.clearPRReviewState(key)
+		log.Printf("webhook: peer review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, peer.Name, err)
+		return
+	}
+	log.Printf("webhook: queued peer review for PR #%d on %s via %s", pr.Number, pr.Repo, peer.Name)
+}
+
+func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
+	prompt := fmt.Sprintf(
+		"Peer review has approved PR #%d on %s: %q. Perform final review. Read the diff using gitea tool with action list-pr-files on repo %s pr %d. Submit a formal PR review using gitea tool with action create-review on repo %s index %d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
+		pr.Number,
+		pr.Repo,
+		pr.Title,
+		pr.Repo,
+		pr.Number,
+		pr.Repo,
+		pr.Number,
+	)
+	if err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review"); err != nil {
+		log.Printf("webhook: freya review dispatch failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+	}
+}
+
+func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
+	key := g.prReviewKey(review.Repo, review.PRNumber)
+	state, ok := g.getPRReviewState(key)
+	if !ok {
+		log.Printf("webhook: approved review ignored for PR #%d on %s: no pipeline state", review.PRNumber, review.Repo)
+		return
+	}
+
+	pr := webhookPR{
+		Number: review.PRNumber,
+		Title:  review.PRTitle,
+		Repo:   review.Repo,
+		Head:   review.PRHead,
+		Base:   "develop",
+	}
+
+	if !state.PeerReviewed {
+		if review.Reviewer != state.PeerAgent {
+			log.Printf("webhook: approved review ignored for PR #%d on %s: expected peer %s, got %s", review.PRNumber, review.Repo, state.PeerAgent, review.Reviewer)
+			return
+		}
+		state.PeerReviewed = true
+		g.setPRReviewState(key, state)
+		log.Printf("webhook: peer review approved for PR #%d on %s by %s; dispatching freya", review.PRNumber, review.Repo, review.Reviewer)
+		g.dispatchFreyaApprovalReview(pr)
+		return
+	}
+
+	if review.Reviewer != "freya" {
+		log.Printf("webhook: second approval ignored for PR #%d on %s: expected freya, got %s", review.PRNumber, review.Repo, review.Reviewer)
+		return
+	}
+
+	owner, repoName, ok := splitFullRepoName(review.Repo)
+	if !ok {
+		log.Printf("webhook: merge skipped for PR #%d: invalid repo %q", review.PRNumber, review.Repo)
+		return
+	}
+	payload := map[string]string{"Do": "merge"}
+	resp, err := giteaRequest(&http.Client{Timeout: 10 * time.Second}, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
+	if err != nil {
+		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("webhook: merge returned %d for PR #%d on %s: %s", resp.StatusCode, review.PRNumber, review.Repo, strings.TrimSpace(string(respBody)))
+		return
+	}
+	g.clearPRReviewState(key)
+	log.Printf("webhook: merged PR #%d on %s after peer and freya approvals", review.PRNumber, review.Repo)
+	g.addEvent("webhook_pr_merged", "freya", fmt.Sprintf("Merged PR #%d on %s", review.PRNumber, review.Repo))
+}
+
+func mustJSON(v interface{}) []byte {
+	body, _ := json.Marshal(v)
+	return body
+}
+
+func (g *gateway) handleFreyaReviewFeedback(review webhookPRReview) {
+	if review.Reviewer != "freya" {
+		log.Printf("webhook: review feedback ignored - reviewer is not freya")
+		return
+	}
+	builder := g.builderFromBranch(review.PRHead)
+	if builder == "" {
+		log.Printf("webhook: review feedback skipped - unable to detect builder from branch %s", review.PRHead)
+		return
+	}
+	agent, ok := g.getAgent(builder)
+	if !ok || !agent.Healthy {
+		log.Printf("webhook: review feedback skipped - builder agent %s not found or unhealthy", builder)
+		return
+	}
+	fixMsg := fmt.Sprintf(
+		"Freya reviewed PR #%d (%q) on %s and requested changes. Feedback: %s. Fix the issues and push to the same branch (%s). Do NOT create a new PR — push to existing branch.",
+		review.PRNumber,
+		review.PRTitle,
+		review.Repo,
+		review.ReviewBody,
+		review.PRHead,
+	)
+	sessionID := fmt.Sprintf("webhook-review-fix-%s-%d", sanitizeWebhookToken(review.Repo), review.PRNumber)
+	payload, err := json.Marshal(map[string]string{
+		"content":    fixMsg,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		log.Printf("webhook: build fix request failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("webhook: create fix request failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	agentClient := &http.Client{}
+	agentResp, err := agentClient.Do(req)
+	if err != nil {
+		log.Printf("webhook: fix dispatch failed for PR #%d on %s to %s: %v", review.PRNumber, review.Repo, builder, err)
+		return
+	}
+	defer agentResp.Body.Close()
+	if agentResp.StatusCode < 200 || agentResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(agentResp.Body, 2048))
+		log.Printf("webhook: fix dispatch returned %d for PR #%d on %s: %s", agentResp.StatusCode, review.PRNumber, review.Repo, strings.TrimSpace(string(body)))
+		return
+	}
+	log.Printf("webhook: queued fix request for PR #%d on %s to builder %s", review.PRNumber, review.Repo, builder)
+	g.addEvent("webhook_review_fix", builder, fmt.Sprintf("Queued fix request for PR #%d on %s", review.PRNumber, review.Repo))
+}
+
 func (g *gateway) sendDiscordWebhookNotification(title, description string, color int, fields []discordField) {
 	webhookURL := strings.TrimSpace(g.discordWebhookURL)
 	if webhookURL == "" {
@@ -486,7 +839,7 @@ func (g *gateway) ensureGiteaWebhooks() {
 				"content_type": "json",
 				"secret":       g.webhookSecret,
 			},
-			"events": []string{"pull_request"},
+			"events": []string{"pull_request", "pull_request_review"},
 		}
 		bodyJSON, err := json.Marshal(payload)
 		if err != nil {
