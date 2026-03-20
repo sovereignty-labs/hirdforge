@@ -14,36 +14,38 @@ import (
 )
 
 type GiteaAPITool struct {
-	GiteaURL string
-	Token    string
-	Client   *http.Client
+	GiteaURL        string
+	Token           string
+	ReviewersToken  string
+	Client          *http.Client
 }
 
 func NewGiteaAPITool(giteaURL, token string) *GiteaAPITool {
 	return &GiteaAPITool{
-		GiteaURL: strings.TrimRight(giteaURL, "/"),
-		Token:    resolveGiteaToken(token),
-		Client:   &http.Client{Timeout: 30 * time.Second},
+		GiteaURL:       strings.TrimRight(giteaURL, "/"),
+		Token:          resolveGiteaToken(token),
+		ReviewersToken: resolveGiteaReviewersToken(""),
+		Client:         &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
 func (t *GiteaAPITool) Name() string { return "gitea" }
 
 func (t *GiteaAPITool) Description() string {
-	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, update-labels"
+	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, create-review, merge-pr, update-labels"
 }
 
 func (t *GiteaAPITool) Parameters() map[string]string {
 	return map[string]string{
-		"action": "One of: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, update-labels",
+		"action": "One of: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, create-review, merge-pr, update-labels",
 		"owner":  "Repository owner for get-issue (optional if repo is owner/repo)",
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
 		"title":  "Title for issue or PR (create-issue, create-pr)",
-		"body":   "Body text for issue, comment, or PR description",
+		"body":   "Body text for issue, comment, PR description, or review text (create-review)",
 		"labels": "Comma-separated label names (create-issue, list-issues, update-labels)",
-		"state":  "Issue state for list-issues: open or closed (default open)",
+		"state":  "Issue state for list-issues: open or closed (default open), or review state for create-review: APPROVED or REQUEST_CHANGES",
 		"issue":  "Issue or PR number (comment, close-issue, update-labels)",
-		"index":  "Issue number for get-issue or update-labels",
+		"index":  "Issue or PR number for get-issue, update-labels, create-review, or merge-pr",
 		"head":   "Source branch for PR (create-pr)",
 		"base":   "Target branch for PR (create-pr, defaults to main)",
 	}
@@ -89,10 +91,14 @@ func (t *GiteaAPITool) Execute(args map[string]interface{}) ToolResult {
 		return t.closeIssue(owner, name, args)
 	case "create-pr":
 		return t.createPR(owner, name, args)
+	case "create-review":
+		return t.createReview(owner, name, args)
+	case "merge-pr":
+		return t.mergePR(owner, name, args)
 	case "update-labels":
 		return t.updateLabels(owner, name, args)
 	default:
-		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %q. Available actions: create-pr, create-issue, list-issues, close-issue, comment, get-issue, update-labels.", action)}
+		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %q. Available actions: create-pr, create-review, merge-pr, create-issue, list-issues, close-issue, comment, get-issue, update-labels.", action)}
 	}
 }
 
@@ -109,6 +115,10 @@ func (t *GiteaAPITool) parseRepo(repo string) (string, string) {
 }
 
 func (t *GiteaAPITool) apiRequest(method, path string, body interface{}) ([]byte, int, error) {
+	return t.apiRequestWithToken(method, path, body, t.Token)
+}
+
+func (t *GiteaAPITool) apiRequestWithToken(method, path string, body interface{}, token string) ([]byte, int, error) {
 	var reqBody io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -123,7 +133,6 @@ func (t *GiteaAPITool) apiRequest(method, path string, body interface{}) ([]byte
 		return nil, 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	token := t.Token
 	if token == "" {
 		token = resolveGiteaToken("")
 	}
@@ -532,6 +541,68 @@ func (t *GiteaAPITool) createPR(owner, repo string, args map[string]interface{})
 	return ToolResult{Output: fmt.Sprintf("created PR #%d: %s\n%s", int(num), title, url)}
 }
 
+func (t *GiteaAPITool) createReview(owner, repo string, args map[string]interface{}) ToolResult {
+	prNum := t.extractNumber(args["index"])
+	if prNum == 0 {
+		return ToolResult{Error: t.actionUsage("create-review")}
+	}
+	body, _ := args["body"].(string)
+	if body == "" {
+		if v, ok := args["body"]; ok {
+			body = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	state, _ := args["state"].(string)
+	if state == "" {
+		if v, ok := args["state"]; ok {
+			state = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	state = strings.ToUpper(strings.TrimSpace(state))
+	if body == "" || (state != "APPROVED" && state != "REQUEST_CHANGES") {
+		return ToolResult{Error: t.actionUsage("create-review")}
+	}
+	token := strings.TrimSpace(t.ReviewersToken)
+	if token == "" {
+		token = resolveGiteaReviewersToken("")
+	}
+	if token == "" {
+		return ToolResult{Error: "missing Gitea reviewers token"}
+	}
+
+	payload := map[string]string{
+		"body":  body,
+		"event": state,
+	}
+	resp, status, err := t.apiRequestWithToken("POST", fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, prNum), payload, token)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	if status >= 400 {
+		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(resp))}
+	}
+
+	return ToolResult{Output: fmt.Sprintf("submitted %s review on PR #%d", state, prNum)}
+}
+
+func (t *GiteaAPITool) mergePR(owner, repo string, args map[string]interface{}) ToolResult {
+	prNum := t.extractNumber(args["index"])
+	if prNum == 0 {
+		return ToolResult{Error: t.actionUsage("merge-pr")}
+	}
+
+	payload := map[string]string{"Do": "merge"}
+	resp, status, err := t.apiRequest("POST", fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", owner, repo, prNum), payload)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	if status >= 400 {
+		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(resp))}
+	}
+
+	return ToolResult{Output: fmt.Sprintf("merged PR #%d", prNum)}
+}
+
 func (t *GiteaAPITool) ReplaceLabels(owner, repo string, issueNum int, labelNames []string) error {
 	labelsCSV := strings.Join(labelNames, ",")
 	labelIDs, err := t.resolveLabelIDs(owner, repo, labelsCSV)
@@ -708,6 +779,14 @@ repo     Repository name
 index    Issue or PR number
 body     Comment text
 Example: gitea comment owner=kit repo=hirdforge-tasks index=24 body="PR: http://..."`
+	case "create-review":
+		return `gitea create-review — required params:
+owner    Repository owner
+repo     Repository name
+index    PR number
+body     Review text
+state    APPROVED or REQUEST_CHANGES
+Example: gitea create-review owner=gitea_admin repo=project_valhalla index=250 state=APPROVED body="LGTM"`
 	case "close-issue":
 		return `gitea close-issue — required params:
 owner    Repository owner
@@ -727,6 +806,12 @@ repo     Repository name
 state    (optional) open, closed, all (default: open)
 labels   (optional) Comma-separated label names to filter by
 Example: gitea list-issues owner=kit repo=hirdforge-tasks state=open labels="agent/leif,status/ready"`
+	case "merge-pr":
+		return `gitea merge-pr — required params:
+owner    Repository owner
+repo     Repository name
+index    PR number
+Example: gitea merge-pr owner=gitea_admin repo=project_valhalla index=250`
 	case "update-labels":
 		return `gitea update-labels — required params:
 owner    Repository owner
@@ -742,6 +827,8 @@ Example: gitea update-labels owner=kit repo=hirdforge-tasks index=42 labels="sta
 func (t *GiteaAPITool) giteaOverviewUsage() string {
 	return `Gitea tool — available actions:
 create-pr      Create a pull request
+create-review  Submit a formal PR review
+merge-pr       Merge a pull request
 create-issue   Create an issue (supports label names)
 list-issues    List issues with state/label filters
 close-issue    Close an issue

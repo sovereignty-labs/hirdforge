@@ -123,6 +123,7 @@ jobs:
             docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
           fi
   update-infra:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox]
     steps:
