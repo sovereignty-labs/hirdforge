@@ -153,13 +153,16 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		Merged:  payload.PullRequest.Merged,
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+	if giteaEvent == "pull_request" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 
-	switch {
-	case strings.TrimSpace(payload.Action) == "opened":
-		go g.handleAgentPROpened(pr)
-	case strings.TrimSpace(payload.Action) == "closed" && pr.Merged:
-		go g.handlePRMerged(pr)
+		switch {
+		case strings.TrimSpace(payload.Action) == "opened":
+			go g.handleAgentPROpened(pr)
+		case strings.TrimSpace(payload.Action) == "closed" && pr.Merged:
+			go g.handlePRMerged(pr)
+		}
+		return
 	}
 
 	if giteaEvent == "pull_request_review" {
@@ -457,11 +460,14 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 }
 
 func (g *gateway) builderFromBranch(branch string) string {
-	prefixes := []string{"leif/", "val/", "chuck/", "knut/", "orm/"}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(branch, prefix) {
-			return strings.TrimPrefix(branch, prefix)
-		}
+	candidate := strings.TrimSpace(strings.SplitN(branch, "/", 2)[0])
+	if candidate == "" {
+		return ""
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if _, ok := g.agents[candidate]; ok {
+		return candidate
 	}
 	return ""
 }
