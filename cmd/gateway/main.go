@@ -2714,6 +2714,13 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
 			return
 		}
+		if uResp.StatusCode == 429 {
+			b, _ := io.ReadAll(io.LimitReader(uResp.Body, 4096))
+			uResp.Body.Close()
+			log.Printf("rate limit: upstream agent returned 429 for %s", in.Agent)
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited", "detail": strings.TrimSpace(string(b))})
+			return
+		}
 		if uResp.StatusCode < 200 || uResp.StatusCode >= 300 {
 			b, _ := io.ReadAll(io.LimitReader(uResp.Body, 4096))
 			uResp.Body.Close()
