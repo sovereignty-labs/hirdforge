@@ -2322,7 +2322,7 @@ func main() {
 			writeJSON(w, http.StatusOK, []giteaPRInfo{})
 			return
 		}
-		repos := []string{"gitea_admin/project_valhalla", "kit/valhalla-infra"}
+		repos := []string{"gitea_admin/project_valhalla", "kit/valhalla-infra", "kit/hirdforge-personas", "kit/hirdforge-tasks"}
 		type query struct {
 			repo  string
 			state string
@@ -2331,8 +2331,12 @@ func main() {
 		queries := []query{
 			{repo: repos[0], state: "open", limit: 20},
 			{repo: repos[1], state: "open", limit: 20},
+			{repo: repos[2], state: "open", limit: 20},
+			{repo: repos[3], state: "open", limit: 20},
 			{repo: repos[0], state: "closed", limit: 10},
 			{repo: repos[1], state: "closed", limit: 10},
+			{repo: repos[2], state: "closed", limit: 10},
+			{repo: repos[3], state: "closed", limit: 10},
 		}
 		out := make([]giteaPRInfo, 0, 60)
 		for _, q := range queries {
@@ -2940,6 +2944,7 @@ func main() {
 			}
 		}
 	})
+	gw.registerHealthEndpoints(mux)
 	registerGatewayMCP(mux)
 	gw.registerWebhookHandlers(mux)
 	go func() {
