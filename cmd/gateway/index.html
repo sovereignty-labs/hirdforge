@@ -1499,7 +1499,6 @@ function App(){
       <Tab active={tab==="realm"} label="Realm" onClick={()=>setTab("realm")}/>
       <Tab active={tab==="health"} label="Health" onClick={()=>setTab("health")}/>
       <Tab active={tab==="settings"} label="⚙ Settings" onClick={()=>setTab("settings")}/>
-      <Tab active={tab==="health"} label="Health" onClick={()=>setTab("health")}/>
       <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6}}>
         <button onClick={()=>setTermOpen(!termOpen)} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",background:termOpen?"rgba(34,211,238,0.06)":"transparent",border:`1px solid ${termOpen?"rgba(34,211,238,0.15)":"rgba(255,255,255,0.05)"}`,borderRadius:3,fontSize:9,fontWeight:700,color:termOpen?"#22d3ee":"rgba(255,255,255,0.25)",letterSpacing:".06em",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ TERMINAL</button>
       </div>
@@ -1511,7 +1510,6 @@ function App(){
         {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} prs={prs} repos={repos}/>}
         {tab==="health"&&<HealthView agents={agents} fleetState={fleetState}/>}
         {tab==="settings"&&<SettingsView agents={agents}/>}
-        {tab==="health"&&<HealthView agents={agents} fleetState={fleetState}/>}
       </div>
       {termOpen&&<div className="terminal-wrapper" style={{height:termH}}>
         <div className="terminal-header" onClick={()=>setTermOpen(false)}>
