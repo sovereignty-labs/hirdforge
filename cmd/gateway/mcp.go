@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -677,55 +676,15 @@ func (s *gatewayMCPServer) invokeLocal(ctx context.Context, method, path string,
 }
 
 func (s *gatewayMCPServer) delegateViaGateway(ctx context.Context, agent, message, sessionID string) (interface{}, error) {
-	status, body, _, err := s.invokeLocal(ctx, http.MethodPost, "/api/v1/message", map[string]string{
+	out, err := s.invokeLocalJSON(ctx, http.MethodPost, "/api/v1/message?async=true", map[string]string{
 		"agent":      agent,
 		"content":    message,
 		"session_id": sessionID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("delegate failed: %w", err)
 	}
-	if status < 200 || status >= 300 {
-		return nil, fmt.Errorf("delegate failed with status %d: %s", status, strings.TrimSpace(string(body)))
-	}
-
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	var fullResp strings.Builder
-	finalSessionID := strings.TrimSpace(sessionID)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" {
-			continue
-		}
-		var evt map[string]interface{}
-		if err := json.Unmarshal([]byte(payload), &evt); err != nil {
-			continue
-		}
-		if sid := strings.TrimSpace(fmt.Sprint(evt["session_id"])); sid != "" {
-			finalSessionID = sid
-		}
-		if typ, _ := evt["type"].(string); typ == "replace" {
-			fullResp.Reset()
-			fullResp.WriteString(asString(evt["content"]))
-			continue
-		}
-		if content := asString(evt["content"]); content != "" {
-			fullResp.WriteString(content)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read delegate SSE: %w", err)
-	}
-	return map[string]interface{}{
-		"agent":      agent,
-		"session_id": finalSessionID,
-		"response":   strings.TrimSpace(fullResp.String()),
-	}, nil
+	return out, nil
 }
 
 func (s *gatewayMCPServer) callGiteaJSON(ctx context.Context, method, path string, payload interface{}) (interface{}, error) {
