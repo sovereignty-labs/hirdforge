@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """PR merge velocity report for Hirdforge repos.
 
-Queries Gitea for merged PRs and produces:
-- PRs per day (timeline)
-- Top contributors (by PR count)
-- Average time to merge (from open to merge)
+Queries Gitea for merged PRs in the last 7 days and prints:
+- Total merged count
+- Merged per day
+- Merged per author
 
 Uses only stdlib, suitable for CI or dev shell.
 """
@@ -12,6 +12,7 @@ Uses only stdlib, suitable for CI or dev shell.
 import argparse
 import collections
 import datetime as dt
+import json
 import sys
 import urllib.parse
 import urllib.request
@@ -74,152 +75,109 @@ def fetch_all_merged_prs(base_url: str, repo: str) -> List[dict]:
 
 def parse_timestamp(ts: str) -> dt.datetime:
     """Parse RFC3339 timestamp to datetime."""
-    # Handle various formats Gitea might use
     ts = ts.replace("Z", "+00:00")
     if "." in ts:
-        # Has microseconds
         return dt.datetime.fromisoformat(ts)
     return dt.datetime.fromisoformat(ts)
 
 
-def group_prs_by_day(prs_by_repo: Dict[str, List[dict]]) -> Tuple[Dict[str, int], Dict[str, Dict[str, int]]]:
-    """Group merged PRs by merge date.
-
-    Returns:
-        total_by_day: {date: pr_count}
-        by_repo_by_day: {date: {repo: count}}
-    """
-
-    total_by_day: Dict[str, int] = collections.Counter()
-    by_repo_by_day: Dict[str, Dict[str, int]] = {}
-
-    for repo, prs in prs_by_repo.items():
-        for pr in prs:
-            merged_at = pr.get("merged_at")
-            if not merged_at:
-                continue
-            try:
-                day = merged_at.split("T", 1)[0]
-            except Exception:
-                continue
-
-            total_by_day[day] += 1
-            if day not in by_repo_by_day:
-                by_repo_by_day[day] = {}
-            by_repo_by_day[day][repo] = by_repo_by_day[day].get(repo, 0) + 1
-
-    return dict(total_by_day), by_repo_by_day
-
-
-def calculate_merge_time(prs: List[dict]) -> List[Tuple[str, float]]:
-    """Calculate time-to-merge for each PR.
-
-    Returns list of (PR number, hours_to_merge) for PRs with both created_at and merged_at.
-    """
-
-    merge_times: List[Tuple[str, float]] = []
+def filter_by_date(prs: List[dict], days: int) -> List[dict]:
+    """Filter PRs to only those merged within the last N days."""
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+    filtered = []
 
     for pr in prs:
-        created_at = pr.get("created_at")
         merged_at = pr.get("merged_at")
-
-        if not created_at or not merged_at:
+        if not merged_at:
             continue
-
         try:
-            created = parse_timestamp(created_at)
-            merged = parse_timestamp(merged_at)
-            delta = merged - created
-            hours = delta.total_seconds() / 3600
-            merge_times.append((str(pr.get("number", "unknown")), hours))
+            merged_dt = parse_timestamp(merged_at)
+            if merged_dt.replace(tzinfo=None) >= cutoff.replace(tzinfo=None):
+                filtered.append(pr)
         except Exception:
             continue
 
-    return merge_times
+    return filtered
 
 
-def calculate_averages(merge_times: List[Tuple[str, float]]) -> Dict[str, float]:
-    """Calculate average merge time by repo.
+def group_prs_by_day(prs: List[dict]) -> Dict[str, int]:
+    """Group merged PRs by merge date.
 
-    Returns {repo: avg_hours} for repos with merge time data.
+    Returns {date: pr_count}.
     """
+    by_day: Dict[str, int] = collections.Counter()
 
-    # Group by repo (simplified - assumes all PRs in list are from same context)
-    # For proper per-repo stats, we'd need to pass repo info with each PR
-    if not merge_times:
-        return {}
+    for pr in prs:
+        merged_at = pr.get("merged_at")
+        if not merged_at:
+            continue
+        try:
+            day = merged_at.split("T", 1)[0]
+            by_day[day] += 1
+        except Exception:
+            continue
 
-    total = sum(t for _, t in merge_times)
-    count = len(merge_times)
-    return {"overall": total / count if count > 0 else 0}
+    return dict(by_day)
 
 
-def print_text_report(
-    total_by_day: Dict[str, int],
-    contributors: Dict[str, int],
-    avg_merge_times: Dict[str, float],
+def group_prs_by_author(prs: List[dict]) -> Dict[str, int]:
+    """Count PRs by author.
+
+    Returns {author_name: pr_count}.
+    """
+    author_counts: Dict[str, int] = collections.Counter()
+
+    for pr in prs:
+        user = pr.get("user", {})
+        author = user.get("username") or user.get("login")
+        if author:
+            author_counts[author] += 1
+
+    return dict(author_counts)
+
+
+def print_velocity_report(
+    total: int,
+    by_day: Dict[str, int],
+    by_author: Dict[str, int],
 ) -> None:
-    """Print text report to stdout."""
+    """Print velocity report to stdout."""
 
     print("=" * 60)
-    print("HIRDFORGE PR MERGE VELOCITY REPORT")
+    print("HIRDFORGE PR VELOCITY REPORT (Last 7 Days)")
     print("=" * 60)
 
-    # PRs per day
-    print("\n--- PRs Per Day (sorted by date) ---")
-    if total_by_day:
-        for day in sorted(total_by_day.keys()):
-            count = total_by_day[day]
+    # Total merged
+    print(f"\n--- Total Merged: {total} ---")
+
+    # Merged per day
+    print("\n--- Merged Per Day ---")
+    if by_day:
+        for day in sorted(by_day.keys()):
+            count = by_day[day]
             bar = "".join("█" for _ in range(min(count, 30)))
             print(f"{day}: {bar} {count}")
     else:
         print("No PR data found.")
 
-    # Top contributors
-    print("\n--- Top Contributors (by PR count) ---")
-    if contributors:
-        sorted_contribs = sorted(contributors.items(), key=lambda x: x[1], reverse=True)
-        for idx, (name, count) in enumerate(sorted_contribs[:10], 1):
-            print(f"{idx}. {name}: {count} PRs")
+    # Merged per author
+    print("\n--- Merged Per Author ---")
+    if by_author:
+        sorted_authors = sorted(by_author.items(), key=lambda x: x[1], reverse=True)
+        for name, count in sorted_authors:
+            bar = "".join("█" for _ in range(min(count, 30)))
+            print(f"{name}: {bar} {count}")
     else:
-        print("No contributor data found.")
-
-    # Average merge time
-    print("\n--- Average Time to Merge ---")
-    if avg_merge_times:
-        for repo, hours in avg_merge_times.items():
-            if hours < 1:
-                mins = int(hours * 60)
-                print(f"  {repo}: {mins} minutes")
-            else:
-                hrs = int(hours)
-                mins = int((hours - hrs) * 60)
-                print(f"  {repo}: {hrs}h {mins}m")
-    else:
-        print("No merge time data found.")
+        print("No author data found.")
 
     print("\n" + "=" * 60)
 
 
-def fetch_contributors(prs_by_repo: Dict[str, List[dict]]) -> Dict[str, int]:
-    """Count PRs by author across all repos.
-
-    Returns {author_name: pr_count}.
-    """
-
-    author_counts: Dict[str, int] = collections.Counter()
-
-    for repo, prs in prs_by_repo.items():
-        for pr in prs:
-            author = pr.get("user", {}).get("username") or pr.get("user", {}).get("login")
-            if author:
-                author_counts[author] += 1
-
-    return dict(author_counts)
-
-
 def main(argv: List[str]) -> int:
-    parser = argparse.ArgumentParser(description="PR merge velocity report for Hirdforge repos.")
+    parser = argparse.ArgumentParser(
+        description="PR merge velocity report for Hirdforge repos.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--gitea-url",
         default="http://gitea-http.gitea.svc.cluster.local:3000",
@@ -235,6 +193,12 @@ def main(argv: List[str]) -> int:
         default=None,
         help="Gitea token for authentication (from $GITEA_TOKEN if not provided)",
     )
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=7,
+        help="Number of days to look back (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     # Get token from environment if not provided
@@ -248,32 +212,23 @@ def main(argv: List[str]) -> int:
 
     print(f"Fetching PRs from {len(repos)} repos...")
 
-    prs_by_repo: Dict[str, List[dict]] = {}
+    all_merged_prs: List[dict] = []
     for repo in repos:
         print(f"  {repo}...", end=" ", flush=True)
         prs = fetch_all_merged_prs(args.gitea_url, repo)
-        prs_by_repo[repo] = prs
-        print(f"{len(prs)} PRs")
+        all_merged_prs.extend(prs)
+        print(f"{len(prs)} total PRs")
+
+    # Filter by date
+    filtered_prs = filter_by_date(all_merged_prs, args.days)
+    total = len(filtered_prs)
 
     # Calculate metrics
-    total_by_day, by_repo_by_day = group_prs_by_day(prs_by_repo)
-
-    # Collect all PRs for merge time calculation
-    all_prs = []
-    for repo, prs in prs_by_repo.items():
-        for pr in prs:
-            pr_with_repo = dict(pr)
-            pr_with_repo["repo"] = repo
-            all_prs.append(pr_with_repo)
-
-    merge_times = calculate_merge_time(all_prs)
-    avg_merge_times = calculate_averages(merge_times)
-
-    # Get contributors
-    contributors = fetch_contributors(prs_by_repo)
+    by_day = group_prs_by_day(filtered_prs)
+    by_author = group_prs_by_author(filtered_prs)
 
     # Print report
-    print_text_report(total_by_day, contributors, avg_merge_times)
+    print_velocity_report(total, by_day, by_author)
 
     return 0
 
