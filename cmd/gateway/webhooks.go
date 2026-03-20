@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +22,7 @@ const (
 	webhookReadyLabelID      = 3
 	webhookInProgressLabelID = 4
 	webhookEndpointURL       = "http://gateway.valhalla.svc:8080/api/v1/webhooks/gitea"
+	freyaAgentURL            = "http://freya.valhalla.svc:8081"
 )
 
 var webhookTaskRefRE = regexp.MustCompile(`(?i)(?:closes?\s+)?kit/hirdforge-tasks#(\d+)`)
@@ -143,7 +145,7 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 
 	switch {
-	case strings.TrimSpace(payload.Action) == "opened" && pr.User == "warband":
+	case strings.TrimSpace(payload.Action) == "opened":
 		go g.handleAgentPROpened(pr)
 	case strings.TrimSpace(payload.Action) == "closed" && pr.Merged:
 		go g.handlePRMerged(pr)
@@ -152,56 +154,23 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (g *gateway) handleAgentPROpened(pr webhookPR) {
 	log.Printf("webhook: agent PR opened repo=%s number=%d author=%s", pr.Repo, pr.Number, pr.User)
-	reviewerName := strings.TrimSpace(g.reviewAgent)
-	if reviewerName == "" {
-		log.Printf("webhook: review skipped for PR #%d on %s: review agent not configured", pr.Number, pr.Repo)
+	if strings.HasPrefix(pr.Head, "ci/") {
+		log.Printf("webhook: review skipped for PR #%d on %s: ci branch %s", pr.Number, pr.Repo, pr.Head)
 		return
 	}
-	reviewer, ok := g.getAgent(reviewerName)
-	if !ok || !reviewer.Healthy {
-		log.Printf("webhook: review skipped for PR #%d on %s: reviewer %q unavailable", pr.Number, pr.Repo, reviewerName)
-		g.sendDiscordWebhookNotification(
-			"Automated Review Skipped",
-			fmt.Sprintf("Reviewer `%s` was unavailable for PR #%d on `%s`.", reviewerName, pr.Number, pr.Repo),
-			15548997,
-			[]discordField{
-				{Name: "PR", Value: pr.HTMLURL, Inline: false},
-				{Name: "Reviewer", Value: reviewerName, Inline: true},
-			},
-		)
+	if pr.User == "warband" && strings.HasPrefix(pr.Head, "freya/") {
+		log.Printf("webhook: review skipped for PR #%d on %s: self-review blocked for %s", pr.Number, pr.Repo, pr.Head)
 		return
 	}
-
-	owner, repoName, ok := splitFullRepoName(pr.Repo)
-	if !ok {
-		log.Printf("webhook: review skipped for PR #%d: invalid repo %q", pr.Number, pr.Repo)
-		return
-	}
-	diffPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d.diff", url.PathEscape(owner), url.PathEscape(repoName), pr.Number)
-	giteaClient := &http.Client{Timeout: 10 * time.Second}
-	resp, err := giteaRequest(giteaClient, http.MethodGet, g.giteaURL, g.giteaToken, diffPath, nil)
-	if err != nil {
-		log.Printf("webhook: fetch diff failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
-		return
-	}
-	diffBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("webhook: fetch diff returned %d for PR #%d on %s: %s", resp.StatusCode, pr.Number, pr.Repo, strings.TrimSpace(string(diffBody)))
-		return
-	}
-	diffText := string(diffBody)
-	if len(diffText) > 8000 {
-		diffText = diffText[:8000] + "\n...[truncated]"
-	}
-
 	reviewMsg := fmt.Sprintf(
-		"You are reviewing PR #%d on %s.\n\nTitle: %s\n\nDescription:\n%s\n\nDiff:\n```\n%s\n```\n\nReview this PR. If the changes are correct and complete, respond with LGTM as the first word. If there are issues, list them clearly.",
+		"Review PR #%d on %s: %q. Read the diff using gitea tool with action list-pr-files on repo %s pr %d. Assess code quality, correctness, and style. Then post a review comment on the PR using gitea tool with action create-comment on repo %s issue %d with your assessment. Be concise - 3-5 sentences max.",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
-		pr.Body,
-		diffText,
+		pr.Repo,
+		pr.Number,
+		pr.Repo,
+		pr.Number,
 	)
 	sessionID := fmt.Sprintf("webhook-review-%s-%d", sanitizeWebhookToken(pr.Repo), pr.Number)
 	payload, err := json.Marshal(map[string]string{
@@ -213,65 +182,34 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(reviewer.URL, "/")+"/message", bytes.NewReader(payload))
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(freyaAgentURL, "/")+"/message", bytes.NewReader(payload))
 	if err != nil {
 		log.Printf("webhook: create reviewer request failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	agentClient := &http.Client{Timeout: streamTimeout}
+	agentClient := &http.Client{}
 	agentResp, err := agentClient.Do(req)
 	if err != nil {
-		log.Printf("webhook: review dispatch failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		log.Printf("webhook: review dispatch failed for PR #%d on %s via freya: %v", pr.Number, pr.Repo, err)
 		return
 	}
 	reviewText, err := readAgentSSEContent(agentResp)
 	if err != nil {
-		log.Printf("webhook: review read failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		log.Printf("webhook: review read failed for PR #%d on %s via freya: %v", pr.Number, pr.Repo, err)
 		return
 	}
 	reviewText = strings.TrimSpace(thinkTagRE.ReplaceAllString(reviewText, ""))
 	if reviewText == "" {
-		reviewText = "Automated reviewer returned an empty response."
-	}
-
-	commentBody, err := json.Marshal(map[string]string{"body": reviewText})
-	if err != nil {
-		log.Printf("webhook: marshal PR comment failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		log.Printf("webhook: review completed for PR #%d on %s via freya with empty response", pr.Number, pr.Repo)
+		g.addEvent("webhook_review", "freya", fmt.Sprintf("Queued review for PR #%d on %s", pr.Number, pr.Repo))
 		return
 	}
-	commentPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/comments", url.PathEscape(owner), url.PathEscape(repoName), pr.Number)
-	commentResp, err := giteaRequest(giteaClient, http.MethodPost, g.giteaURL, g.giteaToken, commentPath, bytes.NewReader(commentBody))
-	if err != nil {
-		log.Printf("webhook: post review comment failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
-		return
-	}
-	commentRespBody, _ := io.ReadAll(io.LimitReader(commentResp.Body, 4096))
-	commentResp.Body.Close()
-	if commentResp.StatusCode < 200 || commentResp.StatusCode >= 300 {
-		log.Printf("webhook: post review comment returned %d for PR #%d on %s: %s", commentResp.StatusCode, pr.Number, pr.Repo, strings.TrimSpace(string(commentRespBody)))
-		return
-	}
-
-	approved := strings.HasPrefix(strings.ToUpper(strings.TrimSpace(reviewText)), "LGTM")
-	status := "needs changes"
-	color := 16096779
-	if approved {
-		status = "approved"
-		color = 5763719
-	}
-	log.Printf("webhook: review completed for PR #%d on %s by %s (%s)", pr.Number, pr.Repo, reviewerName, status)
-	g.addEvent("webhook_review", reviewerName, fmt.Sprintf("Reviewed PR #%d on %s (%s)", pr.Number, pr.Repo, status))
-	g.sendDiscordWebhookNotification(
-		"Automated PR Review",
-		fmt.Sprintf("Reviewer `%s` completed PR #%d on `%s`.", reviewerName, pr.Number, pr.Repo),
-		color,
-		[]discordField{
-			{Name: "Status", Value: status, Inline: true},
-			{Name: "Reviewer", Value: reviewerName, Inline: true},
-			{Name: "PR", Value: pr.HTMLURL, Inline: false},
-		},
-	)
+	log.Printf("webhook: review completed for PR #%d on %s via freya: %s", pr.Number, pr.Repo, reviewText)
+	g.addEvent("webhook_review", "freya", fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
 }
 
 func (g *gateway) handlePRMerged(pr webhookPR) {
