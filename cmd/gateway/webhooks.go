@@ -51,6 +51,16 @@ type webhookIssue struct {
 	Labels []string
 }
 
+type webhookPRReview struct {
+	PRNumber    int64
+	PRTitle     string
+	PRHead      string
+	Repo        string
+	ReviewBody  string
+	ReviewState string
+	Reviewer    string
+}
+
 func (g *gateway) validateWebhookSignature(body []byte, signature string) bool {
 	if strings.TrimSpace(g.webhookSecret) == "" {
 		return true
@@ -87,7 +97,8 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
-	if strings.TrimSpace(r.Header.Get("X-Gitea-Event")) != "pull_request" {
+	giteaEvent := strings.TrimSpace(r.Header.Get("X-Gitea-Event"))
+	if giteaEvent != "pull_request" && giteaEvent != "pull_request_review" {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
 		return
 	}
@@ -149,6 +160,62 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		go g.handleAgentPROpened(pr)
 	case strings.TrimSpace(payload.Action) == "closed" && pr.Merged:
 		go g.handlePRMerged(pr)
+	}
+
+	if giteaEvent == "pull_request_review" {
+		var reviewPayload struct {
+			Action     string `json:"action"`
+			Repository struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+			Review struct {
+				Number int64 `json:"number"`
+				State  string `json:"state"`
+				Body   string `json:"body"`
+				User   struct {
+					Login string `json:"login"`
+				} `json:"user"`
+			} `json:"review"`
+			PullRequest struct {
+				Number  int64 `json:"number"`
+				Title   string `json:"title"`
+				Head    struct {
+					Ref string `json:"ref"`
+				} `json:"head"`
+				Base struct {
+					Repo struct {
+						FullName string `json:"full_name"`
+					} `json:"repo"`
+				} `json:"base"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal(body, &reviewPayload); err != nil {
+			log.Printf("webhook: failed to parse pull_request_review payload: %v", err)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "error"})
+			return
+		}
+
+		repo := strings.TrimSpace(reviewPayload.PullRequest.Base.Repo.FullName)
+		if repo == "" {
+			repo = strings.TrimSpace(reviewPayload.Repository.FullName)
+		}
+
+		if strings.TrimSpace(reviewPayload.Action) == "submitted" && reviewPayload.Review.State == "changes_requested" {
+			rpr := webhookPRReview{
+				PRNumber:    reviewPayload.PullRequest.Number,
+				PRTitle:     strings.TrimSpace(reviewPayload.PullRequest.Title),
+				PRHead:      strings.TrimSpace(reviewPayload.PullRequest.Head.Ref),
+				Repo:        repo,
+				ReviewBody:  strings.TrimSpace(reviewPayload.Review.Body),
+				ReviewState: reviewPayload.Review.State,
+				Reviewer:    strings.TrimSpace(reviewPayload.Review.User.Login),
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+			go g.handleFreyaReviewFeedback(rpr)
+		} else {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
+		}
+		return
 	}
 }
 
@@ -389,6 +456,72 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 	)
 }
 
+func (g *gateway) builderFromBranch(branch string) string {
+	prefixes := []string{"leif/", "val/", "chuck/", "knut/", "orm/"}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(branch, prefix) {
+			return strings.TrimPrefix(branch, prefix)
+		}
+	}
+	return ""
+}
+
+func (g *gateway) handleFreyaReviewFeedback(review webhookPRReview) {
+	if review.Reviewer != "freya" {
+		log.Printf("webhook: review feedback ignored - reviewer is not freya")
+		return
+	}
+	builder := g.builderFromBranch(review.PRHead)
+	if builder == "" {
+		log.Printf("webhook: review feedback skipped - unable to detect builder from branch %s", review.PRHead)
+		return
+	}
+	agent, ok := g.getAgent(builder)
+	if !ok || !agent.Healthy {
+		log.Printf("webhook: review feedback skipped - builder agent %s not found or unhealthy", builder)
+		return
+	}
+	fixMsg := fmt.Sprintf(
+		"Freya reviewed PR #%d (%q) on %s and requested changes. Feedback: %s. Fix the issues and push to the same branch (%s). Do NOT create a new PR — push to existing branch.",
+		review.PRNumber,
+		review.PRTitle,
+		review.Repo,
+		review.ReviewBody,
+		review.PRHead,
+	)
+	sessionID := fmt.Sprintf("webhook-review-fix-%s-%d", sanitizeWebhookToken(review.Repo), review.PRNumber)
+	payload, err := json.Marshal(map[string]string{
+		"content":    fixMsg,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		log.Printf("webhook: build fix request failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("webhook: create fix request failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	agentClient := &http.Client{}
+	agentResp, err := agentClient.Do(req)
+	if err != nil {
+		log.Printf("webhook: fix dispatch failed for PR #%d on %s to %s: %v", review.PRNumber, review.Repo, builder, err)
+		return
+	}
+	defer agentResp.Body.Close()
+	if agentResp.StatusCode < 200 || agentResp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(agentResp.Body, 2048))
+		log.Printf("webhook: fix dispatch returned %d for PR #%d on %s: %s", agentResp.StatusCode, review.PRNumber, review.Repo, strings.TrimSpace(string(body)))
+		return
+	}
+	log.Printf("webhook: queued fix request for PR #%d on %s to builder %s", review.PRNumber, review.Repo, builder)
+	g.addEvent("webhook_review_fix", builder, fmt.Sprintf("Queued fix request for PR #%d on %s", review.PRNumber, review.Repo))
+}
+
 func (g *gateway) sendDiscordWebhookNotification(title, description string, color int, fields []discordField) {
 	webhookURL := strings.TrimSpace(g.discordWebhookURL)
 	if webhookURL == "" {
@@ -486,7 +619,7 @@ func (g *gateway) ensureGiteaWebhooks() {
 				"content_type": "json",
 				"secret":       g.webhookSecret,
 			},
-			"events": []string{"pull_request"},
+			"events": []string{"pull_request", "pull_request_review"},
 		}
 		bodyJSON, err := json.Marshal(payload)
 		if err != nil {
