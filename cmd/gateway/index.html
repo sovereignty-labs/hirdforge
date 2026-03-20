@@ -1065,7 +1065,7 @@ const HealthView=({agents,fleetState})=>{
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(110px,1fr))",gap:6,marginBottom:10}}>
         {[{l:"Submitted",v:byStatus.submitted||0,c:"#818cf8"},{l:"Working",v:byStatus.working||0,c:"#22d3ee"},{l:"Completed",v:byStatus.completed||0,c:"#34d399"},{l:"Failed",v:byStatus.failed||0,c:"#ef4444"},{l:"Cancelled",v:byStatus.cancelled||0,c:"#fbbf24"}].map(m=><div key={m.l} className="metric" style={{padding:"8px 10px"}}><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span></div>)}
       </div>
-      {byAgent.length>0&&<div><div style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4}}>By Agent</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{byAgent.map(a=><Badge key={a.agent||a.name||"?"} text={`${a.agent||a.name}: ${a.count||0}`} color="#818cf8"/></div>)}</div>}
+      {byAgent.length>0&&<div><div style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4}}>By Agent</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{byAgent.map(a=><Badge key={a.agent||a.name||"?"} text={`${a.agent||a.name}: ${a.count||0}`} color="#818cf8"/> )}</div></div>}
     </div>;
   };
 
@@ -1075,7 +1075,7 @@ const HealthView=({agents,fleetState})=>{
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(110px,1fr))",gap:6,marginBottom:10}}>
         {[{l:"Open",v:d?.open||0,c:"#fbbf24"},{l:"Merged Today",v:d?.merged_today||0,c:"#34d399"},{l:"This Week",v:d?.merged_this_week||0,c:"#22d3ee"}].map(m=><div key={m.l} className="metric" style={{padding:"8px 10px"}}><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span></div>)}
       </div>
-      {byAuthor.length>0&&<div><div style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4}}>By Author</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{byAuthor.map(a=><Badge key={a.author||"?"} text={`${a.author}: ${a.count||0}`} color="#c084fc"/></div>)}</div>}
+      {byAuthor.length>0&&<div><div style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4}}>By Author</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{byAuthor.map(a=><Badge key={a.author||"?"} text={`${a.author}: ${a.count||0}`} color="#c084fc"/> )}</div></div>}
     </div>;
   };
 
