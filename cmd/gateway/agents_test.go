@@ -129,10 +129,13 @@ func TestQueryAgentHealthUnhealthy(t *testing.T) {
 
 // TestQueryAgentHealthConnectionError tests connection error handling
 func TestQueryAgentHealthConnectionError(t *testing.T) {
-	client := &http.Client{Timeout: 1 * time.Second}
+	// Start a server then close it immediately so the address is known but unreachable
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := ts.URL
+	ts.Close()
 
-	// Try to query a non-existent server
-	resp, err := queryAgentHealth(client, "http://nonexistent.invalid:9999/health")
+	client := &http.Client{Timeout: 1 * time.Second}
+	resp, err := queryAgentHealth(client, url+"/health")
 	if err == nil {
 		t.Fatalf("expected error for connection failure, got nil")
 	}
