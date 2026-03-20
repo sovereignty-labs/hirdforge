@@ -7,17 +7,6 @@ import (
 	"testing"
 )
 
-// dummy implementations to satisfy gateway.registerHealthEndpoints dependencies.
-// The real implementations live in other files, but for the purpose of testing
-// the /health handler wiring, we only need minimal stubs.
-func (g *gateway) registerHealthEndpoints(mux *http.ServeMux) {
-	// In production this registers several endpoints, but in this test we only
-	// care about the explicit /health handler defined in main.go, which is
-	// attached directly to the mux in main(). This stub exists so the
-	// production code continues to compile when referenced from main.go during
-	// this focused handler test.
-}
-
 func TestGatewayHealthHandler(t *testing.T) {
 	gw := &gateway{}
 	mux := http.NewServeMux()
