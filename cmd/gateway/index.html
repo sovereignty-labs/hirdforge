@@ -969,8 +969,391 @@ const RealmView=({agents,nodes,pods,commits,k8sEvents,prs,repos})=>{
   </div>;
 };
 
+// ═══════════ HEALTH VIEW ═══════════
+const HealthCard=({title,endpoint,render})=>{
+  const[data,setData]=useState(null);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState(null);
+  const fetch_=useCallback(async()=>{
+    try{
+      const r=await fetch(`/api/v1${endpoint}`);
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const d=await r.json();
+      setData(d);setError(null);
+    }catch(e){setError(e.message||'Failed to load');}
+    finally{setLoading(false);}
+  },[endpoint]);
+  useEffect(()=>{fetch_();const id=setInterval(fetch_,30000);return()=>clearInterval(id);},[fetch_]);
+  return<div className="glass" style={{padding:"14px 16px",marginBottom:8,border:"1px solid rgba(255,255,255,0.05)"}}>
+    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:10}}>
+      <span style={{fontSize:10,fontWeight:700,color:"#818cf8",letterSpacing:".1em",textTransform:"uppercase"}}>{title}</span>
+      <span style={{fontSize:8,color:"rgba(255,255,255,0.1)",fontFamily:"'IBM Plex Mono',monospace"}}>{endpoint}</span>
+    </div>
+    {loading&&<div style={{fontSize:11,color:"rgba(255,255,255,0.15)"}}>Loading...</div>}
+    {error&&<div style={{fontSize:11,color:"#f87171"}}>{error}</div>}
+    {!loading&&!error&&data&&render(data)}
+  </div>;
+};
+
+const HealthView=({agents,fleetState})=>{
+  const renderSummary=d=>{
+    const fleet=d?.fleet||{};const cluster=d?.cluster||{};
+    return<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(120px,1fr))",gap:6}}>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Fleet Online</span><span className="metric-value" style={{color:"#34d399"}}>{fleet.online??0}</span><span className="metric-sub">/ {fleet.total??agents.length}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Fleet Degraded</span><span className="metric-value" style={{color:"#fbbf24"}}>{fleet.degraded??0}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Fleet Down</span><span className="metric-value" style={{color:"#ef4444"}}>{fleet.down??0}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Nodes Ready</span><span className="metric-value" style={{color:"#22d3ee"}}>{cluster.nodes_ready??0}</span><span className="metric-sub">/ {cluster.nodes_total??0}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Pods Running</span><span className="metric-value" style={{color:"#c084fc"}}>{cluster.pods_running??0}</span><span className="metric-sub">/ {cluster.pods_total??0}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Last Check</span><span className="metric-value" style={{color:"rgba(255,255,255,0.4)",fontSize:12}}>{d?.timestamp?new Date(d.timestamp).toLocaleTimeString('en-US',{hour12:false}):"—"}</span></div>
+    </div>;
+  };
+
+  const renderSeidr=d=>{
+    const cog=d?.cognitive||{};const stats=d?.stats||{};
+    return<div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(120px,1fr))",gap:6}}>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Status</span><span className="metric-value" style={{color:d?.status==="ok"?"#34d399":"#fbbf24",fontSize:14}}>{d?.status||"unknown"}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Vector DB</span><span className="metric-value" style={{color:cog.vector_db==="ready"?"#34d399":"#fbbf24",fontSize:14}}>{cog.vector_db||"—"}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Index Size</span><span className="metric-value" style={{color:"#818cf8"}}>{stats.total_memories??0}</span></div>
+      <div className="metric" style={{padding:"8px 10px"}}><span className="metric-label">Last Reflect</span><span className="metric-value" style={{color:"rgba(255,255,255,0.4)",fontSize:12}}>{cog.last_reflect||"—"}</span></div>
+    </div>;
+  };
+
+  const renderTasks=d=>{
+    const byStatus=(d?.by_status||{});const byAgent=(d?.by_agent||[]);const total=d?.total||0;
+    return<div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(110px,1fr))",gap:6,marginBottom:10}}>
+        {[{l:"Submitted",v:byStatus.submitted||0,c:"#818cf8"},{l:"Working",v:byStatus.working||0,c:"#22d3ee"},{l:"Completed",v:byStatus.completed||0,c:"#34d399"},{l:"Failed",v:byStatus.failed||0,c:"#ef4444"},{l:"Cancelled",v:byStatus.cancelled||0,c:"#fbbf24"}].map(m=><div key={m.l} className="metric" style={{padding:"8px 10px"}}><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span></div>)}
+      </div>
+      {byAgent.length>0&&<div><div style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4}}>By Agent</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{byAgent.map(a=><Badge key={a.agent||a.name||"?"} text={`${a.agent||a.name}: ${a.count||0}`} color="#818cf8"/></div>)}</div>}
+    </div>;
+  };
+
+  const renderPRs=d=>{
+    const byAuthor=(d?.by_author||[]);
+    return<div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(110px,1fr))",gap:6,marginBottom:10}}>
+        {[{l:"Open",v:d?.open||0,c:"#fbbf24"},{l:"Merged Today",v:d?.merged_today||0,c:"#34d399"},{l:"This Week",v:d?.merged_this_week||0,c:"#22d3ee"}].map(m=><div key={m.l} className="metric" style={{padding:"8px 10px"}}><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span></div>)}
+      </div>
+      {byAuthor.length>0&&<div><div style={{fontSize:9,color:"rgba(255,255,255,0.2)",letterSpacing:".08em",textTransform:"uppercase",marginBottom:4}}>By Author</div><div style={{display:"flex",flexWrap:"wrap",gap:4}}>{byAuthor.map(a=><Badge key={a.author||"?"} text={`${a.author}: ${a.count||0}`} color="#c084fc"/></div>)}</div>}
+    </div>;
+  };
+
+  const renderBranches=d=>{
+    const byRepo=(d?.by_repo||[]);
+    if(byRepo.length===0)return<div style={{fontSize:11,color:"rgba(255,255,255,0.2)"}}>No stale branch data available.</div>;
+    return<div>
+      {byRepo.map(r=>{
+        const total=r.total||0;const stale=r.stale||0;const pct=total>0?Math.round((stale/total)*100):0;
+        return<div key={r.repo||r.name||"?"} style={{marginBottom:8}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+            <span style={{fontSize:11,color:"#e2e8f0",fontWeight:600}}>{r.repo||r.name}</span>
+            <span style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{stale} stale / {total} total</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div className="bar-track" style={{flex:1}}><div className="bar-fill" style={{width:`${pct}%`,background:pct>50?"#ef4444":pct>25?"#fbbf24":"#34d399"}}/></div>
+            <span style={{fontSize:9,color:"rgba(255,255,255,0.3)",minWidth:30,textAlign:"right"}}>{pct}%</span>
+          </div>
+        </div>;
+      })}
+    </div>;
+  };
+
+  const renderFleetState=d=>{
+    const states=Array.isArray(d)?d:(d?.agents||[]);
+    return<div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(120px,1fr))",gap:6,marginBottom:10}}>
+        {[{l:"Active",v:states.filter(s=>s.active&&!s.paused).length,c:"#22c55e"},{l:"Idle",v:states.filter(s=>!s.active&&!s.paused).length,c:"#6b7280"},{l:"Paused",v:states.filter(s=>s.paused).length,c:"#f59e0b"}].map(m=><div key={m.l} className="metric" style={{padding:"8px 10px"}}><span className="metric-label">{m.l}</span><span className="metric-value" style={{color:m.c}}>{m.v}</span></div>)}
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>{states.map(s=><div key={s.name||s.id||"?"} style={{display:"flex",alignItems:"center",gap:8,padding:"5px 8px",background:"rgba(255,255,255,0.015)",borderRadius:4}}>
+        <Pip status={s.active&&!s.paused?"online":s.paused?"degraded":"offline"} size={5}/>
+        <span style={{fontSize:11,color:"#e2e8f0",fontWeight:600,flex:1}}>{s.name||s.id}</span>
+        <span style={{fontSize:9,color:"rgba(255,255,255,0.25)"}}>{s.active&&!s.paused?"Active":s.paused?"Paused":"Idle"}</span>
+        {s.task_ref&&<span style={{fontSize:9,color:"rgba(255,255,255,0.15)",overflow:"hidden",textOverflow:"ellipsis",maxWidth:100}}>{s.task_ref}</span>}
+      </div>)}</div>
+    </div>;
+  };
+
+  return<div style={{padding:"16px",overflowY:"auto",height:"100%",boxSizing:"border-box"}}>
+    <div style={{marginBottom:16}}><span style={{fontSize:11,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>Platform Health</span><span style={{fontSize:10,color:"rgba(255,255,255,0.2)",marginLeft:8}}>Auto-refreshes every 30s</span></div>
+    <HealthCard title="Fleet + Cluster" endpoint="/health/summary" render={renderSummary}/>
+    <HealthCard title="Seidr Memory" endpoint="/health/seidr" render={renderSeidr}/>
+    <HealthCard title="Task Board" endpoint="/health/tasks" render={renderTasks}/>
+    <HealthCard title="PR Velocity" endpoint="/health/prs" render={renderPRs}/>
+    <HealthCard title="Stale Branches" endpoint="/health/branches" render={renderBranches}/>
+    <HealthCard title="Agent State" endpoint="/fleet/state" render={renderFleetState}/>
+  </div>;
+};
+
 // ═══════════ APP ═══════════
 const Tab=({active,label,count,onClick})=><button onClick={onClick} style={{background:"none",border:"none",color:active?"#e2e8f0":"rgba(255,255,255,0.22)",padding:"10px 0",marginRight:22,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:".1em",textTransform:"uppercase",borderBottom:active?"2px solid #818cf8":"2px solid transparent"}}>{label}{count!=null&&<span style={{marginLeft:4,fontSize:10,color:active?"#818cf8":"rgba(255,255,255,0.1)"}}>{count}</span>}</button>;
+
+// ═══════════ HEALTH VIEW ═══════════
+const HEALTH_REFRESH = 30000; // 30 seconds
+
+// Reusable card: fetches endpoint, auto-refreshes, shows key metrics
+const HealthCard = ({ title, endpoint, render }) => {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const fetch_ = useCallback(async () => {
+    try {
+      const r = await fetch(endpoint);
+      if (!r.ok) throw new Error(`${r.status}`);
+      const d = await r.json();
+      setData(d);
+      setError(null);
+    } catch (e) {
+      setError(e.message || "fetch failed");
+    } finally {
+      setLoading(false);
+    }
+  }, [endpoint]);
+
+  useEffect(() => {
+    fetch_();
+    const id = setInterval(fetch_, HEALTH_REFRESH);
+    return () => clearInterval(id);
+  }, [fetch_]);
+
+  return (
+    <div className="glass" style={{ padding: "14px 16px", minWidth: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: data ? "10px" : "8px" }}>
+        <span style={{ fontSize: "10px", fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase", color: "rgba(255,255,255,0.3)" }}>{title}</span>
+        {!loading && !error && (
+          <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#34d399", boxShadow: "0 0 5px #34d399" }} />
+        )}
+        {error && (
+          <span style={{ width: 5, height: 5, borderRadius: "50%", background: "#ef4444" }} />
+        )}
+      </div>
+      {loading ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 0" }}>
+          <div style={{ width: 12, height: 12, border: "2px solid rgba(255,255,255,0.1)", borderTopColor: "#818cf8", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.25)" }}>Fetching…</span>
+        </div>
+      ) : error ? (
+        <div style={{ fontSize: 11, color: "#ef4444", lineHeight: 1.5 }}>
+          <span style={{ color: "rgba(255,255,255,0.25)" }}>Endpoint: </span>{endpoint}
+          <br />
+          <span style={{ color: "#f87171" }}>Error: {error}</span>
+        </div>
+      ) : (
+        render(data)
+      )}
+    </div>
+  );
+};
+
+const HealthView = ({ agents, fleetState }) => {
+  const online = (agents || []).filter(a => a.status === "online").length;
+  const total = (agents || []).length;
+  const active = (fleetState || []).filter(s => s.active && !s.paused).length;
+  const paused = (fleetState || []).filter(s => s.paused).length;
+
+  const fmtNum = (n) => (n == null ? "—" : String(n));
+
+  return (
+    <div style={{ height: "100%", overflow: "auto", padding: "14px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+      {/* Fleet + Cluster summary */}
+      <HealthCard title="Fleet & Cluster" endpoint="/api/v1/health/summary">
+        {(d) => (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: d?.cluster ? 8 : 0 }}>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#818cf8", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.fleet?.online_agents ?? online)}<span style={{ fontSize: 12, color: "rgba(255,255,255,0.2)" }}>/{fmtNum(d?.fleet?.total_agents ?? total)}</span></div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Agents Online</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#34d399", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.fleet?.active ?? active)}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Active Sessions</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#fbbf24", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.fleet?.paused ?? paused)}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Paused</div>
+              </div>
+            </div>
+            {d?.cluster && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: "#34d399", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d.cluster.ready_nodes)}</div>
+                  <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Nodes Ready</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: "#22d3ee", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d.cluster.running_pods)}</div>
+                  <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Pods Running</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 800, color: d?.cluster?.argocd === "healthy" ? "#34d399" : "#fbbf24", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d.cluster.argocd) || "—"}</div>
+                  <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>ArgoCD</div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </HealthCard>
+
+      {/* Seidr Memory */}
+      <HealthCard title="Seidr Memory" endpoint="/api/v1/health/seidr">
+        {(d) => (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: d?.cognitive ? 8 : 0 }}>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#22d3ee", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.memories ?? d?.memory_count ?? 0)}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Memories</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#c084fc", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.status ?? d?.health ?? "ok")}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Status</div>
+              </div>
+            </div>
+            {d?.cognitive && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {(Array.isArray(d.cognitive) ? d.cognitive : Object.entries(d.cognitive || {}).map(([k, v]) => ({ label: k, value: v }))).map((c, i) => (
+                  <div key={i} style={{ padding: "3px 8px", background: "rgba(192,132,252,0.05)", border: "1px solid rgba(192,132,252,0.12)", borderRadius: 3 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#c084fc" }}>{typeof c === "object" ? fmtNum(c.value) : fmtNum(c)}</div>
+                    <div style={{ fontSize: 8, color: "rgba(255,255,255,0.25)" }}>{typeof c === "object" ? c.label : `metric_${i}`}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </HealthCard>
+
+      {/* Task Board */}
+      <HealthCard title="Task Board" endpoint="/api/v1/health/tasks">
+        {(d) => {
+          const rows = Array.isArray(d) ? d : (d?.tasks || d?.board || []);
+          const total = rows.reduce((s, r) => s + (Number(r.count) || 0), 0);
+          return (
+            <div>
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#fbbf24", fontFamily: "'Space Grotesk',sans-serif" }}>{total}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Total Tasks</div>
+              </div>
+              {rows.length > 0 && (
+                <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                  {rows.slice(0, 8).map((r, i) => {
+                    const label = r.status || r.agent || r.priority || `row_${i}`;
+                    const count = Number(r.count) || 0;
+                    const color = label.toLowerCase().includes("pending") ? "#fbbf24" : label.toLowerCase().includes("running") ? "#22d3ee" : label.toLowerCase().includes("done") || label.toLowerCase().includes("complete") ? "#34d399" : "#818cf8";
+                    return (
+                      <div key={i} style={{ padding: "4px 8px", background: `${color}08`, border: `1px solid ${color}18`, borderRadius: 3 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color }}>{count}</div>
+                        <div style={{ fontSize: 8, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: ".06em" }}>{String(label).slice(0, 10)}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        }}
+      </HealthCard>
+
+      {/* PR Velocity */}
+      <HealthCard title="PR Velocity" endpoint="/api/v1/health/prs">
+        {(d) => (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: d?.by_author ? 8 : 0 }}>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#fbbf24", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.open ?? 0)}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Open</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#34d399", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.merged_today ?? d?.today ?? 0)}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Merged Today</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#34d399", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtNum(d?.merged_this_week ?? d?.week ?? 0)}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>This Week</div>
+              </div>
+            </div>
+            {d?.by_author && Object.keys(d.by_author).length > 0 && (
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                {Object.entries(d.by_author).map(([author, count]) => (
+                  <div key={author} style={{ padding: "3px 8px", background: "rgba(129,140,248,0.05)", border: "1px solid rgba(129,140,248,0.12)", borderRadius: 3 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: C[author] || "#818cf8" }}>{count}</div>
+                    <div style={{ fontSize: 8, color: "rgba(255,255,255,0.3)" }}>{author}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </HealthCard>
+
+      {/* Stale Branches */}
+      <HealthCard title="Stale Branches" endpoint="/api/v1/health/branches">
+        {(d) => {
+          const repos = Array.isArray(d) ? d : (d?.repos || []);
+          const total = repos.reduce((s, r) => s + (Number(r.stale) || 0), 0);
+          return (
+            <div>
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color: total > 0 ? "#f87171" : "#34d399", fontFamily: "'Space Grotesk',sans-serif" }}>{total}</div>
+                <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Total Stale Branches</div>
+              </div>
+              {repos.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {repos.slice(0, 5).map((r, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+                      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>{r.repo || r.name || `repo_${i}`}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: Number(r.stale) > 0 ? "#f87171" : "#34d399" }}>{r.stale ?? 0} stale</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        }}
+      </HealthCard>
+
+      {/* Agent State */}
+      <HealthCard title="Agent State" endpoint="/api/v1/fleet/state">
+        {(d) => {
+          const states = Array.isArray(d) ? d : [];
+          const active = states.filter(s => s.active && !s.paused).length;
+          const idle = states.filter(s => !s.active && !s.paused).length;
+          const paused = states.filter(s => s.paused).length;
+          return (
+            <div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: states.length ? 8 : 0 }}>
+                <div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: "#22c55e", fontFamily: "'Space Grotesk',sans-serif" }}>{active}</div>
+                  <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Active</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: "#6b7280", fontFamily: "'Space Grotesk',sans-serif" }}>{idle}</div>
+                  <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Idle</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: "#f59e0b", fontFamily: "'Space Grotesk',sans-serif" }}>{paused}</div>
+                  <div style={{ fontSize: 9, color: "rgba(255,255,255,0.25)", letterSpacing: ".08em", textTransform: "uppercase" }}>Paused</div>
+                </div>
+              </div>
+              {states.length > 0 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                  {states.map((s, i) => {
+                    const dotColor = s.paused ? "#f59e0b" : s.active ? "#22c55e" : "#6b7280";
+                    return (
+                      <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 7px", background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 3 }}>
+                        <span style={{ width: 5, height: 5, borderRadius: "50%", background: dotColor }} />
+                        <span style={{ fontSize: 10, color: "#c8cdd5" }}>{s.name}</span>
+                        {s.task_ref && <span style={{ fontSize: 8, color: "rgba(255,255,255,0.2)" }}>{String(s.task_ref).slice(0, 8)}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        }}
+      </HealthCard>
+    </div>
+  );
+};
 
 const lck=(u,a)=>`hirdforge-chat-${u}-${a}`;const lsk=(u,a)=>`hirdforge-session-${u}-${a}`;
 const u2s=m=>({role:m.from==="kit"?"user":"assistant",content:m.text||"",timestamp:m.timestamp||Date.now(),kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent});
@@ -1071,7 +1454,9 @@ function App(){
       <Tab active={tab==="comms"} label="Comms" count={events.length} onClick={()=>setTab("comms")}/>
       <Tab active={tab==="fleet"} label="Warriors" count={agents.length} onClick={()=>setTab("fleet")}/>
       <Tab active={tab==="realm"} label="Realm" onClick={()=>setTab("realm")}/>
+      <Tab active={tab==="health"} label="Health" onClick={()=>setTab("health")}/>
       <Tab active={tab==="settings"} label="⚙ Settings" onClick={()=>setTab("settings")}/>
+      <Tab active={tab==="health"} label="Health" onClick={()=>setTab("health")}/>
       <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6}}>
         <button onClick={()=>setTermOpen(!termOpen)} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",background:termOpen?"rgba(34,211,238,0.06)":"transparent",border:`1px solid ${termOpen?"rgba(34,211,238,0.15)":"rgba(255,255,255,0.05)"}`,borderRadius:3,fontSize:9,fontWeight:700,color:termOpen?"#22d3ee":"rgba(255,255,255,0.25)",letterSpacing:".06em",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ TERMINAL</button>
       </div>
@@ -1081,7 +1466,9 @@ function App(){
         {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsOk} chatHistory={ch} setChatHistory={setCh} msg={msg} setMsg={setMsg} target={tgt} setTarget={setTgt} sending={busy} setSending={setBusy} sessionId={curSid} setSessionId={setCurSid} sessionItems={sItems} sessionFilter={sessionFilter} setSessionFilter={setSessionFilter} onLoadSession={loadSess} onNewConversation={newConv} onClearHistory={clearH} onEmergencyStop={eStop} auth={auth} fleetState={fleetState} onTogglePause={togglePause} onQueueInjection={queueInjection} showToast={showToast} sessionMeta={sessionMeta}/>}
         {tab==="fleet"&&<FleetView agents={agents} selected={sel} setSelected={setSel} fleetState={fleetState} onTogglePause={togglePause}/>}
         {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} prs={prs} repos={repos}/>}
+        {tab==="health"&&<HealthView agents={agents} fleetState={fleetState}/>}
         {tab==="settings"&&<SettingsView agents={agents}/>}
+        {tab==="health"&&<HealthView agents={agents} fleetState={fleetState}/>}
       </div>
       {termOpen&&<div className="terminal-wrapper" style={{height:termH}}>
         <div className="terminal-header" onClick={()=>setTermOpen(false)}>
