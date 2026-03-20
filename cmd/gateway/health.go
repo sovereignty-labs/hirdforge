@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"time"
