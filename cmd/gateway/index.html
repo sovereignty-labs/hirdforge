@@ -195,11 +195,54 @@
     .realm-body{grid-template-columns:1fr!important}.realm-nav,.realm-right{display:none}
     .realm-metrics{grid-template-columns:1fr 1fr!important}
     .node-grid{grid-template-columns:1fr!important}
-    .agent-bar{overflow-x:auto}
-    button{min-height:44px}
+    .agent-bar{overflow-x:auto;flex-wrap:wrap;gap:4px;padding:8px}
+    .agent-tab{min-height:44px;min-width:44px;padding:8px 10px}
+    button{min-height:44px!important;min-width:44px!important}
     textarea{font-size:16px!important;min-height:48px!important}
     .terminal-wrapper{height:140px!important}
     .settings-grid{grid-template-columns:1fr!important;padding:12px}
+
+    /* 1. Tab bar — tappable on small screens */
+    .tabs{flex-wrap:wrap!important;gap:0;padding:0 8px}
+    .tabs>button,.tabs>div{flex-shrink:0}
+    .tabs button:not(.Tab){min-height:44px;min-width:44px;padding:10px 12px}
+
+    /* 2. Chat input row — visible and usable on mobile */
+    .input-bar{flex-wrap:nowrap!important;gap:8px;padding:10px 12px;position:sticky;bottom:0;left:0;right:0;background:rgba(0,0,0,0.95);z-index:100}
+    .input-bar textarea{flex:1;min-height:44px;max-height:100px;padding:8px 12px}
+    .input-bar .btn-send{min-height:44px;padding:8px 16px;flex-shrink:0}
+    .injection-wrap{flex-wrap:wrap;padding:8px 12px}
+    .injection-row{flex-wrap:wrap}
+    .injection-input{flex:1 1 100%;min-height:40px}
+    .injection-btn{min-height:40px}
+
+    /* 3. Main content area — no horizontal overflow, appropriate padding */
+    .body{overflow-x:hidden}
+    .tab-content{overflow-x:hidden!important;padding:0}
+    .chat-col{overflow-x:hidden}
+    .messages-scroll{padding:12px 10px!important}
+    .agent-info{padding:6px 10px!important;flex-wrap:wrap;gap:6px}
+    .session-browser{padding:6px 10px!important}
+    .header{padding:0 10px!important;height:52px;flex-wrap:wrap;gap:6px}
+    .header>div:last-child{flex-wrap:wrap;gap:8px}
+
+    /* 4. Message bubbles — do not overflow viewport width */
+    .msg{max-width:90%!important}
+    .msg-bubble{max-width:100%;overflow-wrap:break-word;word-break:break-word}
+    .msg-text{overflow-wrap:break-word;word-break:break-word}
+    .msg-text pre{overflow-x:auto;max-width:100%}
+    .msg-text table{display:block;overflow-x:auto;max-width:100%}
+    .msg-text h1,.msg-text h2,.msg-text h3{word-wrap:break-word}
+
+    /* General overflow prevention */
+    *{overflow-x:hidden}
+    .realm-main,.realm-nav,.realm-right,.fleet-list,.fleet-detail,.sidebar{overflow-x:hidden}
+  }
+
+  /* Tablet */
+  @media(min-width:768px) and (max-width:1024px){
+    .comms{grid-template-columns:1fr 300px!important}
+    .sidebar{width:300px!important}
   }
 </style>
 </head>
