@@ -2664,6 +2664,56 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		// Async mode: accept message and process in background goroutine
+		if r.URL.Query().Get("async") == "true" {
+			var in messageReq
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+				return
+			}
+			agent, ok := gw.getAgent(in.Agent)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			sessionID := strings.TrimSpace(in.SessionID)
+			if sessionID == "" {
+				sessionID = fmt.Sprintf("hirdforge-%s-%d", in.Agent, time.Now().UnixNano())
+			}
+			gw.lastSessionMu.Lock()
+			gw.lastSession[in.Agent] = sessionID
+			gw.lastSessionMu.Unlock()
+			gw.addEvent("message", in.Agent, fmt.Sprintf("Message sent to %s", in.Agent))
+
+			// Launch goroutine to send message asynchronously
+			go func(agentName string, content string, sessionID string) {
+				agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
+				defer agentCancel()
+				gw.setActiveRequest(agentName, sessionID, agentCancel)
+				defer gw.clearActiveRequest(agentName, agentCancel)
+
+				body, _ := json.Marshal(map[string]string{"content": content, "session_id": sessionID})
+				uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
+				if err != nil {
+					log.Printf("async message: failed to create request for %s: %v", agentName, err)
+					return
+				}
+				uReq.Header.Set("Content-Type", "application/json")
+				uResp, err := streamClient.Do(uReq)
+				if err != nil {
+					log.Printf("async message: upstream request failed for %s: %v", agentName, err)
+					return
+				}
+				defer uResp.Body.Close()
+				// Drain and discard the response body
+				io.Copy(io.Discard, uResp.Body)
+			}(in.Agent, in.Content, sessionID)
+
+			writeJSON(w, http.StatusOK, map[string]string{"status": "queued", "session_id": sessionID, "agent": in.Agent})
+			return
+		}
+
 		var in messageReq
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
