@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - develop
 env:
   REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
   REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
