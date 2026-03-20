@@ -2940,6 +2940,7 @@ func main() {
 			}
 		}
 	})
+	gw.registerHealthEndpoints(mux)
 	registerGatewayMCP(mux)
 	gw.registerWebhookHandlers(mux)
 	go func() {
