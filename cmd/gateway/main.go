@@ -3671,6 +3671,46 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "agent": "gateway", "timestamp": time.Now().Unix()})
 	})
 
+	mux.HandleFunc("/api/v1/metrics/fleet", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		agents := gw.snapshotAgents()
+		type agentMetrics struct {
+			Name         string `json:"name"`
+			Reachable    bool   `json:"reachable"`
+			MetricsBytes int    `json:"metrics_bytes"`
+		}
+		metricsList := make([]agentMetrics, 0, len(agents))
+		reachable := 0
+		for _, a := range agents {
+			m := agentMetrics{Name: a.Name, Reachable: false, MetricsBytes: 0}
+			url := strings.TrimRight(a.URL, "/") + "/metrics"
+			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
+			if err == nil {
+				client := &http.Client{Timeout: 2 * time.Second}
+				resp, err := client.Do(req)
+				if err == nil {
+					if resp.StatusCode == 200 {
+						body, _ := io.ReadAll(io.LimitReader(resp.Body, 1 << 20))
+						m.Reachable = true
+						m.MetricsBytes = len(body)
+						reachable++
+					}
+					_ = resp.Body.Close()
+				}
+			}
+			metricsList = append(metricsList, m)
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"agents":        metricsList,
+			"timestamp":     time.Now().UTC().Format(time.RFC3339),
+			"total_agents":  len(agents),
+			"reachable":     reachable,
+		})
+	})
+
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
