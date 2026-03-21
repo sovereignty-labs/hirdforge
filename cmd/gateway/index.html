@@ -242,6 +242,175 @@
     .comms{grid-template-columns:1fr 300px!important}
     .sidebar{width:300px!important}
   }
+
+  :root{
+    --bg:#08090f;
+    --bg-alt:#0d1016;
+    --bg-panel:#12161d;
+    --bg-panel-2:#171c24;
+    --bg-panel-3:#1c232d;
+    --line:#242c37;
+    --line-strong:#313b49;
+    --text:#e5e7eb;
+    --text-soft:#9aa4b2;
+    --text-dim:#667180;
+    --green:#22c55e;
+    --amber:#f59e0b;
+    --red:#ef4444;
+    --blue:#38bdf8;
+  }
+  .mc-app{display:flex;flex-direction:column;height:100vh;min-width:1200px;background:var(--bg);color:var(--text)}
+  .screen-warning{height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);color:var(--text-soft);font-family:'IBM Plex Mono',monospace}
+  .screen-warning-card{border:1px solid var(--line);background:var(--bg-panel);padding:28px 32px;max-width:480px}
+  .topbar{height:64px;display:grid;grid-template-columns:280px 1fr 420px;align-items:center;padding:0 20px;border-bottom:1px solid var(--line);background:var(--bg-alt);flex-shrink:0}
+  .brand-stack{display:flex;align-items:center;gap:14px}
+  .brand-mark{width:12px;height:12px;background:var(--blue)}
+  .brand-copy{display:flex;flex-direction:column;gap:2px}
+  .brand-title{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700;letter-spacing:.08em}
+  .brand-sub{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)}
+  .topnav{display:flex;justify-content:center;gap:8px}
+  .topnav button{height:36px;padding:0 16px;background:transparent;border:1px solid transparent;color:var(--text-soft);font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .topnav button.active{background:var(--bg-panel);border-color:var(--line-strong);color:var(--text)}
+  .hud-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .hud-card{display:flex;align-items:center;gap:10px;background:var(--bg-panel);border:1px solid var(--line);height:40px;padding:0 12px}
+  .hud-value{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700}
+  .hud-meta{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .hud-label{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .hud-note{font-size:11px;color:var(--text-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .status-dot{width:9px;height:9px;border-radius:50%;background:var(--text-dim);flex-shrink:0}
+  .status-dot.green{background:var(--green)}
+  .status-dot.amber{background:var(--amber)}
+  .status-dot.red{background:var(--red)}
+  .status-dot.blue{background:var(--blue)}
+  .status-dot.pulse{animation:pulse 1.2s ease-in-out infinite}
+  .main-shell{flex:1;min-height:0;overflow:hidden}
+  .mission-grid{display:grid;grid-template-columns:180px minmax(0,1fr) 240px;height:100%}
+  .warband-sidebar,.activity-feed,.mission-center,.cluster-view,.history-view,.settings-shell{min-height:0}
+  .warband-sidebar{border-right:1px solid var(--line);background:var(--bg-alt);display:flex;flex-direction:column}
+  .sidebar-head{padding:14px 14px 10px;border-bottom:1px solid var(--line)}
+  .section-kicker{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim)}
+  .section-title{margin-top:4px;font-family:'Space Grotesk',sans-serif;font-size:17px;font-weight:700;color:var(--text)}
+  .agent-rail{overflow:auto;padding:8px}
+  .agent-row{width:100%;display:grid;grid-template-columns:12px 1fr;gap:10px;align-items:start;padding:10px;border:1px solid transparent;background:transparent;text-align:left}
+  .agent-row.active{background:var(--bg-panel);border-color:var(--line-strong)}
+  .agent-row-name{font-size:12px;font-weight:700;color:var(--text)}
+  .agent-row-task{margin-top:4px;font-size:10px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mission-center{display:flex;flex-direction:column;gap:16px;padding:16px 18px;overflow:auto}
+  .panel{background:var(--bg-panel);border:1px solid var(--line)}
+  .panel-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--line)}
+  .panel-title{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:700}
+  .panel-subtitle{font-size:11px;color:var(--text-dim)}
+  .queue-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;padding:14px 16px}
+  .queue-card{border:1px solid var(--line);background:var(--bg-panel-2);padding:14px;display:flex;flex-direction:column;gap:10px}
+  .queue-card.warning{border-color:#5a3a12}
+  .queue-card.info{border-color:#1f4050}
+  .queue-header{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+  .queue-type{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .queue-title{font-size:14px;font-weight:700;line-height:1.35}
+  .queue-meta{font-size:11px;color:var(--text-soft);line-height:1.5}
+  .queue-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .flat-btn{height:32px;padding:0 12px;border:1px solid var(--line-strong);background:var(--bg-panel-3);color:var(--text);font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+  .flat-btn.green{border-color:#245d38;color:#86efac}
+  .flat-btn.amber{border-color:#6a4512;color:#fbbf24}
+  .flat-btn.red{border-color:#6b2323;color:#fca5a5}
+  .flat-btn.blue{border-color:#1f4a62;color:#7dd3fc}
+  .flat-btn:disabled{opacity:.5;cursor:not-allowed}
+  .empty-state{padding:22px 16px;color:var(--text-dim);font-size:12px}
+  .operations-list{display:flex;flex-direction:column}
+  .operation-group{padding:14px 16px;border-top:1px solid var(--line)}
+  .operation-group:first-child{border-top:none}
+  .operation-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}
+  .operation-title{font-size:14px;font-weight:700}
+  .operation-meta{font-size:11px;color:var(--text-dim)}
+  .operation-row{display:grid;grid-template-columns:110px minmax(0,1fr) 80px;gap:12px;align-items:center;padding:8px 0}
+  .operation-agent{font-size:12px;font-weight:700}
+  .operation-status{font-size:11px;color:var(--text-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .progress-track{height:8px;background:var(--bg);border:1px solid var(--line);position:relative}
+  .progress-fill{position:absolute;left:0;top:0;bottom:0;background:var(--blue)}
+  .activity-feed{border-left:1px solid var(--line);background:var(--bg-alt);display:flex;flex-direction:column;transition:width .2s ease}
+  .activity-feed.collapsed{width:32px}
+  .feed-head{display:flex;align-items:center;justify-content:space-between;padding:12px 10px;border-bottom:1px solid var(--line);min-height:54px}
+  .feed-toggle{width:24px;height:24px;border:1px solid var(--line-strong);background:var(--bg-panel);color:var(--text-soft)}
+  .feed-list{flex:1;overflow:auto}
+  .feed-item{display:grid;grid-template-columns:52px 68px minmax(0,1fr);gap:8px;padding:8px 10px;border-top:1px solid #181d24;font-size:10px}
+  .feed-item:first-child{border-top:none}
+  .feed-time{color:var(--text-dim)}
+  .feed-agent{color:var(--text-soft);text-transform:uppercase}
+  .feed-summary{color:var(--text)}
+  .feed-strip{display:flex;flex-direction:column;gap:10px;align-items:center;padding-top:12px}
+  .feed-strip span{writing-mode:vertical-rl;transform:rotate(180deg);font-size:9px;color:var(--text-dim);letter-spacing:.12em;text-transform:uppercase}
+  .chat-panel{position:fixed;top:64px;right:0;bottom:0;width:420px;background:var(--bg-panel);border-left:1px solid var(--line-strong);transform:translateX(100%);transition:transform .22s ease;z-index:50;display:flex;flex-direction:column}
+  .chat-panel.open{transform:translateX(0)}
+  .chat-panel-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)}
+  .chat-panel-head select,.chat-panel-head button,.chat-panel-head input,.chat-panel-head textarea{font-family:'IBM Plex Mono',monospace}
+  .chat-panel-head select{height:34px;background:var(--bg);border:1px solid var(--line-strong);color:var(--text);padding:0 10px;flex:1}
+  .chat-panel-body{display:flex;flex-direction:column;min-height:0;flex:1}
+  .chat-toolbar{display:flex;gap:8px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);background:var(--bg-alt)}
+  .toggle-chip{height:28px;padding:0 10px;border:1px solid var(--line-strong);background:var(--bg-panel-2);color:var(--text-soft);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+  .toggle-chip.active{color:var(--text);border-color:#315a6d}
+  .session-list-compact{max-height:112px;overflow:auto;padding:10px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+  .chat-shell{display:flex;flex-direction:column;min-height:0;flex:1}
+  .chat-scroll{flex:1;overflow:auto;padding:16px 14px;display:flex;flex-direction:column;gap:12px}
+  .chat-scroll .spacer{flex:1 0 auto}
+  .chat-input{padding:12px 14px;border-top:1px solid var(--line);background:var(--bg-alt);display:flex;gap:8px;align-items:flex-end}
+  .chat-input textarea{flex:1;min-height:78px;max-height:180px;background:var(--bg);border:1px solid var(--line-strong);color:var(--text);padding:10px 12px;line-height:1.5;outline:none}
+  .chat-input-actions{display:flex;flex-direction:column;gap:8px}
+  .chat-input .flat-btn{width:108px}
+  .cluster-view,.history-view,.settings-shell{height:100%;overflow:auto;padding:16px 18px}
+  .node-grid-mc{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:16px}
+  .node-card{background:var(--bg-panel);border:1px solid var(--line);padding:14px}
+  .node-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+  .node-name{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:700}
+  .node-stat{font-size:11px;color:var(--text-soft)}
+  .node-bars{display:flex;flex-direction:column;gap:12px}
+  .bar-label{display:flex;justify-content:space-between;margin-bottom:4px;font-size:11px;color:var(--text-soft)}
+  .workloads-grid{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px}
+  .pod-table{display:flex;flex-direction:column}
+  .pod-head,.pod-line{display:grid;grid-template-columns:30px minmax(0,1fr) 80px 70px 120px;gap:10px;align-items:center;padding:10px 14px}
+  .pod-head{border-bottom:1px solid var(--line);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+  .pod-line{border-top:1px solid #181d24}
+  .pod-expand{width:22px;height:22px;background:transparent;border:1px solid var(--line);color:var(--text-soft)}
+  .pod-name{display:flex;align-items:center;gap:8px;min-width:0}
+  .pod-expanded{padding:0 14px 14px 54px;border-top:1px solid #181d24;background:var(--bg-alt)}
+  .log-box{margin-top:12px;background:var(--bg);border:1px solid var(--line);padding:10px;min-height:140px;max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:11px;color:var(--text-soft)}
+  .gitops-grid{display:flex;flex-direction:column;gap:12px;padding:14px}
+  .gitops-row{display:flex;justify-content:space-between;gap:10px;font-size:12px}
+  .gitops-label{color:var(--text-dim)}
+  .gitops-value{color:var(--text)}
+  .deploy-list{display:flex;flex-direction:column;gap:8px}
+  .deploy-item{padding:8px 10px;background:var(--bg-alt);border:1px solid var(--line)}
+  .history-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;height:100%}
+  .history-panel{background:var(--bg-panel);border:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  .history-filter{display:flex;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--bg-alt)}
+  .history-filter input,.history-filter select{height:34px;background:var(--bg);border:1px solid var(--line-strong);color:var(--text);padding:0 10px;font-family:'IBM Plex Mono',monospace}
+  .history-list{flex:1;overflow:auto}
+  .history-item{padding:12px 14px;border-top:1px solid #181d24}
+  .history-item:first-child{border-top:none}
+  .history-item-title{font-size:13px;font-weight:700}
+  .history-item-meta{margin-top:5px;font-size:11px;color:var(--text-soft)}
+  .settings-layout{display:grid;grid-template-columns:160px minmax(0,1fr);gap:16px;height:100%}
+  .settings-nav{background:var(--bg-panel);border:1px solid var(--line);padding:12px}
+  .settings-nav button{width:100%;height:34px;text-align:left;padding:0 12px;border:1px solid transparent;background:transparent;color:var(--text-soft);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+  .settings-nav button.active{background:var(--bg-alt);border-color:var(--line-strong);color:var(--text)}
+  .settings-note{margin-top:18px;padding-top:12px;border-top:1px solid var(--line);font-size:10px;line-height:1.6;color:var(--text-dim)}
+  .settings-panel{background:var(--bg-panel);border:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  .settings-content{padding:16px;overflow:auto;display:flex;flex-direction:column;gap:16px}
+  .field-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+  .field{display:flex;flex-direction:column;gap:6px}
+  .field label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--text-dim)}
+  .field input,.field select,.field textarea{background:var(--bg);border:1px solid var(--line-strong);color:var(--text);padding:10px 12px;font-family:'IBM Plex Mono',monospace}
+  .field textarea{min-height:120px}
+  .settings-table{border:1px solid var(--line);background:var(--bg-alt)}
+  .settings-row,.settings-head{display:grid;grid-template-columns:180px 1fr 160px 120px 100px;gap:10px;padding:10px 12px;align-items:center}
+  .settings-head{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim);border-bottom:1px solid var(--line)}
+  .settings-row{border-top:1px solid #181d24;cursor:pointer}
+  .settings-row.active{background:var(--bg-panel-2)}
+  .agent-detail{border:1px solid var(--line);background:var(--bg-alt);padding:14px;display:flex;flex-direction:column;gap:12px}
+  .detail-actions{display:flex;gap:8px;flex-wrap:wrap}
+  .kv-list{display:flex;flex-direction:column;gap:10px}
+  .kv-item{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;background:var(--bg-alt);border:1px solid var(--line)}
+  .subtle{font-size:11px;color:var(--text-dim)}
+  .inline-list{display:flex;gap:8px;flex-wrap:wrap}
 </style>
 </head>
 <body>
@@ -336,6 +505,109 @@ function useRepos(){
 async function mergePR(repo,index){
   try{const r=await fetch(`/api/v1/gitea/prs/${repo}/${index}/merge`,{method:'POST'});
     return r.ok?{ok:true}:{ok:false,error:`${r.status}`};}catch(e){return{ok:false,error:e.message};}
+}
+async function apiDelete(path){
+  try{
+    const r=await fetch(CFG.API+path,{method:'DELETE'});
+    const text=await r.text();
+    let data={};
+    try{data=text?JSON.parse(text):{};}catch{data={error:text};}
+    return{ok:r.ok,status:r.status,data};
+  }catch(e){return{ok:false,status:0,data:{error:e.message}};}
+}
+async function apiPatchJSON(path,body){
+  try{
+    const r=await fetch(CFG.API+path,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const text=await r.text();
+    let data={};
+    try{data=text?JSON.parse(text):{};}catch{data={error:text};}
+    return{ok:r.ok,status:r.status,data};
+  }catch(e){return{ok:false,status:0,data:{error:e.message}};}
+}
+async function apiPutJSON(path,body){
+  try{
+    const r=await fetch(CFG.API+path,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const text=await r.text();
+    let data={};
+    try{data=text?JSON.parse(text):{};}catch{data={error:text};}
+    return{ok:r.ok,status:r.status,data};
+  }catch(e){return{ok:false,status:0,data:{error:e.message}};}
+}
+async function apiGetJSONDetailed(path){
+  try{
+    const r=await fetch(CFG.API+path);
+    const text=await r.text();
+    let data=null;
+    try{data=text?JSON.parse(text):null;}catch{data=text;}
+    return{ok:r.ok,status:r.status,data};
+  }catch(e){return{ok:false,status:0,data:{error:e.message}};}
+}
+function useBufferedWS(visible){
+  const bufferRef=useRef([]);
+  const timerRef=useRef(null);
+  const[events,setEvents]=useState([]);
+  const[ok,setOk]=useState(false);
+  const flush=useCallback(()=>{setEvents(bufferRef.current.slice());},[]);
+  useEffect(()=>{if(visible)flush();},[visible,flush]);
+  useEffect(()=>{
+    if(CFG.MOCK)return undefined;
+    const u=CFG.WS||`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/ws/events`;
+    let ws;let backoff=3000;let cancelled=false;
+    const schedule=()=>{
+      if(visible){
+        flush();
+        return;
+      }
+      if(timerRef.current)return;
+      timerRef.current=setTimeout(()=>{timerRef.current=null;flush();},500);
+    };
+    const connect=()=>{
+      ws=new WebSocket(u);
+      ws.onopen=()=>{setOk(true);backoff=3000;};
+      ws.onclose=()=>{setOk(false);if(cancelled)return;backoff=Math.min(backoff*2,30000);setTimeout(connect,backoff);};
+      ws.onmessage=e=>{
+        try{
+          const item=JSON.parse(e.data);
+          if(!item.timestamp)item.timestamp=new Date().toISOString();
+          bufferRef.current=[item].concat(bufferRef.current).slice(0,200);
+          schedule();
+        }catch{}
+      };
+    };
+    connect();
+    return()=>{
+      cancelled=true;
+      if(timerRef.current){clearTimeout(timerRef.current);timerRef.current=null;}
+      if(ws)ws.close();
+    };
+  },[flush,visible]);
+  return{events,ok,bufferRef};
+}
+function useSimplePoll(path,fallback,interval){
+  const[data,setData]=useState(fallback);
+  const[status,setStatus]=useState('loading');
+  useEffect(()=>{
+    let live=true;
+    const go=async()=>{
+      const res=await apiGetJSONDetailed(path);
+      if(!live)return;
+      if(res.ok){
+        setData(res.data==null?fallback:res.data);
+        setStatus('ready');
+        return;
+      }
+      if(res.status===404){
+        setData(fallback);
+        setStatus('missing');
+        return;
+      }
+      setStatus('error');
+    };
+    go();
+    const id=setInterval(go,interval||CFG.POLL);
+    return()=>{live=false;clearInterval(id);};
+  },[path]);
+  return{data,status};
 }
 
 // ═══════════ STREAM ═══════════
@@ -550,7 +822,7 @@ const LogModal=({pod,onClose})=>{const[logs,setLogs]=useState("Loading...");cons
 };
 
 // ═══════════ CHAT BUBBLE ═══════════
-const ChatBubble=({msg})=>{const self=msg.from==="kit";const c=C[msg.from]||"#818cf8";const tc=(msg.toolCalls||[]).length>0||(msg.toolResults||[]).length>0;
+const ChatBubble=({msg,showTools=true})=>{const self=msg.from==="kit";const c=C[msg.from]||"#818cf8";const tc=(msg.toolCalls||[]).length>0||(msg.toolResults||[]).length>0;
   if(msg.kind==="notification"){const accent=C[msg.noticeAgent]||c;const ok=msg.noticeLevel!=="error";
     return<div className="msg notice"><div className="msg-body" style={{marginLeft:32}}>
       <div className="msg-meta"><span style={{fontSize:10,fontWeight:700,color:accent,letterSpacing:".06em",textTransform:"uppercase"}}>{ok?"Task Complete":"Task Failed"}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.18)"}}>{msg.time}</span></div>
@@ -566,7 +838,7 @@ const ChatBubble=({msg})=>{const self=msg.from==="kit";const c=C[msg.from]||"#81
       <div style={{position:"absolute",top:0,left:0,bottom:0,width:2,background:self?"#10b981":c,opacity:.35,borderRadius:1}}/>
       {msg.streaming&&!msg.text&&<div className="forging"><span className="dot"/>Forging response...</div>}
       <div className="msg-text" dangerouslySetInnerHTML={{__html:md(msg.text)}}/>
-      {tc&&<details><summary className="tool-toggle">⚒ {(msg.toolCalls||[]).length} tool call{(msg.toolCalls||[]).length!==1?'s':''}</summary><div style={{paddingTop:3}}>
+      {showTools&&tc&&<details><summary className="tool-toggle">⚒ {(msg.toolCalls||[]).length} tool call{(msg.toolCalls||[]).length!==1?'s':''}</summary><div style={{paddingTop:3}}>
         {(msg.toolCalls||[]).map((t,i)=><div key={`c${i}`} className="tool-chip call"><span style={{color:"#22d3ee",fontWeight:800,fontSize:9,letterSpacing:".06em"}}>TOOL</span><span style={{color:"rgba(255,255,255,0.45)"}}>{t.tool}</span><span className="tool-chip-body">{typeof t.args==='string'?t.args:JSON.stringify(t.args)}</span></div>)}
         {(msg.toolResults||[]).map((t,i)=><div key={`r${i}`} className="tool-chip result"><span style={{color:"#34d399",fontWeight:800,fontSize:9,letterSpacing:".06em"}}>RESULT</span><span className="tool-chip-body">{typeof t.result==='string'?t.result:JSON.stringify(t.result)}</span></div>)}
       </div></details>}
@@ -1126,135 +1398,614 @@ const HealthView=({agents,fleetState})=>{
 };
 
 // ═══════════ APP ═══════════
-const Tab=({active,label,count,onClick})=><button onClick={onClick} style={{background:"none",border:"none",color:active?"#e2e8f0":"rgba(255,255,255,0.22)",padding:"10px 0",marginRight:22,fontSize:11,fontFamily:"'IBM Plex Mono',monospace",fontWeight:active?700:400,letterSpacing:".1em",textTransform:"uppercase",borderBottom:active?"2px solid #818cf8":"2px solid transparent"}}>{label}{count!=null&&<span style={{marginLeft:4,fontSize:10,color:active?"#818cf8":"rgba(255,255,255,0.1)"}}>{count}</span>}</button>;
-
-
 const lck=(u,a)=>`hirdforge-chat-${u}-${a}`;const lsk=(u,a)=>`hirdforge-session-${u}-${a}`;
 const u2s=m=>({role:m.from==="kit"?"user":"assistant",content:m.text||"",timestamp:m.timestamp||Date.now(),kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent});
 const s2u=(a,m,uname,source)=>{const u=m.role==="user";const aid=u?"kit":(m.noticeAgent||a);const auto=source==="cronjob";
   return{from:u?"kit":a,agent:u?{id:"kit",name:auto?"CronJob":`${uname||'Sovereign'}`,initial:auto?"C":((uname||'S')[0]?.toUpperCase()||"S"),status:"online"}:{id:aid,name:aid,initial:(aid||"?")[0]?.toUpperCase()||"?",status:"online"},text:m.content||"",time:new Date(m.timestamp||Date.now()).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:m.timestamp||Date.now(),streaming:false,toolCalls:[],toolResults:[],kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent};};
+const eventColor=type=>{
+  const t=(type||"").toLowerCase();
+  if(t.includes("failed")||t.includes("error"))return "red";
+  if(t.includes("approval")||t.includes("pause")||t.includes("review"))return "amber";
+  if(t.includes("merge")||t.includes("complete")||t.includes("sync"))return "green";
+  if(t.includes("dispatch")||t.includes("message")||t.includes("tool")||t.includes("recon"))return "blue";
+  return "blue";
+};
+const barTone=v=>v>80?"var(--red)":v>=60?"var(--amber)":"var(--green)";
+const safePct=v=>`${Math.max(0,Math.round(Number(v)||0))}%`;
+const summarizeApprovalParams=params=>{try{const txt=JSON.stringify(params||{});return txt.length>160?`${txt.slice(0,160)}…`:txt;}catch{return "{}";}};
+const extractFileName=text=>{const m=(text||"").match(/([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)/);return m?m[1]:"working set";};
+const summarizeEvent=e=>e?.summary||e?.message||e?.result||e?.error||e?.type||"event";
+const progressFromEventType=type=>({recon_started:18,recon_reading:28,tool_call:55,message:62,injection_sent:66,webhook_peer_review:78,webhook_freya_review:88,pr_created:100,task_complete:100,task_failed:100})[(type||"").toLowerCase()]||45;
+
+function MissionControlView({agents,fleetState,approvals,approvalBusy,onApproval,prs,mergeBusy,onMerge,events,feedCollapsed,onToggleFeed,onOpenChat}){
+  const mergeReady=useMemo(()=>prs.filter(pr=>pr.state==="open"&&pr.mergeable),[prs]);
+  const activeGroups=useMemo(()=>{
+    const byTask={};
+    (fleetState||[]).filter(item=>item.active).forEach(item=>{
+      const key=item.task_ref||item.session_id||item.name;
+      if(!byTask[key])byTask[key]={key,title:item.task_ref||`Session ${item.session_id||item.name}`,agents:[]};
+      const latest=(events||[]).find(ev=>(ev.agent||"").toLowerCase()===item.name);
+      byTask[key].agents.push({
+        name:item.name,
+        status:summarizeEvent(latest),
+        file:extractFileName(summarizeEvent(latest)),
+        progress:progressFromEventType(latest?.type),
+        since:item.since
+      });
+    });
+    return Object.values(byTask);
+  },[fleetState,events]);
+  return <div className="mission-grid" style={{gridTemplateColumns:feedCollapsed?"180px minmax(0,1fr) 32px":"180px minmax(0,1fr) 240px"}}>
+    <aside className="warband-sidebar">
+      <div className="sidebar-head">
+        <div className="section-kicker">Warband</div>
+        <div className="section-title">Builders</div>
+      </div>
+      <div className="agent-rail">
+        {agents.map(agent=>{
+          const state=(fleetState||[]).find(item=>item.name===agent.id)||{};
+          const isActive=!!state.active;
+          return <button key={agent.id} className="agent-row" onClick={()=>onOpenChat(agent.id)}>
+            <span className={`status-dot ${agent.status==="online"?"green":"red"} ${isActive?"pulse":""}`}/>
+            <span>
+              <div className="agent-row-name">{agent.id}</div>
+              <div className="agent-row-task">{state.task_ref||state.source||agent.last_action||"idle"}</div>
+            </span>
+          </button>;
+        })}
+      </div>
+    </aside>
+    <main className="mission-center">
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <div className="panel-title">Sovereign required</div>
+            <div className="panel-subtitle">Pending Lockbox decisions and merge-ready pull requests.</div>
+          </div>
+          <div className="subtle">{approvals.filter(item=>item.status==="pending").length+mergeReady.length} items</div>
+        </div>
+        <div className="queue-grid">
+          {approvals.filter(item=>item.status==="pending").map(item=><div key={item.queue_id} className="queue-card warning">
+            <div className="queue-header">
+              <div>
+                <div className="queue-type">Approval queue</div>
+                <div className="queue-title">{item.action||"pending action"}</div>
+              </div>
+              <div className="subtle">{fAgo(item.queued_at)}</div>
+            </div>
+            <div className="queue-meta">{summarizeApprovalParams(item.params)}</div>
+            <div className="queue-actions">
+              <button className="flat-btn green" disabled={!!approvalBusy[item.queue_id]} onClick={()=>onApproval(item.queue_id,true)}>Approve</button>
+              <button className="flat-btn red" disabled={!!approvalBusy[item.queue_id]} onClick={()=>onApproval(item.queue_id,false)}>Reject</button>
+            </div>
+          </div>)}
+          {mergeReady.map(pr=><div key={`${pr.repo}-${pr.number}`} className="queue-card info">
+            <div className="queue-header">
+              <div>
+                <div className="queue-type">Merge ready PR</div>
+                <div className="queue-title">#{pr.number} {pr.title}</div>
+              </div>
+              <div className="subtle">{pr.repo}</div>
+            </div>
+            <div className="queue-meta">{pr.user} · {pr.base} ← {pr.head}</div>
+            <div className="queue-actions">
+              <button className="flat-btn blue" disabled={!!mergeBusy[`${pr.repo}-${pr.number}`]} onClick={()=>onMerge(pr.repo,pr.number)}>Merge PR</button>
+              <a className="flat-btn" style={{display:"inline-flex",alignItems:"center",textDecoration:"none"}} href={pr.html_url} target="_blank" rel="noreferrer">Open in Gitea</a>
+            </div>
+          </div>)}
+          {!approvals.filter(item=>item.status==="pending").length&&!mergeReady.length&&<div className="empty-state">No approvals or merge-ready pull requests are waiting on sovereign action.</div>}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <div className="panel-title">Active operations</div>
+            <div className="panel-subtitle">Live task execution grouped by current assignment.</div>
+          </div>
+          <div className="subtle">{activeGroups.length} active task{activeGroups.length===1?"":"s"}</div>
+        </div>
+        <div className="operations-list">
+          {activeGroups.map(group=><div key={group.key} className="operation-group">
+            <div className="operation-head">
+              <div>
+                <div className="operation-title">{group.title}</div>
+                <div className="operation-meta">{group.agents.length} agent{group.agents.length===1?"":"s"} engaged</div>
+              </div>
+            </div>
+            {group.agents.map(row=><div key={`${group.key}-${row.name}`} className="operation-row">
+              <div>
+                <div className="operation-agent">{row.name}</div>
+                <div className="subtle">{row.since?fAgo(new Date(row.since*1000).toISOString()):"active now"}</div>
+              </div>
+              <div>
+                <div className="operation-status">{row.file} · {row.status}</div>
+                <div className="progress-track"><div className="progress-fill" style={{width:`${row.progress}%`,background:"var(--blue)"}}/></div>
+              </div>
+              <div className="subtle" style={{textAlign:"right"}}>{row.progress}%</div>
+            </div>)}
+          </div>)}
+          {!activeGroups.length&&<div className="empty-state">No active operations are running right now.</div>}
+        </div>
+      </section>
+    </main>
+    <aside className={`activity-feed ${feedCollapsed?"collapsed":""}`}>
+      <div className="feed-head">
+        {feedCollapsed?<div/>:<div><div className="section-kicker">Feed</div><div className="panel-subtitle">Last 200 events</div></div>}
+        <button className="feed-toggle" onClick={onToggleFeed}>{feedCollapsed?"‹":"›"}</button>
+      </div>
+      {feedCollapsed?<div className="feed-strip"><span>Activity</span></div>:<div className="feed-list">
+        {(events||[]).map((event,index)=><div key={`${event.timestamp||index}-${index}`} className="feed-item">
+          <div className="feed-time">{fT(event.timestamp)}</div>
+          <div className="feed-agent">{event.agent||"system"}</div>
+          <div className="feed-summary" style={{color:`var(--${eventColor(event.type)})`}}>{summarizeEvent(event)}</div>
+        </div>)}
+        {!(events||[]).length&&<div className="empty-state">Waiting for WebSocket events.</div>}
+      </div>}
+    </aside>
+  </div>;
+}
+
+function ClusterView({nodes,pods,gitops,gitopsStatus,toast}){
+  const[expanded,setExpanded]=useState({});
+  const[logsByPod,setLogsByPod]=useState({});
+  const[loadingLogs,setLoadingLogs]=useState({});
+  const[restartArmed,setRestartArmed]=useState({});
+  useEffect(()=>{
+    const next={};
+    (pods||[]).filter(p=>(p.namespace||"valhalla")==="valhalla"&&(p.restarts||0)>=3).forEach(p=>{next[p.name]=true;});
+    setExpanded(prev=>Object.keys(prev).length?prev:next);
+  },[pods]);
+  const loadLogs=async podName=>{
+    setLoadingLogs(prev=>({...prev,[podName]:true}));
+    const res=await fetch(`/api/v1/cluster/pods/valhalla/${encodeURIComponent(podName)}/logs?tail=50`).catch(()=>null);
+    if(!res){setLogsByPod(prev=>({...prev,[podName]:"Gateway could not reach the log endpoint."}));setLoadingLogs(prev=>({...prev,[podName]:false}));return;}
+    if(res.status===404){setLogsByPod(prev=>({...prev,[podName]:"Log endpoint not available yet on this gateway build."}));setLoadingLogs(prev=>({...prev,[podName]:false}));return;}
+    const text=await res.text();
+    setLogsByPod(prev=>({...prev,[podName]:text||"(empty log output)"}));
+    setLoadingLogs(prev=>({...prev,[podName]:false}));
+  };
+  const toggleExpand=podName=>{
+    setExpanded(prev=>{
+      const next=!prev[podName];
+      const out={...prev,[podName]:next};
+      if(next&&!logsByPod[podName]&&!loadingLogs[podName])loadLogs(podName);
+      return out;
+    });
+  };
+  const restartPod=async podName=>{
+    if(!restartArmed[podName]){
+      setRestartArmed(prev=>({...prev,[podName]:true}));
+      setTimeout(()=>setRestartArmed(prev=>{const out={...prev};delete out[podName];return out;}),3000);
+      return;
+    }
+    const res=await apiDelete(`/api/v1/cluster/pods/valhalla/${encodeURIComponent(podName)}`);
+    if(res.status===404){toast("Pod restart endpoint not available yet.");}
+    else if(!res.ok){toast(res.data?.error||"Pod restart failed");}
+    else{toast(res.data?.message||`Restart requested for ${podName}`);}
+    setRestartArmed(prev=>{const out={...prev};delete out[podName];return out;});
+  };
+  const gitopsDeployments=Array.isArray(gitops?.deployments)?gitops.deployments:(Array.isArray(gitops?.recent_deployments)?gitops.recent_deployments:[]);
+  return <div className="cluster-view">
+    <div className="node-grid-mc">
+      {["node-cp-1","node-worker-1","node-worker-2"].map(name=>{
+        const node=(nodes||[]).find(item=>(item.name||"").toLowerCase().includes(name.toLowerCase()))||{name,status:"Unknown",cpu_percent:0,memory_percent:0};
+        const podCount=(pods||[]).filter(p=>(p.node||"").toLowerCase()===(node.name||"").toLowerCase()).length;
+        return <div key={name} className="node-card">
+          <div className="node-title">
+            <div className="node-name">{node.name||name}</div>
+            <span className={`status-dot ${String(node.status).toLowerCase()==="ready"?"green":"amber"}`}/>
+          </div>
+          <div className="node-bars">
+            <div>
+              <div className="bar-label"><span>CPU</span><span>{safePct(node.cpu_percent)}</span></div>
+              <div className="progress-track"><div className="progress-fill" style={{width:safePct(node.cpu_percent),background:barTone(node.cpu_percent)}}/></div>
+            </div>
+            <div>
+              <div className="bar-label"><span>Memory</span><span>{safePct(node.memory_percent)}</span></div>
+              <div className="progress-track"><div className="progress-fill" style={{width:safePct(node.memory_percent),background:barTone(node.memory_percent)}}/></div>
+            </div>
+            <div className="node-stat">{podCount} pods scheduled</div>
+          </div>
+        </div>;
+      })}
+    </div>
+    <div className="workloads-grid">
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <div className="panel-title">Workloads</div>
+            <div className="panel-subtitle">Valhalla namespace pods with inline logs and restart controls.</div>
+          </div>
+        </div>
+        <div className="pod-table">
+          <div className="pod-head"><span/><span>Name</span><span>Restarts</span><span>Age</span><span>Status</span></div>
+          {(pods||[]).filter(p=>(p.namespace||"valhalla")==="valhalla").map(pod=><React.Fragment key={pod.name}>
+            <div className="pod-line">
+              <button className="pod-expand" onClick={()=>toggleExpand(pod.name)}>{expanded[pod.name]?"−":"+"}</button>
+              <div className="pod-name"><span className={`status-dot ${pod.ready?"green":"amber"}`}/><span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{pod.name}</span></div>
+              <div style={{color:pod.restarts>=3?"var(--red)":pod.restarts>=1?"var(--amber)":"var(--text)"}}>{pod.restarts||0}</div>
+              <div className="subtle">{pod.age||"—"}</div>
+              <div className="subtle">{pod.status||"unknown"}</div>
+            </div>
+            {expanded[pod.name]&&<div className="pod-expanded">
+              <div className="queue-actions" style={{paddingTop:12}}>
+                <button className={`flat-btn ${restartArmed[pod.name]?"red":"amber"}`} onClick={()=>restartPod(pod.name)}>{restartArmed[pod.name]?"Confirm restart":"Restart pod"}</button>
+                <button className="flat-btn blue" onClick={()=>loadLogs(pod.name)}>Refresh logs</button>
+              </div>
+              <div className="log-box">{loadingLogs[pod.name]?"Loading logs…":(logsByPod[pod.name]||"No logs loaded yet.")}</div>
+            </div>}
+          </React.Fragment>)}
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-head">
+          <div>
+            <div className="panel-title">GitOps</div>
+            <div className="panel-subtitle">ArgoCD deployment status and drift signals.</div>
+          </div>
+          <div className="subtle">{gitopsStatus==="missing"?"endpoint pending":"live"}</div>
+        </div>
+        {gitopsStatus==="missing"?<div className="empty-state">`/api/v1/gitops/status` is not available on this gateway yet.</div>:<div className="gitops-grid">
+          <div className="gitops-row"><span className="gitops-label">Sync status</span><span className="gitops-value">{gitops?.sync_status||gitops?.syncStatus||"unknown"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Last sync</span><span className="gitops-value">{gitops?.last_sync_time||gitops?.lastSyncTime||"—"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Deployed SHA</span><span className="gitops-value">{gitops?.deployed_sha||gitops?.deployedSha||"—"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Git head SHA</span><span className="gitops-value">{gitops?.git_head_sha||gitops?.gitHeadSha||"—"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Drift</span><span className="gitops-value">{gitops?.drift_indicator||gitops?.drift||"—"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Self-heal</span><span className="gitops-value">{String(gitops?.self_heal_enabled??gitops?.selfHealEnabled??"—")}</span></div>
+          <div className="gitops-row"><span className="gitops-label">TLS expiry</span><span className="gitops-value">{gitops?.tls_expiry||gitops?.tlsExpiry||"—"}</span></div>
+          <div>
+            <div className="section-kicker" style={{marginBottom:8}}>Recent deployments</div>
+            <div className="deploy-list">
+              {gitopsDeployments.slice(0,5).map((item,index)=><div key={index} className="deploy-item">
+                <div style={{fontSize:12,fontWeight:700}}>{item.sha||item.version||item.id||"deployment"}</div>
+                <div className="subtle" style={{marginTop:4}}>{item.time||item.timestamp||item.status||"—"}</div>
+              </div>)}
+              {!gitopsDeployments.length&&<div className="subtle">No deployment history returned.</div>}
+            </div>
+          </div>
+        </div>}
+      </section>
+    </div>
+  </div>;
+}
+
+function HistoryView({tasks,taskStatus,deployments,deployStatus,agents}){
+  const[agentFilter,setAgentFilter]=useState("all");
+  const[dateFilter,setDateFilter]=useState("");
+  const normalizedTasks=Array.isArray(tasks)?tasks:(Array.isArray(tasks?.items)?tasks.items:[]);
+  const normalizedDeployments=Array.isArray(deployments)?deployments:(Array.isArray(deployments?.items)?deployments.items:[]);
+  const filteredTasks=useMemo(()=>normalizedTasks.filter(item=>{
+    const agent=(item.agent||item.owner||"").toLowerCase();
+    const when=(item.completed_at||item.timestamp||item.time||"").slice(0,10);
+    if(agentFilter!=="all"&&agent!==agentFilter)return false;
+    if(dateFilter&&when!==dateFilter)return false;
+    return true;
+  }),[normalizedTasks,agentFilter,dateFilter]);
+  return <div className="history-view">
+    <div className="history-grid">
+      <section className="history-panel">
+        <div className="panel-head">
+          <div><div className="panel-title">Completed tasks</div><div className="panel-subtitle">Chronological task execution history.</div></div>
+        </div>
+        <div className="history-filter">
+          <select value={agentFilter} onChange={e=>setAgentFilter(e.target.value)}>
+            <option value="all">All agents</option>
+            {agents.map(agent=><option key={agent.id} value={agent.id}>{agent.id}</option>)}
+          </select>
+          <input type="date" value={dateFilter} onChange={e=>setDateFilter(e.target.value)}/>
+        </div>
+        <div className="history-list">
+          {taskStatus==="missing"&&<div className="empty-state">`/api/v1/history/tasks` is not available yet.</div>}
+          {filteredTasks.map((item,index)=><div key={item.id||index} className="history-item">
+            <div className="history-item-title">{item.title||item.task||item.summary||"Completed task"}</div>
+            <div className="history-item-meta">{item.agent||item.owner||"unknown"} · {item.completed_at||item.timestamp||item.time||"—"}</div>
+          </div>)}
+          {!filteredTasks.length&&taskStatus!=="missing"&&<div className="empty-state">No completed tasks match the current filter.</div>}
+        </div>
+      </section>
+      <section className="history-panel">
+        <div className="panel-head">
+          <div><div className="panel-title">Deployment log</div><div className="panel-subtitle">Recent releases and rollouts.</div></div>
+        </div>
+        <div className="history-list">
+          {deployStatus==="missing"&&<div className="empty-state">`/api/v1/history/deployments` is not available yet.</div>}
+          {normalizedDeployments.map((item,index)=><div key={item.id||index} className="history-item">
+            <div className="history-item-title">{item.service||item.title||item.sha||"Deployment"}</div>
+            <div className="history-item-meta">{item.status||"unknown"} · {item.timestamp||item.time||item.completed_at||"—"}</div>
+          </div>)}
+          {!normalizedDeployments.length&&deployStatus!=="missing"&&<div className="empty-state">No deployment events returned.</div>}
+        </div>
+      </section>
+    </div>
+  </div>;
+}
+
+function SettingsViewNext({agents,repos,fleetState,toast}){
+  const[section,setSection]=useState("agents");
+  const[selectedAgent,setSelectedAgent]=useState("");
+  const[settings,setSettings]=useState({});
+  const[settingsStatus,setSettingsStatus]=useState("loading");
+  const[modelValue,setModelValue]=useState("");
+  const[webhookURL,setWebhookURL]=useState("");
+  const[saveBusy,setSaveBusy]=useState(false);
+  const personaRepo=(repos||[]).find(repo=>repo.full_name==="kit/hirdforge-personas"||`${repo.owner}/${repo.name}`==="kit/hirdforge-personas");
+  useEffect(()=>{if(!selectedAgent&&agents[0])setSelectedAgent(agents[0].id);},[agents,selectedAgent]);
+  useEffect(()=>{
+    let live=true;
+    (async()=>{
+      const res=await apiGetJSONDetailed('/api/v1/settings');
+      if(!live)return;
+      if(res.ok){setSettings(res.data||{});setSettingsStatus("ready");}
+      else setSettingsStatus("error");
+    })();
+    return()=>{live=false;};
+  },[]);
+  useEffect(()=>{
+    const agent=agents.find(item=>item.id===selectedAgent);
+    if(agent)setModelValue(agent.model||"");
+  },[selectedAgent,agents]);
+  useEffect(()=>{setWebhookURL(settings["notifications.discord_webhook_url"]||"");},[settings]);
+  const patchSetting=async(key,value)=>{
+    const res=await apiPatchJSON(`/api/v1/settings/${encodeURIComponent(key)}`,{value});
+    if(!res.ok){toast(res.data?.error||"Settings update failed");return;}
+    setSettings(res.data||settings);
+    toast("Settings saved");
+  };
+  const updateModel=async()=>{
+    if(!selectedAgent)return;
+    setSaveBusy(true);
+    try{
+      const res=await fetch(`/api/v1/settings/agents/${encodeURIComponent(selectedAgent)}/model`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:modelValue})});
+      if(res.status===404)toast("Agent model endpoint not available yet.");
+      else if(!res.ok)toast((await res.text())||`HTTP ${res.status}`);
+      else toast("Model update requested");
+    }catch(e){toast(e.message||"Model update failed");}
+    setSaveBusy(false);
+  };
+  const selected=agents.find(item=>item.id===selectedAgent);
+  return <div className="settings-shell">
+    <div className="settings-layout">
+      <aside className="settings-nav">
+        {["agents","notifications","task board","display","credentials"].map(item=>{
+          const key=item.replace(" ","_");
+          return <button key={key} className={section===key?"active":""} onClick={()=>setSection(key)}>{item}</button>;
+        })}
+        <div className="settings-note">Forgedoc config requires helm upgrade</div>
+      </aside>
+      <section className="settings-panel">
+        <div className="panel-head">
+          <div><div className="panel-title">Settings</div><div className="panel-subtitle">Operational controls and gateway preferences.</div></div>
+          <div className="subtle">{settingsStatus==="ready"?"live":"loading"}</div>
+        </div>
+        <div className="settings-content">
+          {section==="agents"&&<>
+            <div className="settings-table">
+              <div className="settings-head"><span>Name</span><span>Role</span><span>Backend</span><span>Model</span><span>Enabled</span></div>
+              {agents.map(agent=>{const paused=!!(fleetState||[]).find(item=>item.name===agent.id)?.paused;return <div key={agent.id} className={`settings-row ${selectedAgent===agent.id?"active":""}`} onClick={()=>setSelectedAgent(agent.id)}>
+                <span>{agent.id}</span><span>{agent.role}</span><span>{agent.backend||"—"}</span><span>{agent.model||"—"}</span>
+                <button className={`flat-btn ${paused?"amber":"green"}`} onClick={async e=>{e.stopPropagation();const path=paused?`/api/v1/agents/${encodeURIComponent(agent.id)}/resume`:`/api/v1/agents/${encodeURIComponent(agent.id)}/pause`;const out=await apiPost(path);toast(out?.error||`${agent.id} ${paused?"resumed":"paused"}`);}}>{paused?"Disabled":"Enabled"}</button>
+              </div>;})}
+            </div>
+            {selected&&<div className="agent-detail">
+              <div style={{display:"flex",justifyContent:"space-between",gap:12,alignItems:"center"}}>
+                <div><div className="panel-title" style={{fontSize:16}}>{selected.id}</div><div className="panel-subtitle">{selected.role}</div></div>
+                <div className="detail-actions">
+                  {personaRepo&&<a className="flat-btn blue" href={personaRepo.html_url} target="_blank" rel="noreferrer">Persona repo</a>}
+                  {personaRepo&&<a className="flat-btn" href={`${personaRepo.html_url}/src/branch/main`} target="_blank" rel="noreferrer">Edit persona</a>}
+                </div>
+              </div>
+              <div className="field-grid">
+                <div className="field"><label>Model selector</label><select value={modelValue} onChange={e=>setModelValue(e.target.value)}><option value={modelValue}>{modelValue||"current"}</option><option value="gpt-5">gpt-5</option><option value="gpt-5-mini">gpt-5-mini</option><option value="claude">claude</option></select></div>
+                <div className="field"><label>Last persona update SHA</label><input value={settings[`agents.${selected.id}.persona_sha`]||"Unavailable"} readOnly/></div>
+                <div className="field"><label>Max context</label><input value={settings[`agents.${selected.id}.max_context`]||"—"} readOnly/></div>
+                <div className="field"><label>Max tool rounds</label><input value={settings[`agents.${selected.id}.max_tool_rounds`]||"—"} readOnly/></div>
+              </div>
+              <div className="detail-actions"><button className="flat-btn blue" disabled={saveBusy} onClick={updateModel}>Apply model</button></div>
+            </div>}
+          </>}
+          {section==="notifications"&&<>
+            <div className="field-grid">
+              <div className="field" style={{gridColumn:"1 / span 2"}}><label>Discord webhook URL</label><input value={webhookURL} onChange={e=>setWebhookURL(e.target.value)} placeholder="https://discord.com/api/webhooks/..."/></div>
+            </div>
+            <div className="inline-list">
+              {["PR ready","Approval pending","Agent error","Build failed","Deploy complete"].map(label=><label key={label} className="flat-btn" style={{display:"inline-flex",alignItems:"center",gap:8,textTransform:"none"}}><input type="checkbox" defaultChecked/> {label}</label>)}
+            </div>
+            <div className="detail-actions">
+              <button className="flat-btn blue" onClick={()=>patchSetting("notifications.discord_webhook_url",webhookURL)}>Save</button>
+              <button className="flat-btn" onClick={async()=>{const res=await fetch('/api/v1/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({from:"ui",task_id:"test",agent:"gateway",state:"info",result:"UI notification test"})});toast(res.ok?"Test notification queued":"Notification test failed");}}>Test</button>
+            </div>
+          </>}
+          {section==="task_board"&&<>
+            <div className="field-grid">
+              <div className="field"><label>Autonomous queue enabled</label><select defaultValue={String(settings["taskboard.autonomous_enabled"]??true)} onChange={e=>patchSetting("taskboard.autonomous_enabled",e.target.value==="true")}><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
+              <div className="field"><label>Dead letter queue threshold</label><input type="number" defaultValue={settings["taskboard.dead_letter_threshold"]||5} onBlur={e=>patchSetting("taskboard.dead_letter_threshold",Number(e.target.value)||0)}/></div>
+            </div>
+          </>}
+          {section==="display"&&<>
+            <div className="field-grid">
+              <div className="field"><label>Activity feed verbosity</label><select defaultValue={settings["display.feed_verbosity"]||"summary"} onChange={e=>patchSetting("display.feed_verbosity",e.target.value)}><option value="summary">summary</option><option value="full">full tool calls</option></select></div>
+              <div className="field"><label>HUD metrics</label><select defaultValue={settings["display.hud_mode"]||"full"} onChange={e=>patchSetting("display.hud_mode",e.target.value)}><option value="full">full</option><option value="minimal">minimal</option></select></div>
+            </div>
+          </>}
+          {section==="credentials"&&<div className="kv-list">
+            {[
+              {name:"gitea-token",key:"token"},
+              {name:"gitea-reviewers-token",key:"token"},
+              {name:"discord-webhook",key:"url"},
+              {name:"lockbox-credentials",key:"api-key"}
+            ].map(item=><div key={item.name} className="kv-item">
+              <div><div>{item.name}</div><div className="subtle">{item.key}: ••••••••</div></div>
+              <a className="flat-btn blue" href={personaRepo?.html_url||"#"} target="_blank" rel="noreferrer">Rotate</a>
+            </div>)}
+          </div>}
+        </div>
+      </section>
+    </div>
+  </div>;
+}
+
+function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHistory,msg,setMsg,sending,setSending,sessionId,setSessionId,sessionItems,sessionFilter,setSessionFilter,onLoadSession,onNewConversation,onClearHistory,auth,showTools,setShowTools,sessionMeta}){
+  const listRef=useRef(null);
+  const inputRef=useRef(null);
+  const ctrlRef=useRef(null);
+  const agent=agents.find(item=>item.id===target)||agents[0]||FA[0];
+  const scrollBottom=()=>{if(listRef.current)listRef.current.scrollTop=listRef.current.scrollHeight;};
+  useEffect(()=>{requestAnimationFrame(scrollBottom);},[chatHistory]);
+  const stopCurrent=async()=>{
+    if(ctrlRef.current){ctrlRef.current.abort();ctrlRef.current=null;}
+    setChatHistory(prev=>{if(!prev.length)return prev;const next=prev.slice();const last={...next[next.length-1]};if(last.from===target&&last.streaming){last.streaming=false;last.text=`${last.text?`${last.text}\n`:""}[Stopped by Sovereign]`;next[next.length-1]=last;}return next;});
+    setSending(false);
+    await apiPost(`/api/v1/agents/${target}/stop`);
+  };
+  const send=async()=>{
+    if(!msg.trim()||sending||!agent)return;
+    const now=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'});
+    setChatHistory(prev=>prev.concat([{from:"kit",agent:{id:"kit",name:`${auth.user} (${auth.role})`,initial:(auth.user||"S")[0].toUpperCase(),status:"online"},text:msg,time:now,toolCalls:[],toolResults:[]}]));
+    const outbound=msg;
+    setMsg("");
+    setSending(true);
+    setChatHistory(prev=>prev.concat([{from:target,agent,text:"",time:now,streaming:true,toolCalls:[],toolResults:[]}]));
+    const ctrl=new AbortController();
+    ctrlRef.current=ctrl;
+    await streamChat(target,outbound,sessionId,ctrl.signal,
+      chunk=>{setChatHistory(prev=>{const next=prev.slice();const last={...next[next.length-1]};last.text=(last.text||"")+chunk;next[next.length-1]=last;return next;});requestAnimationFrame(scrollBottom);},
+      clean=>{setChatHistory(prev=>{const next=prev.slice();next[next.length-1]={...next[next.length-1],text:clean};return next;});},
+      (tool,args)=>{setChatHistory(prev=>{const next=prev.slice();const last={...next[next.length-1]};last.toolCalls=(last.toolCalls||[]).concat([{tool,args}]);next[next.length-1]=last;return next;});requestAnimationFrame(scrollBottom);},
+      (tool,result)=>{setChatHistory(prev=>{const next=prev.slice();const last={...next[next.length-1]};last.toolResults=(last.toolResults||[]).concat([{tool,result}]);next[next.length-1]=last;return next;});requestAnimationFrame(scrollBottom);},
+      sid=>{if(sid)setSessionId(sid);setChatHistory(prev=>{const next=prev.slice();const last={...next[next.length-1]};last.streaming=false;if(!last.text&&!(last.toolCalls||[]).length)last.text="(empty response)";next[next.length-1]=last;return next;});setSending(false);ctrlRef.current=null;},
+      err=>{setChatHistory(prev=>{const next=prev.slice();const last={...next[next.length-1]};last.streaming=false;if(err!=="[Stopped by Sovereign]")last.text=err;next[next.length-1]=last;return next;});setSending(false);ctrlRef.current=null;}
+    );
+  };
+  return <aside className={`chat-panel ${open?"open":""}`}>
+    <div className="chat-panel-head">
+      <select value={target} onChange={e=>setTarget(e.target.value)}>{agents.map(item=><option key={item.id} value={item.id}>{item.id}</option>)}</select>
+      <button className="flat-btn" onClick={onClose}>Close</button>
+    </div>
+    <div className="chat-panel-body">
+      <div className="chat-toolbar">
+        <button className={`toggle-chip ${showTools?"active":""}`} onClick={()=>setShowTools(!showTools)}>{showTools?"Tool calls visible":"Tool calls hidden"}</button>
+        <button className="toggle-chip" onClick={onNewConversation}>New session</button>
+        <button className="toggle-chip" onClick={onClearHistory}>Clear local</button>
+        <span className="subtle" style={{marginLeft:"auto"}}>{sessionMeta?.source||"comms"}</span>
+      </div>
+      <div className="session-list-compact">
+        <div className="inline-list">
+          {[{key:"all",label:"all"},{key:"comms",label:"comms"},{key:"cronjob",label:"autonomous"}].map(item=><button key={item.key} className={`toggle-chip ${sessionFilter===item.key?"active":""}`} onClick={()=>setSessionFilter(item.key)}>{item.label}</button>)}
+        </div>
+        {sessionItems.map(item=><button key={item.id} className={`session-item ${sessionId===item.id?"active":""}`} onClick={()=>onLoadSession(item.id,item)}>
+          <div style={{display:"flex",justifyContent:"space-between",gap:8}}><span>{item.id}</span><span className="subtle">{fAgo((item.updated_at||0)*1000)}</span></div>
+          <div className="subtle" style={{marginTop:4}}>{item.last_preview||"…"}</div>
+        </button>)}
+        {!sessionItems.length&&<div className="subtle">No saved sessions for this agent.</div>}
+      </div>
+      <div className="chat-shell">
+        <div ref={listRef} className="chat-scroll">
+          <div className="spacer"/>
+          {!chatHistory.length&&<div className="empty-state">Select an agent and start issuing commands.</div>}
+          {chatHistory.map((item,index)=><ChatBubble key={index} msg={item} showTools={showTools}/>)}
+        </div>
+        <div className="chat-input">
+          <textarea ref={inputRef} value={msg} onChange={e=>setMsg(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}} placeholder={`Command ${agent?.id||"agent"}...`}/>
+          <div className="chat-input-actions">
+            {sending?<button className="flat-btn red" onClick={stopCurrent}>Stop</button>:<button className="flat-btn blue" onClick={send}>Send</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>;
+}
 
 function App(){
-  const[tab,setTab]=useState("comms");const[sel,setSel]=useState(0);
-  const[ch,setCh]=useState([]);const[msg,setMsg]=useState("");const[tgt,setTgt]=useState("ragnar");const[busy,setBusy]=useState(false);
-  const[sidByA,setSidByA]=useState({});const[sItems,setSItems]=useState([]);const[toast,setToast]=useState("");
-  const[sessionFilter,setSessionFilter]=useState("all");const[sessionMeta,setSessionMeta]=useState(null);
-  const[approvals,setApprovals]=useState([]);const[approvalsOpen,setApprovalsOpen]=useState(false);const[approvalBusy,setApprovalBusy]=useState({});
-  const[termOpen,setTermOpen]=useState(true);const[termH,setTermH]=useState(200);
+  const[tab,setTab]=useState("mission");
+  const[viewportWidth,setViewportWidth]=useState(window.innerWidth);
+  const[chatOpen,setChatOpen]=useState(false);
+  const[tgt,setTgt]=useState("ragnar");
+  const[ch,setCh]=useState([]);
+  const[msg,setMsg]=useState("");
+  const[busy,setBusy]=useState(false);
+  const[sidByA,setSidByA]=useState({});
+  const[sItems,setSItems]=useState([]);
+  const[sessionFilter,setSessionFilter]=useState("all");
+  const[sessionMeta,setSessionMeta]=useState(null);
+  const[showTools,setShowTools]=useState(false);
+  const[feedCollapsed,setFeedCollapsed]=useState(false);
+  const[approvals,setApprovals]=useState([]);
+  const[approvalBusy,setApprovalBusy]=useState({});
+  const[mergeBusy,setMergeBusy]=useState({});
+  const[toast,setToast]=useState("");
   const auth=useAuth();
-
   const agents=usePoll('/api/v1/agents',FA,CFG.POLL);
   const fleetState=usePoll('/api/v1/fleet/state',[],5000);
-  const nodes=usePoll('/api/v1/cluster/nodes',FN,CFG.POLL*2);
-  const pods=usePoll('/api/v1/cluster/pods',[],CFG.POLL*2);
-  const commits=usePoll('/api/v1/gitea/commits',[],CFG.POLL*3);
-  const k8sEvents=usePoll('/api/v1/k8s/events',[],CFG.POLL*2);
-  const{ev:events,ok:wsOk}=useWS();
-  const{prs}=usePRs();const repos=useRepos();
-  const online=agents.filter(a=>a.status==="online").length;
-  const openPRCount=(prs||[]).filter(p=>p.state==='open').length;
-  const pendingApprovals=(approvals||[]).filter(q=>q&&q.status==="pending");
-  const approvalsCount=pendingApprovals.length;
+  const nodes=usePoll('/api/v1/cluster/nodes',FN,10000);
+  const pods=usePoll('/api/v1/cluster/pods',[],10000);
+  const repos=useRepos();
+  const{prs}=usePRs();
+  const{data:gitops,status:gitopsStatus}=useSimplePoll('/api/v1/gitops/status',{},15000);
+  const{data:taskHistory,status:taskHistoryStatus}=useSimplePoll('/api/v1/history/tasks',[],15000);
+  const{data:deployHistory,status:deployHistoryStatus}=useSimplePoll('/api/v1/history/deployments',[],15000);
+  const{events,ok:wsOk}=useBufferedWS(tab==="mission"&&!feedCollapsed);
+  const online=agents.filter(agent=>agent.status==="online").length;
+  const pendingApprovals=(approvals||[]).filter(item=>item&&item.status==="pending");
   const curSid=sidByA[tgt]||localStorage.getItem(lsk(auth.user,tgt))||`hirdforge-${tgt}-${Date.now()}`;
-
-  useEffect(()=>{if(!tgt)return;setSessionMeta(null);const r=localStorage.getItem(lck(auth.user,tgt));if(r){try{const p=JSON.parse(r);setCh(Array.isArray(p)?p.map(m=>s2u(tgt,m,auth.user)):[]);}catch{setCh([]);}}else setCh([]);
-    const sid=localStorage.getItem(lsk(auth.user,tgt));if(sid){setSidByA(p=>({...p,[tgt]:sid}));api(`/api/v1/sessions/${sid}`,null).then(s=>{if(s?.messages){setSessionMeta({source:s.source||"",task_ref:s.task_ref||"",id:s.id||sid});setCh(s.messages.map(m=>s2u(tgt,m,auth.user,s.source)));}});}
+  useEffect(()=>{const onResize=()=>setViewportWidth(window.innerWidth);window.addEventListener('resize',onResize);return()=>window.removeEventListener('resize',onResize);},[]);
+  useEffect(()=>{if(!agents.some(agent=>agent.id===tgt)&&agents[0])setTgt(agents[0].id);},[agents,tgt]);
+  useEffect(()=>{if(!tgt)return;setSessionMeta(null);const raw=localStorage.getItem(lck(auth.user,tgt));if(raw){try{const parsed=JSON.parse(raw);setCh(Array.isArray(parsed)?parsed.map(item=>s2u(tgt,item,auth.user)):[]);}catch{setCh([]);}}else setCh([]);
+    const sid=localStorage.getItem(lsk(auth.user,tgt));if(sid){setSidByA(prev=>({...prev,[tgt]:sid}));api(`/api/v1/sessions/${sid}`,null).then(session=>{if(session?.messages){setSessionMeta({source:session.source||"",task_ref:session.task_ref||"",id:session.id||sid});setCh(session.messages.map(item=>s2u(tgt,item,auth.user,session.source)));}});}
   },[tgt,auth.user]);
   useEffect(()=>{if(tgt)localStorage.setItem(lck(auth.user,tgt),JSON.stringify(ch.map(u2s)));},[ch,tgt,auth.user]);
   useEffect(()=>{if(tgt&&sidByA[tgt])localStorage.setItem(lsk(auth.user,tgt),sidByA[tgt]);},[sidByA,tgt,auth.user]);
-  useEffect(()=>{let m=true;const go=async()=>{const src=sessionFilter==="all"?"":sessionFilter;const qp=`/api/v1/sessions?agent=${encodeURIComponent(tgt)}${src?`&source=${encodeURIComponent(src)}`:""}`;const a=await api(qp,[]);if(m&&Array.isArray(a))setSItems(a);};go();const id=setInterval(go,5000);return()=>{m=false;clearInterval(id);};},[tgt,busy,sessionFilter]);
-  useEffect(()=>{const e=events[0];if(!e||!e.delegated_by)return;if(e.type!=="task_complete"&&e.type!=="task_failed")return;
-    const owner=e.delegated_by;const completing=(e.agent||"system").toLowerCase();const ts=Date.parse(e.timestamp||"")||Date.now();
+  useEffect(()=>{let live=true;const go=async()=>{const src=sessionFilter==="all"?"":sessionFilter;const qp=`/api/v1/sessions?agent=${encodeURIComponent(tgt)}${src?`&source=${encodeURIComponent(src)}`:""}`;const data=await api(qp,[]);if(live&&Array.isArray(data))setSItems(data);};go();const id=setInterval(go,5000);return()=>{live=false;clearInterval(id);};},[tgt,busy,sessionFilter]);
+  useEffect(()=>{const event=events[0];if(!event||!event.delegated_by)return;if(event.type!=="task_complete"&&event.type!=="task_failed")return;
+    const owner=event.delegated_by;const completing=(event.agent||"system").toLowerCase();const ts=Date.parse(event.timestamp||"")||Date.now();
     const cap=completing.charAt(0).toUpperCase()+completing.slice(1);
-    const text=e.type==="task_complete"?`✅ ${cap} completed task: ${e.result||"(no result)"}`:`❌ ${cap} failed task: ${e.error||"unknown error"}`;
-    const entry={from:owner,agent:{id:completing,name:cap,initial:cap.charAt(0),status:"online"},text,time:new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:ts,streaming:false,toolCalls:[],toolResults:[],kind:"notification",noticeLevel:e.type==="task_complete"?"success":"error",noticeAgent:completing};
+    const text=event.type==="task_complete"?`✅ ${cap} completed task: ${event.result||"(no result)"}`:`❌ ${cap} failed task: ${event.error||"unknown error"}`;
+    const entry={from:owner,agent:{id:completing,name:cap,initial:cap.charAt(0),status:"online"},text,time:new Date(ts).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:ts,streaming:false,toolCalls:[],toolResults:[],kind:"notification",noticeLevel:event.type==="task_complete"?"success":"error",noticeAgent:completing};
     const key=lck(auth.user,owner);
     let existing=[];try{const raw=localStorage.getItem(key);if(raw){const parsed=JSON.parse(raw);if(Array.isArray(parsed))existing=parsed;}}catch{}
     const serialized=u2s(entry);
-    const already=existing.some(m=>m.kind==="notification"&&m.noticeAgent===serialized.noticeAgent&&m.timestamp===serialized.timestamp&&m.content===serialized.content);
+    const already=existing.some(item=>item.kind==="notification"&&item.noticeAgent===serialized.noticeAgent&&item.timestamp===serialized.timestamp&&item.content===serialized.content);
     if(already)return;
-    localStorage.setItem(key,JSON.stringify([...existing,serialized]));
-    if(owner===tgt)setCh(p=>[...p,entry]);
+    localStorage.setItem(key,JSON.stringify(existing.concat([serialized])));
+    if(owner===tgt)setCh(prev=>prev.concat([entry]));
   },[events,tgt,auth.user]);
-  useEffect(()=>{let m=true;const go=async()=>{try{const r=await fetch('/api/v1/approvals');if(!r.ok)throw new Error();const d=await r.json();if(!m)return;const qs=Array.isArray(d?.queues)?d.queues:[];setApprovals(qs);}catch{if(m)setApprovals([]);}};go();const id=setInterval(go,10000);return()=>{m=false;clearInterval(id);};},[]);
-
-  const setCurSid=s=>setSidByA(p=>({...p,[tgt]:s}));
-  const loadSess=async(s,meta)=>{const d=await api(`/api/v1/sessions/${s}`,null);if(d?.messages){setCurSid(s);setSessionMeta({source:d.source||meta?.source||"",task_ref:d.task_ref||meta?.task_ref||"",id:d.id||s});setCh(d.messages.map(m=>s2u(tgt,m,auth.user,d.source||meta?.source)));}};
-  const newConv=()=>{setCurSid(`hirdforge-${tgt}-${Date.now()}`);setSessionMeta(null);setCh([]);};
-  const clearH=()=>{setCh([]);localStorage.removeItem(lck(auth.user,tgt));};
-  const eStop=async()=>{await apiPost('/api/v1/agents/stop-all');setBusy(false);setCh(p=>{if(!p.length)return p;const u=[...p];const l={...u[u.length-1]};if(l.streaming){l.streaming=false;l.text=(l.text?l.text+"\n":"")+"[Stopped by Sovereign]";u[u.length-1]=l;}return u;});setToast("All agents stopped");setTimeout(()=>setToast(""),1800);};
-  const refreshApprovals=async()=>{try{const r=await fetch('/api/v1/approvals');if(!r.ok)throw new Error();const d=await r.json();setApprovals(Array.isArray(d?.queues)?d.queues:[]);}catch{setApprovals([]);}};
-  const decideApproval=async(queueID,approved)=>{if(!queueID)return;setApprovalBusy(p=>({...p,[queueID]:true}));const path=approved?'/api/v1/approvals/approve':'/api/v1/approvals/reject';const out=await apiPostJSON(path,{queue_id:queueID});if(out?.error){setToast(out.error);}else{setToast(approved?"Approval granted":"Approval rejected");setTimeout(()=>setToast(""),1500);}await refreshApprovals();setApprovalBusy(p=>({...p,[queueID]:false}));};
-  const summarizeApprovalParams=params=>{try{const txt=JSON.stringify(params||{});return txt.length>120?txt.slice(0,120)+"…":txt;}catch{return "{}";}};
-  const queueInjection=(agent,content,session_id)=>apiPostJSON(`/api/v1/agents/${encodeURIComponent(agent)}/inject`,{content,session_id});
-  const togglePause=async(agentName,isPaused)=>{if(!agentName)return;const path=isPaused?`/api/v1/agents/${encodeURIComponent(agentName)}/resume`:`/api/v1/agents/${encodeURIComponent(agentName)}/pause`;const out=await apiPost(path);if(out?.error){setToast(out.error);}else{setToast(`${agentName} ${isPaused?"resumed":"paused"}`);}setTimeout(()=>setToast(""),1400);};
-  const showToast=t=>{setToast(t);setTimeout(()=>setToast(""),1800);};
-
-  return<div className="app">
-    <div className="header">
-      <div style={{display:"flex",alignItems:"center",gap:12}}>
-        <div style={{display:"flex",alignItems:"center",gap:7}}><div style={{width:8,height:8,background:"#818cf8",boxShadow:"0 0 12px rgba(129,140,248,0.5)",borderRadius:1}}/><span style={{fontSize:14,fontWeight:800,letterSpacing:".18em",color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>HIRDFORGE</span></div>
-        <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/><span style={{fontSize:10,color:"rgba(255,255,255,0.18)",letterSpacing:".1em"}}>VALHALLA CLUSTER</span>
-      </div>
-      <div style={{display:"flex",alignItems:"center",gap:14}}>
-        {[{l:"CLUSTER",s:"online"},{l:"ARGOCD",s:"online"},{l:"GITEA",s:"online"}].map(x=><div key={x.l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:"rgba(255,255,255,0.22)"}}><Pip status={x.s} size={4}/><span>{x.l}</span></div>)}
-        {approvalsCount>0&&<button onClick={()=>setApprovalsOpen(v=>!v)} style={{display:"flex",alignItems:"center",gap:5,padding:"3px 8px",background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.3)",borderRadius:3,fontSize:10,fontWeight:700,color:"#f87171",fontFamily:"'IBM Plex Mono',monospace"}} title="Pending write approvals">🛡 {approvalsCount}</button>}
-        {openPRCount>0&&<button onClick={()=>{setTab('realm');}} style={{display:"flex",alignItems:"center",gap:4,padding:"3px 8px",background:"rgba(251,191,36,0.08)",border:"1px solid rgba(251,191,36,0.25)",borderRadius:3,fontSize:10,fontWeight:700,color:"#fbbf24",fontFamily:"'IBM Plex Mono',monospace",animation:"forge-glow 2s ease infinite"}} title="Open pull requests awaiting review">⚔ {openPRCount} PR{openPRCount>1?'s':''}</button>}
-        <button onClick={eStop} title="Emergency Stop" style={{width:24,height:24,borderRadius:"50%",border:"1px solid rgba(239,68,68,0.5)",background:"rgba(239,68,68,0.1)",color:"#ef4444",fontWeight:900,fontSize:9,boxShadow:busy?"0 0 10px rgba(239,68,68,0.3)":"none"}}>■</button>
-        <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/>
-        <div style={{display:"flex",alignItems:"center",gap:6}}>
-          <Pip status="online" size={4}/>
-          <span style={{fontSize:11,color:"#10b981",fontWeight:700}}>{auth.user}</span>
-          <Badge text={auth.role} color="#10b981"/>
-          {auth.authenticated&&<button onClick={logout} title="Sign out" style={{background:"none",border:"1px solid rgba(255,255,255,0.06)",color:"rgba(255,255,255,0.2)",fontSize:9,padding:"2px 6px",fontFamily:"'IBM Plex Mono',monospace",borderRadius:2}}>⏻</button>}
+  useEffect(()=>{let live=true;const go=async()=>{try{const res=await fetch('/api/v1/approvals');if(!res.ok)throw new Error();const data=await res.json();if(live)setApprovals(Array.isArray(data?.queues)?data.queues:[]);}catch{if(live)setApprovals([]);}};go();const id=setInterval(go,10000);return()=>{live=false;clearInterval(id);};},[]);
+  const showToast=text=>{setToast(text);setTimeout(()=>setToast(""),1800);};
+  const setCurSid=sid=>setSidByA(prev=>({...prev,[tgt]:sid}));
+  const loadSession=async(sid,meta)=>{const data=await api(`/api/v1/sessions/${sid}`,null);if(data?.messages){setCurSid(sid);setSessionMeta({source:data.source||meta?.source||"",task_ref:data.task_ref||meta?.task_ref||"",id:data.id||sid});setCh(data.messages.map(item=>s2u(tgt,item,auth.user,data.source||meta?.source)));}};
+  const newConversation=()=>{setCurSid(`hirdforge-${tgt}-${Date.now()}`);setSessionMeta(null);setCh([]);};
+  const clearHistory=()=>{setCh([]);localStorage.removeItem(lck(auth.user,tgt));};
+  const refreshApprovals=async()=>{try{const res=await fetch('/api/v1/approvals');if(!res.ok)throw new Error();const data=await res.json();setApprovals(Array.isArray(data?.queues)?data.queues:[]);}catch{setApprovals([]);}};
+  const decideApproval=async(queueID,approved)=>{if(!queueID)return;setApprovalBusy(prev=>({...prev,[queueID]:true}));const path=approved?'/api/v1/approvals/approve':'/api/v1/approvals/reject';const out=await apiPostJSON(path,{queue_id:queueID});showToast(out?.error||(approved?"Approval granted":"Approval rejected"));await refreshApprovals();setApprovalBusy(prev=>({...prev,[queueID]:false}));};
+  const requestMerge=async(repo,index)=>{const key=`${repo}-${index}`;setMergeBusy(prev=>({...prev,[key]:true}));const out=await mergePR(repo,index);showToast(out.ok?`Merged ${repo}#${index}`:(out.error||"Merge failed"));setMergeBusy(prev=>({...prev,[key]:false}));};
+  if(viewportWidth<900){
+    return <div className="screen-warning"><div className="screen-warning-card">Use a larger screen. Hirdforge mission control requires at least 900px of width and is designed for 1200px and above.</div></div>;
+  }
+  return <div className="mc-app">
+    <header className="topbar">
+      <div className="brand-stack">
+        <div className="brand-mark"/>
+        <div className="brand-copy">
+          <div className="brand-title">Hirdforge</div>
+          <div className="brand-sub">Valhalla cluster</div>
         </div>
-        <div style={{width:1,height:16,background:"rgba(255,255,255,0.06)"}}/><span style={{fontSize:12,fontFamily:"'Space Grotesk',sans-serif"}}><span style={{color:"#34d399",fontWeight:700}}>{online}</span><span style={{color:"rgba(255,255,255,0.12)"}}> / {agents.length}</span></span>
       </div>
-      {approvalsOpen&&<div style={{position:"absolute",top:44,right:16,width:420,maxHeight:420,overflowY:"auto",background:"rgba(7,9,16,0.98)",border:"1px solid rgba(248,113,113,0.28)",borderRadius:6,boxShadow:"0 12px 32px rgba(0,0,0,0.45)",padding:10,zIndex:200}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}><span style={{fontSize:11,fontWeight:700,color:"#fca5a5",letterSpacing:".08em",textTransform:"uppercase"}}>Pending Approvals</span><button onClick={()=>setApprovalsOpen(false)} style={{background:"transparent",border:"none",color:"rgba(255,255,255,0.35)",fontSize:14}}>×</button></div>
-        {pendingApprovals.length===0&&<div style={{fontSize:11,color:"rgba(255,255,255,0.32)",padding:"6px 2px"}}>No pending approvals.</div>}
-        {pendingApprovals.map((q,idx)=><div key={q.queue_id||idx} style={{border:"1px solid rgba(255,255,255,0.07)",background:"rgba(255,255,255,0.02)",borderRadius:5,padding:8,marginBottom:8}}>
-          <div style={{display:"flex",justifyContent:"space-between",gap:8,marginBottom:4}}><span style={{fontSize:11,color:"#e5e7eb",fontWeight:700}}>{q.action||"unknown_tool"}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.35)"}}>{fAgo(q.queued_at)}</span></div>
-          <div style={{fontSize:10,color:"rgba(255,255,255,0.28)",marginBottom:6}}>#{q.queue_id||"?"} · {fT(q.queued_at)}</div>
-          <div style={{fontSize:10,color:"rgba(255,255,255,0.5)",background:"rgba(0,0,0,0.25)",border:"1px solid rgba(255,255,255,0.06)",padding:"6px 7px",borderRadius:4,marginBottom:8,wordBreak:"break-all"}}>{summarizeApprovalParams(q.params)}</div>
-          <div style={{display:"flex",gap:6}}>
-            <button onClick={()=>decideApproval(q.queue_id,true)} disabled={!!approvalBusy[q.queue_id]} style={{padding:"5px 9px",fontSize:10,fontWeight:700,background:"rgba(52,211,153,0.12)",border:"1px solid rgba(52,211,153,0.35)",color:"#6ee7b7",borderRadius:4,fontFamily:"'IBM Plex Mono',monospace"}}>Approve</button>
-            <button onClick={()=>decideApproval(q.queue_id,false)} disabled={!!approvalBusy[q.queue_id]} style={{padding:"5px 9px",fontSize:10,fontWeight:700,background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.35)",color:"#fca5a5",borderRadius:4,fontFamily:"'IBM Plex Mono',monospace"}}>Reject</button>
-          </div>
-        </div>)}
-      </div>}
-    </div>
-    <div className="tabs">
-      <Tab active={tab==="comms"} label="Comms" count={events.length} onClick={()=>setTab("comms")}/>
-      <Tab active={tab==="fleet"} label="Warriors" count={agents.length} onClick={()=>setTab("fleet")}/>
-      <Tab active={tab==="realm"} label="Realm" onClick={()=>setTab("realm")}/>
-      <Tab active={tab==="health"} label="Health" onClick={()=>setTab("health")}/>
-      <Tab active={tab==="settings"} label="⚙ Settings" onClick={()=>setTab("settings")}/>
-      <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6}}>
-        <button onClick={()=>setTermOpen(!termOpen)} style={{display:"flex",alignItems:"center",gap:4,padding:"4px 10px",background:termOpen?"rgba(34,211,238,0.06)":"transparent",border:`1px solid ${termOpen?"rgba(34,211,238,0.15)":"rgba(255,255,255,0.05)"}`,borderRadius:3,fontSize:9,fontWeight:700,color:termOpen?"#22d3ee":"rgba(255,255,255,0.25)",letterSpacing:".06em",fontFamily:"'IBM Plex Mono',monospace"}}>⚡ TERMINAL</button>
+      <nav className="topnav">
+        {[["mission","Mission Control"],["cluster","Cluster"],["history","History"],["settings","Settings"]].map(item=><button key={item[0]} className={tab===item[0]?"active":""} onClick={()=>setTab(item[0])}>{item[1]}</button>)}
+      </nav>
+      <div className="hud-strip">
+        <div className="hud-card"><span className={`status-dot ${wsOk?"green":"red"}`}/><div className="hud-meta"><span className="hud-label">Cluster health</span><span className="hud-note">{wsOk?"live control plane":"reconnecting events"}</span></div></div>
+        <div className="hud-card"><div className="hud-value" style={{color:"var(--green)"}}>{online}/{agents.length}</div><div className="hud-meta"><span className="hud-label">Agents</span><span className="hud-note">{agents.length-online} unavailable</span></div></div>
+        <div className="hud-card"><div className="hud-value" style={{color:pendingApprovals.length?"var(--amber)":"var(--blue)"}}>{pendingApprovals.length}</div><div className="hud-meta"><span className="hud-label">Awaiting sovereign</span><span className="hud-note">{auth.user} · {auth.role}</span></div></div>
       </div>
+    </header>
+    <div className="main-shell">
+      {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} mergeBusy={mergeBusy} onMerge={requestMerge} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}}/>}
+      {tab==="cluster"&&<ClusterView nodes={nodes} pods={pods} gitops={gitops} gitopsStatus={gitopsStatus} toast={showToast}/>}
+      {tab==="history"&&<HistoryView tasks={taskHistory} taskStatus={taskHistoryStatus} deployments={deployHistory} deployStatus={deployHistoryStatus} agents={agents}/>}
+      {tab==="settings"&&<SettingsViewNext agents={agents} repos={repos} fleetState={fleetState} toast={showToast}/>}
     </div>
-    <div className="body">
-      <div className="tab-content">
-        {tab==="comms"&&<CommsView agents={agents} events={events} wsConnected={wsOk} chatHistory={ch} setChatHistory={setCh} msg={msg} setMsg={setMsg} target={tgt} setTarget={setTgt} sending={busy} setSending={setBusy} sessionId={curSid} setSessionId={setCurSid} sessionItems={sItems} sessionFilter={sessionFilter} setSessionFilter={setSessionFilter} onLoadSession={loadSess} onNewConversation={newConv} onClearHistory={clearH} onEmergencyStop={eStop} auth={auth} fleetState={fleetState} onTogglePause={togglePause} onQueueInjection={queueInjection} showToast={showToast} sessionMeta={sessionMeta}/>}
-        {tab==="fleet"&&<FleetView agents={agents} selected={sel} setSelected={setSel} fleetState={fleetState} onTogglePause={togglePause}/>}
-        {tab==="realm"&&<RealmView agents={agents} nodes={nodes} pods={pods} commits={commits} k8sEvents={k8sEvents} prs={prs} repos={repos}/>}
-        {tab==="health"&&<HealthView agents={agents} fleetState={fleetState}/>}
-        {tab==="settings"&&<SettingsView agents={agents}/>}
-      </div>
-      {termOpen&&<div className="terminal-wrapper" style={{height:termH}}>
-        <div className="terminal-header" onClick={()=>setTermOpen(false)}>
-          <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:9,fontWeight:700,color:"#22d3ee",letterSpacing:".1em"}}>⚡ FORGE TERMINAL</span><span style={{fontSize:9,color:"rgba(255,255,255,0.12)"}}>forge@valhalla</span></div>
-          <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{fontSize:9,color:"rgba(255,255,255,0.12)"}}>@{tgt}</span><span style={{fontSize:11,color:"rgba(255,255,255,0.2)",cursor:"pointer"}}>×</span></div>
-        </div>
-        <ForgeTerminal agents={agents} pods={pods} nodes={nodes} commits={commits} k8sEvents={k8sEvents} target={tgt}/>
-      </div>}
-    </div>
-    <div className="status-bar">
-      <div style={{display:"flex",gap:14}}><span>{(pods||[]).length} pods</span><span>{nodes.length} nodes</span><span>{agents.length} agents</span></div>
-      <div style={{display:"flex",gap:14}}><span>WS: <span style={{color:wsOk?"#34d399":"#ef4444"}}>{wsOk?"connected":"reconnecting"}</span></span><span>ArgoCD: <span style={{color:"#34d399"}}>Healthy</span></span><span style={{color:"rgba(255,255,255,0.08)"}}>v1.0.0</span></div>
-    </div>
-    {toast&&<div style={{position:"fixed",top:52,right:20,padding:"6px 12px",background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.35)",color:"#ef4444",fontSize:11,fontWeight:700,zIndex:20000,borderRadius:3}}>{toast}</div>}
+    <ChatPanel open={chatOpen} onClose={()=>setChatOpen(false)} agents={agents} target={tgt} setTarget={setTgt} chatHistory={ch} setChatHistory={setCh} msg={msg} setMsg={setMsg} sending={busy} setSending={setBusy} sessionId={curSid} setSessionId={setCurSid} sessionItems={sItems} sessionFilter={sessionFilter} setSessionFilter={setSessionFilter} onLoadSession={loadSession} onNewConversation={newConversation} onClearHistory={clearHistory} auth={auth} showTools={showTools} setShowTools={setShowTools} sessionMeta={sessionMeta}/>
+    {toast&&<div style={{position:"fixed",top:76,right:20,padding:"8px 12px",background:"var(--bg-panel-2)",border:"1px solid var(--line-strong)",color:"var(--text)",zIndex:60}}>{toast}</div>}
   </div>;
 }
 
