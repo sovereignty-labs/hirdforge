@@ -67,6 +67,7 @@ type webhookPRReview struct {
 type prReviewState struct {
 	PeerReviewed bool
 	PeerAgent    string
+	Author       string
 }
 
 func (g *gateway) validateWebhookSignature(body []byte, signature string) bool {
@@ -797,17 +798,21 @@ func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr we
 
 func (g *gateway) dispatchPeerReview(pr webhookPR) {
 	author := g.builderFromBranch(pr.Head)
-	if author == "" {
-		log.Printf("webhook: peer review skipped for PR #%d on %s: unable to detect author from %s", pr.Number, pr.Repo, pr.Head)
-		return
-	}
 	peer, ok := g.selectPeerReviewer(author)
 	if !ok {
 		log.Printf("webhook: peer review skipped for PR #%d on %s: no healthy peer reviewer available", pr.Number, pr.Repo)
 		return
 	}
+	stateAuthor := author
+	if stateAuthor == "" {
+		stateAuthor = "unknown"
+		log.Printf("webhook: peer review author unknown for PR #%d on %s from branch %s; assigning healthy peer reviewer without self-review exclusion", pr.Number, pr.Repo, pr.Head)
+	}
 	key := g.prReviewKey(pr.Repo, pr.Number)
-	g.setPRReviewState(key, prReviewState{PeerAgent: peer.Name})
+	g.setPRReviewState(key, prReviewState{
+		PeerAgent: peer.Name,
+		Author:    stateAuthor,
+	})
 	owner, repoName, ok := splitFullRepoName(pr.Repo)
 	if !ok {
 		owner = ""
