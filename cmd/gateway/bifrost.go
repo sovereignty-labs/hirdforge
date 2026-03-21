@@ -26,8 +26,6 @@ type bifrostResult struct {
 }
 
 var bifrostExcluded = map[string]bool{
-	"chuck":  true,
-	"ivar":   true,
 	"orm":    true,
 	"knut":   true,
 	"ragnar": true,
