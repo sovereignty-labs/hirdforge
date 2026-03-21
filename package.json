@@ -1,0 +1,7 @@
+{
+  "name": "project_valhalla-ui",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build-gateway-ui.mjs"
+  }
+}
