@@ -286,6 +286,8 @@ type gateway struct {
 	order             []string
 	prReviewMu        sync.RWMutex
 	prReviewState     map[string]prReviewState
+	dispatchedTasksMu sync.Mutex
+	dispatchedTasks   map[int64]*dispatchedTask
 	eventMu           sync.Mutex
 	events            []Event
 	eventCap          int
@@ -304,7 +306,7 @@ type gateway struct {
 	injectionMu       sync.Mutex
 	injections        map[string][]InjectionMessage // keyed by agent name
 	pausedAgents      map[string]bool
-	syncMu           sync.Mutex
+	syncMu            sync.Mutex
 	webhookSecret     string
 	reviewAgent       string
 	taskRepo          string
@@ -1970,6 +1972,7 @@ func main() {
 		notifCap:          100,
 		lastSession:       map[string]string{},
 		prReviewState:     map[string]prReviewState{},
+		dispatchedTasks:   map[int64]*dispatchedTask{},
 		activeRequests:    map[string]*ActiveRequest{},
 		injections:        map[string][]InjectionMessage{},
 		pausedAgents:      map[string]bool{},
@@ -1994,6 +1997,7 @@ func main() {
 			gw.refreshAgentHealth()
 		}
 	}()
+	go gw.runTaskCompletionGuard()
 
 	if gw.k8s.enabled {
 		gw.addEvent("k8s_event", "cluster", "Kubernetes integration enabled")
