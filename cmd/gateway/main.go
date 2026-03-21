@@ -10,6 +10,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +33,7 @@ import (
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
 const agentRequestTimeout = 120 * time.Second
+
 var streamTimeout = 600 * time.Second
 
 //go:embed index.html
@@ -112,6 +115,63 @@ type NodeInfo struct {
 	MemoryPercent     float64  `json:"memory_percent"`
 }
 
+type podLogsResponse struct {
+	Pod  string `json:"pod"`
+	Logs string `json:"logs"`
+}
+
+type gitopsDeploymentInfo struct {
+	Image      string `json:"image"`
+	SHA        string `json:"sha"`
+	DeployedAt string `json:"deployed_at"`
+}
+
+type gitopsStatusResponse struct {
+	App               string                 `json:"app"`
+	SyncStatus        string                 `json:"sync_status"`
+	HealthStatus      string                 `json:"health_status"`
+	LastSync          string                 `json:"last_sync"`
+	DeployedSHA       string                 `json:"deployed_sha"`
+	GitHeadSHA        string                 `json:"git_head_sha"`
+	Drift             bool                   `json:"drift"`
+	SelfHeal          bool                   `json:"self_heal"`
+	RecentDeployments []gitopsDeploymentInfo `json:"recent_deployments"`
+}
+
+type historyTaskItem struct {
+	ID       int64    `json:"id"`
+	Title    string   `json:"title"`
+	Agents   []string `json:"agents"`
+	Outcome  string   `json:"outcome"`
+	PRNumber int64    `json:"pr_number"`
+	ClosedAt string   `json:"closed_at"`
+}
+
+type historyTasksResponse struct {
+	Tasks []historyTaskItem `json:"tasks"`
+}
+
+type historyDeploymentItem struct {
+	SHA         string `json:"sha"`
+	Message     string `json:"message"`
+	DeployedAt  string `json:"deployed_at"`
+	TriggeredBy string `json:"triggered_by"`
+}
+
+type historyDeploymentsResponse struct {
+	Deployments []historyDeploymentItem `json:"deployments"`
+}
+
+type certExpiryInfo struct {
+	Name          string `json:"name"`
+	Expiry        string `json:"expiry"`
+	DaysRemaining int64  `json:"days_remaining"`
+}
+
+type certsResponse struct {
+	Certs []certExpiryInfo `json:"certs"`
+}
+
 type K8sEventInfo struct {
 	Type    string `json:"type"`
 	Reason  string `json:"reason"`
@@ -158,6 +218,7 @@ type giteaPRInfo struct {
 	UpdatedAt string   `json:"updated_at"`
 	HTMLURL   string   `json:"html_url"`
 	Labels    []string `json:"labels"`
+	Approvals int64    `json:"approvals"`
 	Mergeable bool     `json:"mergeable"`
 }
 
@@ -783,6 +844,54 @@ func (k *k8sState) get(path string) (map[string]interface{}, error) {
 	return out, nil
 }
 
+func (k *k8sState) getBytes(path string) (int, []byte, error) {
+	resp, err := k.do(http.MethodGet, path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	return resp.StatusCode, body, nil
+}
+
+func (k *k8sState) getJSONWithStatus(path string) (int, map[string]interface{}, []byte, error) {
+	status, body, err := k.getBytes(path)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if status < 200 || status >= 300 {
+		return status, nil, body, nil
+	}
+	var out map[string]interface{}
+	if len(body) == 0 {
+		return status, map[string]interface{}{}, body, nil
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return status, nil, body, err
+	}
+	return status, out, body, nil
+}
+
+func (k *k8sState) patchJSON(path string, payload interface{}) (int, []byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, nil, err
+	}
+	req, err := http.NewRequest(http.MethodPatch, "https://kubernetes.default.svc"+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+k.token)
+	req.Header.Set("Content-Type", "application/merge-patch+json")
+	resp, err := k.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	return resp.StatusCode, respBody, nil
+}
+
 func asMap(v interface{}) map[string]interface{} {
 	m, _ := v.(map[string]interface{})
 	return m
@@ -807,6 +916,11 @@ func asInt64(v interface{}) int64 {
 	default:
 		return 0
 	}
+}
+
+func asInt(v string) int {
+	n, _ := strconv.Atoi(strings.TrimSpace(v))
+	return n
 }
 
 func asBool(v interface{}) bool {
@@ -1141,6 +1255,310 @@ func resolveGatewayGiteaToken(flagToken string) string {
 	return strings.TrimSpace(os.Getenv("GITEA_TOKEN"))
 }
 
+func fetchGitOpsStatus(k8s *k8sState) gitopsStatusResponse {
+	out := gitopsStatusResponse{App: "asgard", RecentDeployments: []gitopsDeploymentInfo{}}
+	if k8s == nil || !k8s.enabled {
+		return out
+	}
+	status, body, _, err := k8s.getJSONWithStatus("/apis/argoproj.io/v1alpha1/namespaces/argocd/applications/asgard")
+	if err != nil || status == http.StatusNotFound {
+		return out
+	}
+	if status < 200 || status >= 300 {
+		return out
+	}
+	spec := asMap(body["spec"])
+	appStatus := asMap(body["status"])
+	sync := asMap(appStatus["sync"])
+	health := asMap(appStatus["health"])
+	operationState := asMap(appStatus["operationState"])
+	syncPolicy := asMap(spec["syncPolicy"])
+	automated := asMap(syncPolicy["automated"])
+	history := asSlice(appStatus["history"])
+
+	out.SyncStatus = asString(sync["status"])
+	out.HealthStatus = asString(health["status"])
+	out.DeployedSHA = shortSHA(asString(sync["revision"]))
+	out.GitHeadSHA = shortSHA(asString(asMap(spec["source"])["targetRevision"]))
+	out.Drift = strings.TrimSpace(out.SyncStatus) != "" && out.SyncStatus != "Synced"
+	out.SelfHeal = asMap(syncPolicy["automated"]) != nil && (automated["selfHeal"] == true)
+	if finished := asString(operationState["finishedAt"]); finished != "" {
+		out.LastSync = finished
+	} else if len(history) > 0 {
+		out.LastSync = asString(asMap(history[0])["deployedAt"])
+	}
+	for _, item := range history {
+		im := asMap(item)
+		out.RecentDeployments = append(out.RecentDeployments, gitopsDeploymentInfo{
+			Image:      "argocd",
+			SHA:        shortSHA(asString(im["revision"])),
+			DeployedAt: asString(im["deployedAt"]),
+		})
+		if len(out.RecentDeployments) == 5 {
+			break
+		}
+	}
+	return out
+}
+
+func fetchTaskHistory(client *http.Client, baseURL, token, repoFull, agentFilter, outcomeFilter string, limit int) historyTasksResponse {
+	out := historyTasksResponse{Tasks: []historyTaskItem{}}
+	if strings.TrimSpace(baseURL) == "" {
+		return out
+	}
+	q := url.Values{}
+	q.Set("state", "closed")
+	q.Set("sort", "updated")
+	q.Set("limit", strconv.Itoa(clampInt(limit, 50, 100)))
+	path := fmt.Sprintf("/api/v1/repos/%s/issues?%s", repoFull, q.Encode())
+	var issues []map[string]interface{}
+	status, body, err := giteaGetJSONWithStatus(client, baseURL, token, path, &issues)
+	if err != nil || status < 200 || status >= 300 {
+		return out
+	}
+	_ = body
+	for _, issue := range issues {
+		labels := collectLabelNames(asSlice(issue["labels"]))
+		outcome := ""
+		switch {
+		case slices.Contains(labels, "status/done"):
+			outcome = "completed"
+		case slices.Contains(labels, "status/failed"):
+			outcome = "failed"
+		default:
+			continue
+		}
+		if outcomeFilter != "" && outcomeFilter != outcome {
+			continue
+		}
+		agents := make([]string, 0, 4)
+		for _, label := range labels {
+			if strings.HasPrefix(label, "agent/") {
+				agents = append(agents, strings.TrimPrefix(label, "agent/"))
+			}
+		}
+		sort.Strings(agents)
+		if agentFilter != "" && !slices.Contains(agents, agentFilter) {
+			continue
+		}
+		prNum := extractPRNumber(asString(issue["body"]))
+		out.Tasks = append(out.Tasks, historyTaskItem{
+			ID:       asInt64(issue["number"]),
+			Title:    asString(issue["title"]),
+			Agents:   agents,
+			Outcome:  outcome,
+			PRNumber: prNum,
+			ClosedAt: asString(issue["closed_at"]),
+		})
+		if len(out.Tasks) == clampInt(limit, 50, 100) {
+			break
+		}
+	}
+	return out
+}
+
+func fetchDeploymentHistory(client *http.Client, baseURL, token string, limit int) historyDeploymentsResponse {
+	out := historyDeploymentsResponse{Deployments: []historyDeploymentItem{}}
+	if strings.TrimSpace(baseURL) == "" {
+		return out
+	}
+	path := fmt.Sprintf("/api/v1/repos/kit/valhalla-infra/commits?sha=main&limit=%d", clampInt(limit, 20, 100))
+	var commits []map[string]interface{}
+	status, _, err := giteaGetJSONWithStatus(client, baseURL, token, path, &commits)
+	if err != nil || status < 200 || status >= 300 {
+		return out
+	}
+	for _, commit := range commits {
+		sha := asString(commit["sha"])
+		include := false
+		detailPath := fmt.Sprintf("/api/v1/repos/kit/valhalla-infra/git/commits/%s", url.PathEscape(sha))
+		var detail map[string]interface{}
+		if detailStatus, _, detailErr := giteaGetJSONWithStatus(client, baseURL, token, detailPath, &detail); detailErr == nil && detailStatus >= 200 && detailStatus < 300 {
+			for _, file := range asSlice(detail["files"]) {
+				filePath := asString(asMap(file)["filename"])
+				if strings.Contains(filePath, "deployment-") && (strings.HasSuffix(filePath, ".yaml") || strings.HasSuffix(filePath, ".yml")) {
+					include = true
+					break
+				}
+			}
+		}
+		if !include {
+			msg := asString(asMap(commit["commit"])["message"])
+			if strings.Contains(strings.ToLower(msg), "deployment") || strings.Contains(strings.ToLower(msg), "image") {
+				include = true
+			}
+		}
+		if !include {
+			continue
+		}
+		commitMeta := asMap(commit["commit"])
+		author := asMap(commitMeta["author"])
+		message := asString(commitMeta["message"])
+		if i := strings.Index(message, "\n"); i >= 0 {
+			message = message[:i]
+		}
+		out.Deployments = append(out.Deployments, historyDeploymentItem{
+			SHA:         shortSHA(sha),
+			Message:     message,
+			DeployedAt:  asString(author["date"]),
+			TriggeredBy: asString(author["name"]),
+		})
+		if len(out.Deployments) == clampInt(limit, 20, 100) {
+			break
+		}
+	}
+	return out
+}
+
+func listCertExpiries(k8s *k8sState, namespace string) certsResponse {
+	out := certsResponse{Certs: []certExpiryInfo{}}
+	if k8s == nil || !k8s.enabled {
+		return out
+	}
+	status, body, _, err := k8s.getJSONWithStatus(fmt.Sprintf("/apis/cert-manager.io/v1/namespaces/%s/certificates", url.PathEscape(namespace)))
+	if err != nil || status == http.StatusNotFound || status < 200 || status >= 300 {
+		return out
+	}
+	for _, item := range asSlice(body["items"]) {
+		im := asMap(item)
+		meta := asMap(im["metadata"])
+		statusMap := asMap(im["status"])
+		expiry := asString(statusMap["notAfter"])
+		daysRemaining := int64(0)
+		if expiry != "" {
+			if t, err := time.Parse(time.RFC3339, expiry); err == nil {
+				daysRemaining = int64(time.Until(t).Hours() / 24)
+			}
+		}
+		out.Certs = append(out.Certs, certExpiryInfo{
+			Name:          asString(meta["name"]),
+			Expiry:        expiry,
+			DaysRemaining: daysRemaining,
+		})
+	}
+	sort.Slice(out.Certs, func(i, j int) bool { return out.Certs[i].Name < out.Certs[j].Name })
+	return out
+}
+
+func updateAgentModel(k8s *k8sState, agentName, model string) error {
+	if k8s == nil || !k8s.enabled {
+		return fmt.Errorf("kubernetes integration disabled")
+	}
+	deployPath := fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s", url.PathEscape(k8s.podNS), url.PathEscape(agentName))
+	status, deploy, _, err := k8s.getJSONWithStatus(deployPath)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusNotFound {
+		return os.ErrNotExist
+	}
+	if status < 200 || status >= 300 {
+		return fmt.Errorf("deployment lookup returned %d", status)
+	}
+	updatedViaConfigMap := false
+	if cmStatus, cmBody, _, err := k8s.getJSONWithStatus(fmt.Sprintf("/api/v1/namespaces/%s/configmaps", url.PathEscape(k8s.podNS))); err == nil && cmStatus >= 200 && cmStatus < 300 {
+		for _, item := range asSlice(cmBody["items"]) {
+			im := asMap(item)
+			meta := asMap(im["metadata"])
+			name := asString(meta["name"])
+			labels := asMap(meta["labels"])
+			if name == "" {
+				continue
+			}
+			if labels["valhalla.io/agent"] != agentName && !strings.Contains(name, agentName) {
+				continue
+			}
+			data := asMap(im["data"])
+			patchData := map[string]string{}
+			switch {
+			case asString(data["model"]) != "":
+				patchData["model"] = model
+			case asString(data["MODEL"]) != "":
+				patchData["MODEL"] = model
+			case asString(data["args"]) != "":
+				patchData["args"] = regexp.MustCompile(`--model=[^\s"]+`).ReplaceAllString(asString(data["args"]), "--model="+model)
+			}
+			if len(patchData) == 0 {
+				continue
+			}
+			cmPath := fmt.Sprintf("/api/v1/namespaces/%s/configmaps/%s", url.PathEscape(k8s.podNS), url.PathEscape(name))
+			patch := map[string]interface{}{"data": patchData}
+			if patchStatus, patchBody, err := k8s.patchJSON(cmPath, patch); err != nil {
+				return err
+			} else if patchStatus < 200 || patchStatus >= 300 {
+				return fmt.Errorf("configmap patch returned %d: %s", patchStatus, strings.TrimSpace(string(patchBody)))
+			}
+			updatedViaConfigMap = true
+			break
+		}
+	}
+	if !updatedViaConfigMap {
+		// Fall back to patching the deployment args directly when no agent config map is present.
+	}
+	spec := asMap(deploy["spec"])
+	template := asMap(spec["template"])
+	podSpec := asMap(template["spec"])
+	containers := asSlice(podSpec["containers"])
+	if len(containers) == 0 {
+		return fmt.Errorf("deployment has no containers")
+	}
+	container := asMap(containers[0])
+	args := asSlice(container["args"])
+	if len(args) > 0 {
+		arg0 := asString(args[0])
+		if arg0 != "" && strings.Contains(arg0, "--model=") {
+			arg0 = regexp.MustCompile(`--model=[^\s"]+`).ReplaceAllString(arg0, "--model="+model)
+			patch := map[string]interface{}{
+				"spec": map[string]interface{}{
+					"template": map[string]interface{}{
+						"spec": map[string]interface{}{
+							"containers": []map[string]interface{}{{
+								"name": container["name"],
+								"args": []string{arg0},
+							}},
+						},
+					},
+				},
+			}
+			if patchStatus, patchBody, err := k8s.patchJSON(deployPath, patch); err != nil {
+				return err
+			} else if patchStatus < 200 || patchStatus >= 300 {
+				return fmt.Errorf("deployment patch returned %d: %s", patchStatus, strings.TrimSpace(string(patchBody)))
+			}
+		}
+	}
+	podName := ""
+	if podStatus, podBody, _, err := k8s.getJSONWithStatus(fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s", url.PathEscape(k8s.podNS), url.QueryEscape("valhalla.io/agent="+agentName))); err == nil && podStatus >= 200 && podStatus < 300 {
+		items := asSlice(podBody["items"])
+		if len(items) > 0 {
+			podName = asString(asMap(asMap(items[0])["metadata"])["name"])
+		}
+	}
+	if podName == "" {
+		if podStatus, podBody, _, err := k8s.getJSONWithStatus(fmt.Sprintf("/api/v1/namespaces/%s/pods", url.PathEscape(k8s.podNS))); err == nil && podStatus >= 200 && podStatus < 300 {
+			for _, item := range asSlice(podBody["items"]) {
+				name := asString(asMap(asMap(item)["metadata"])["name"])
+				if strings.HasPrefix(name, agentName+"-") || name == agentName {
+					podName = name
+					break
+				}
+			}
+		}
+	}
+	if podName != "" {
+		resp, err := k8s.do(http.MethodDelete, fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(k8s.podNS), url.PathEscape(podName)), nil)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			return fmt.Errorf("pod delete returned %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		}
+	}
+	return nil
+}
+
 func shellQuoteSingle(s string) string {
 	if s == "" {
 		return "''"
@@ -1356,6 +1774,76 @@ func podNameFromPath(path, action string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+func namespacedPodPath(path string) (namespace, pod, action string, ok bool) {
+	const prefix = "/api/v1/cluster/pods/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", "", false
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(path, prefix), "/"), "/")
+	switch len(parts) {
+	case 2:
+		if parts[0] == "" || parts[1] == "" {
+			return "", "", "", false
+		}
+		return parts[0], parts[1], "", true
+	case 3:
+		if parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			return "", "", "", false
+		}
+		return parts[0], parts[1], parts[2], true
+	default:
+		return "", "", "", false
+	}
+}
+
+func clampInt(v, def, max int) int {
+	if v <= 0 {
+		return def
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+func extractPRNumber(text string) int64 {
+	matches := regexp.MustCompile(`/pulls/(\d+)`).FindStringSubmatch(text)
+	if len(matches) == 2 {
+		n, _ := strconv.ParseInt(matches[1], 10, 64)
+		return n
+	}
+	return 0
+}
+
+func collectLabelNames(raw []interface{}) []string {
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		name := asString(asMap(item)["name"])
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func firstLabelWithPrefix(labels []string, prefix string) string {
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(label, prefix))
+		}
+	}
+	return ""
+}
+
+func shortSHA(in string) string {
+	in = strings.TrimSpace(in)
+	if len(in) > 7 {
+		return in[:7]
+	}
+	return in
 }
 
 func summarizeApprovalParams(params map[string]interface{}) string {
@@ -2072,6 +2560,38 @@ func main() {
 		})
 		proxyLockbox(w, r, http.MethodPost, "/approve-write", payload)
 	})
+	mux.HandleFunc("/api/v1/settings/agents/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/settings/agents/"), "/")
+		parts := strings.Split(path, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] != "model" {
+			http.NotFound(w, r)
+			return
+		}
+		var in struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Model) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "model is required"})
+			return
+		}
+		if err := updateAgentModel(gw.k8s, parts[0], strings.TrimSpace(in.Model)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+				return
+			}
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{
+			"agent":  parts[0],
+			"model":  strings.TrimSpace(in.Model),
+			"status": "updated",
+		})
+	})
 	mux.HandleFunc("/api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -2124,6 +2644,48 @@ func main() {
 	})
 	mux.HandleFunc("/api/v1/cluster/pods/", func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet:
+			namespace, podName, action, ok := namespacedPodPath(r.URL.Path)
+			if ok && action == "logs" {
+				if gw.k8s == nil || !gw.k8s.enabled {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes integration disabled"})
+					return
+				}
+				tail := 50
+				if raw := strings.TrimSpace(r.URL.Query().Get("tail")); raw != "" {
+					v, err := strconv.Atoi(raw)
+					if err != nil {
+						writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid tail parameter"})
+						return
+					}
+					tail = clampInt(v, 50, 500)
+				}
+				status, body, err := gw.k8s.getBytes(fmt.Sprintf(
+					"/api/v1/namespaces/%s/pods/%s/log?tailLines=%d&timestamps=true",
+					url.PathEscape(namespace),
+					url.PathEscape(podName),
+					tail,
+				))
+				if err != nil {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes request failed"})
+					return
+				}
+				if status == http.StatusNotFound {
+					writeJSON(w, http.StatusNotFound, map[string]string{"error": "pod not found"})
+					return
+				}
+				if status < 200 || status >= 300 {
+					msg := strings.TrimSpace(string(body))
+					if strings.Contains(msg, "PodInitializing") || strings.Contains(msg, "ContainerCreating") {
+						writeJSON(w, http.StatusOK, podLogsResponse{Pod: podName, Logs: ""})
+						return
+					}
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": msg})
+					return
+				}
+				writeJSON(w, http.StatusOK, podLogsResponse{Pod: podName, Logs: string(body)})
+				return
+			}
 		case strings.HasSuffix(r.URL.Path, "/logs") && strings.HasPrefix(r.URL.Path, "/api/v1/cluster/pods/"):
 			if r.Method != http.MethodGet {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2178,6 +2740,34 @@ func main() {
 			_, _ = io.Copy(w, resp.Body)
 			return
 
+		case r.Method == http.MethodDelete:
+			namespace, podName, action, ok := namespacedPodPath(r.URL.Path)
+			if !ok || action != "" {
+				http.NotFound(w, r)
+				return
+			}
+			if gw.k8s == nil || !gw.k8s.enabled {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes integration disabled"})
+				return
+			}
+			resp, err := gw.k8s.do(http.MethodDelete, fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(namespace), url.PathEscape(podName)), nil)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes request failed"})
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "pod not found"})
+				return
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(b))})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"pod": podName, "status": "deleted"})
+			return
+
 		case strings.HasSuffix(r.URL.Path, "/restart") && strings.HasPrefix(r.URL.Path, "/api/v1/cluster/pods/"):
 			if r.Method != http.MethodPost {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2228,6 +2818,20 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusOK, gw.k8s.snapshotNodes())
+	})
+	mux.HandleFunc("/api/v1/cluster/certs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, listCertExpiries(gw.k8s, "valhalla"))
+	})
+	mux.HandleFunc("/api/v1/gitops/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSON(w, http.StatusOK, fetchGitOpsStatus(gw.k8s))
 	})
 	mux.HandleFunc("/api/v1/k8s/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2297,6 +2901,24 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
+	mux.HandleFunc("/api/v1/history/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		limit := clampInt(asInt(r.URL.Query().Get("limit")), 50, 100)
+		agent := strings.TrimSpace(r.URL.Query().Get("agent"))
+		outcome := strings.TrimSpace(r.URL.Query().Get("outcome"))
+		writeJSON(w, http.StatusOK, fetchTaskHistory(giteaClient, *giteaURL, *giteaToken, "kit/hirdforge-tasks", agent, outcome, limit))
+	})
+	mux.HandleFunc("/api/v1/history/deployments", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		limit := clampInt(asInt(r.URL.Query().Get("limit")), 20, 100)
+		writeJSON(w, http.StatusOK, fetchDeploymentHistory(giteaClient, *giteaURL, *giteaToken, limit))
+	})
 	mux.HandleFunc("/api/v1/whoami", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2361,6 +2983,7 @@ func main() {
 				return
 			}
 			for _, pr := range prs {
+				number := asInt64(pr["number"])
 				labelsRaw := asSlice(pr["labels"])
 				labels := make([]string, 0, len(labelsRaw))
 				for _, l := range labelsRaw {
@@ -2369,8 +2992,29 @@ func main() {
 						labels = append(labels, name)
 					}
 				}
+				approvals := int64(0)
+				if q.state == "open" && number > 0 {
+					var reviews []map[string]interface{}
+					reviewPath := fmt.Sprintf("/api/v1/repos/%s/pulls/%d/reviews", q.repo, number)
+					if reviewStatus, _, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, reviewPath, &reviews); err == nil && reviewStatus >= 200 && reviewStatus < 300 {
+						latestByReviewer := map[string]string{}
+						for _, review := range reviews {
+							user := asString(asMap(review["user"])["login"])
+							state := strings.ToUpper(asString(review["state"]))
+							if user == "" || state == "" {
+								continue
+							}
+							latestByReviewer[user] = state
+						}
+						for _, state := range latestByReviewer {
+							if state == "APPROVED" {
+								approvals++
+							}
+						}
+					}
+				}
 				out = append(out, giteaPRInfo{
-					Number:    asInt64(pr["number"]),
+					Number:    number,
 					Title:     asString(pr["title"]),
 					State:     asString(pr["state"]),
 					User:      asString(asMap(pr["user"])["login"]),
@@ -2382,6 +3026,7 @@ func main() {
 					UpdatedAt: asString(pr["updated_at"]),
 					HTMLURL:   asString(pr["html_url"]),
 					Labels:    labels,
+					Approvals: approvals,
 					Mergeable: asBool(pr["mergeable"]),
 				})
 			}
