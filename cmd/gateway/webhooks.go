@@ -23,6 +23,8 @@ const (
 	webhookInProgressLabelID = 4
 	webhookEndpointURL       = "http://gateway.valhalla.svc:8080/api/v1/webhooks/gitea"
 	freyaAgentURL            = "http://freya.valhalla.svc:8081"
+	pipelineStateConfigMap   = "gateway-pipeline-state"
+	pipelineStateNamespace   = "valhalla"
 )
 
 var webhookTaskRefRE = regexp.MustCompile(`(?i)(?:closes?\s+)?kit/hirdforge-tasks#(\d+)`)
@@ -529,14 +531,164 @@ func (g *gateway) getPRReviewState(key string) (prReviewState, bool) {
 
 func (g *gateway) setPRReviewState(key string, state prReviewState) {
 	g.prReviewMu.Lock()
-	defer g.prReviewMu.Unlock()
 	g.prReviewState[key] = state
+	g.prReviewMu.Unlock()
+	g.savePipelineState()
 }
 
 func (g *gateway) clearPRReviewState(key string) {
 	g.prReviewMu.Lock()
-	defer g.prReviewMu.Unlock()
 	delete(g.prReviewState, key)
+	g.prReviewMu.Unlock()
+	g.savePipelineState()
+}
+
+func (g *gateway) snapshotPRReviewState() map[string]prReviewState {
+	g.prReviewMu.RLock()
+	defer g.prReviewMu.RUnlock()
+	out := make(map[string]prReviewState, len(g.prReviewState))
+	for key, state := range g.prReviewState {
+		out[key] = state
+	}
+	return out
+}
+
+func (g *gateway) savePipelineState() {
+	if g.k8s == nil || !g.k8s.enabled {
+		return
+	}
+	stateJSON, err := json.Marshal(g.snapshotPRReviewState())
+	if err != nil {
+		log.Printf("webhook: failed to marshal pipeline state: %v", err)
+		return
+	}
+	configMapPath := fmt.Sprintf("/api/v1/namespaces/%s/configmaps/%s", pipelineStateNamespace, pipelineStateConfigMap)
+	resp, err := g.k8s.do(http.MethodGet, configMapPath, nil)
+	if err != nil {
+		log.Printf("webhook: failed to read pipeline state ConfigMap: %v", err)
+		return
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		if err := g.createPipelineStateConfigMap(string(stateJSON)); err != nil {
+			log.Printf("webhook: failed to create pipeline state ConfigMap: %v", err)
+		}
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		log.Printf("webhook: failed to read pipeline state ConfigMap: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return
+	}
+	var configMap map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&configMap); err != nil {
+		resp.Body.Close()
+		log.Printf("webhook: failed to decode pipeline state ConfigMap: %v", err)
+		return
+	}
+	resp.Body.Close()
+	metadata, _ := configMap["metadata"].(map[string]interface{})
+	resourceVersion := strings.TrimSpace(fmt.Sprint(metadata["resourceVersion"]))
+	payload := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]string{
+			"name":            pipelineStateConfigMap,
+			"namespace":       pipelineStateNamespace,
+			"resourceVersion": resourceVersion,
+		},
+		"data": map[string]string{
+			"state": string(stateJSON),
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("webhook: failed to encode pipeline state ConfigMap: %v", err)
+		return
+	}
+	updateResp, err := g.k8s.do(http.MethodPut, configMapPath, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("webhook: failed to update pipeline state ConfigMap: %v", err)
+		return
+	}
+	defer updateResp.Body.Close()
+	if updateResp.StatusCode < 200 || updateResp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(updateResp.Body, 2048))
+		log.Printf("webhook: failed to update pipeline state ConfigMap: status %d: %s", updateResp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+}
+
+func (g *gateway) loadPipelineState() error {
+	if g.k8s == nil || !g.k8s.enabled {
+		return nil
+	}
+	configMapPath := fmt.Sprintf("/api/v1/namespaces/%s/configmaps/%s", pipelineStateNamespace, pipelineStateConfigMap)
+	resp, err := g.k8s.do(http.MethodGet, configMapPath, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		if err := g.createPipelineStateConfigMap("{}"); err != nil {
+			return err
+		}
+		g.prReviewMu.Lock()
+		g.prReviewState = map[string]prReviewState{}
+		g.prReviewMu.Unlock()
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var configMap struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&configMap); err != nil {
+		resp.Body.Close()
+		return err
+	}
+	resp.Body.Close()
+	loaded := map[string]prReviewState{}
+	if raw := strings.TrimSpace(configMap.Data["state"]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &loaded); err != nil {
+			return err
+		}
+	}
+	g.prReviewMu.Lock()
+	g.prReviewState = loaded
+	g.prReviewMu.Unlock()
+	return nil
+}
+
+func (g *gateway) createPipelineStateConfigMap(stateJSON string) error {
+	payload := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]string{
+			"name":      pipelineStateConfigMap,
+			"namespace": pipelineStateNamespace,
+		},
+		"data": map[string]string{
+			"state": stateJSON,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	resp, err := g.k8s.do(http.MethodPost, fmt.Sprintf("/api/v1/namespaces/%s/configmaps", pipelineStateNamespace), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 func (g *gateway) selectPeerReviewer(author string) (*Agent, bool) {
