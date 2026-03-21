@@ -840,8 +840,27 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		log.Printf("webhook: merge skipped for PR #%d: invalid repo %q", review.PRNumber, review.Repo)
 		return
 	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	updatePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/update", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber)
+	updateResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, updatePath, bytes.NewReader(mustJSON(map[string]string{})))
+	if err != nil {
+		log.Printf("webhook: update-branch failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+	} else {
+		updateBody, _ := io.ReadAll(io.LimitReader(updateResp.Body, 2048))
+		updateResp.Body.Close()
+		updateMsg := strings.TrimSpace(string(updateBody))
+		switch {
+		case updateResp.StatusCode >= 200 && updateResp.StatusCode < 300:
+		case updateResp.StatusCode == http.StatusConflict && strings.Contains(strings.ToLower(updateMsg), "already up to date"):
+		case updateResp.StatusCode == http.StatusConflict:
+			log.Printf("webhook: update-branch conflict for PR #%d on %s: %s", review.PRNumber, review.Repo, updateMsg)
+			return
+		default:
+			log.Printf("webhook: update-branch returned %d for PR #%d on %s: %s", updateResp.StatusCode, review.PRNumber, review.Repo, updateMsg)
+		}
+	}
 	payload := map[string]string{"Do": "merge"}
-	resp, err := giteaRequest(&http.Client{Timeout: 10 * time.Second}, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
+	resp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
 	if err != nil {
 		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
 		return
