@@ -304,6 +304,7 @@ type gateway struct {
 	injectionMu       sync.Mutex
 	injections        map[string][]InjectionMessage // keyed by agent name
 	pausedAgents      map[string]bool
+	syncMu           sync.Mutex
 	webhookSecret     string
 	reviewAgent       string
 	taskRepo          string
