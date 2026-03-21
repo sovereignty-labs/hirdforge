@@ -13,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -544,6 +545,26 @@ func (g *gateway) syncMainToDevelop(fullRepo string) {
 	prNum, _ := created["number"].(float64)
 	if prNum == 0 {
 		log.Printf("webhook: main->develop sync PR create for %s returned no PR number", fullRepo)
+		return
+	}
+	reviewersToken := strings.TrimSpace(os.Getenv("GITEA_REVIEWERS_TOKEN"))
+	if reviewersToken == "" {
+		log.Printf("webhook: main->develop sync approval skipped for %s PR #%d: missing GITEA_REVIEWERS_TOKEN", fullRepo, int64(prNum))
+		return
+	}
+	approvalPayload := map[string]string{
+		"event": "APPROVED",
+		"body":  "Auto-approved sync PR",
+	}
+	approvalResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, reviewersToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/reviews", url.PathEscape(owner), url.PathEscape(repoName), int64(prNum)), bytes.NewReader(mustJSON(approvalPayload)))
+	if err != nil {
+		log.Printf("webhook: main->develop sync approval failed for %s PR #%d: %v", fullRepo, int64(prNum), err)
+		return
+	}
+	approvalBody, _ := io.ReadAll(io.LimitReader(approvalResp.Body, 4096))
+	approvalResp.Body.Close()
+	if approvalResp.StatusCode < 200 || approvalResp.StatusCode >= 300 {
+		log.Printf("webhook: main->develop sync approval returned %d for %s PR #%d: %s", approvalResp.StatusCode, fullRepo, int64(prNum), strings.TrimSpace(string(approvalBody)))
 		return
 	}
 	mergePayload := map[string]string{"Do": "merge"}
