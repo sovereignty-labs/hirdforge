@@ -760,6 +760,9 @@ func (k *k8sState) do(method, path string, body io.Reader) (*http.Response, erro
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+k.token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	return k.client.Do(req)
 }
 
@@ -1488,6 +1491,9 @@ func main() {
 		giteaToken:        resolveGatewayGiteaToken(*giteaToken),
 		seidrURL:          strings.TrimSpace(*seidrURLFlag),
 		discordWebhookURL: strings.TrimSpace(*discordWebhookURL),
+	}
+	if err := gw.loadPipelineState(); err != nil {
+		log.Printf("webhook: failed to load pipeline state: %v", err)
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
 	gw.refreshAgentHealth()

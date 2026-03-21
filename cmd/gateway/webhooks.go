@@ -23,6 +23,8 @@ const (
 	webhookInProgressLabelID = 4
 	webhookEndpointURL       = "http://gateway.valhalla.svc:8080/api/v1/webhooks/gitea"
 	freyaAgentURL            = "http://freya.valhalla.svc:8081"
+	pipelineStateConfigMap   = "gateway-pipeline-state"
+	pipelineStateNamespace   = "valhalla"
 )
 
 var webhookTaskRefRE = regexp.MustCompile(`(?i)(?:closes?\s+)?kit/hirdforge-tasks#(\d+)`)
@@ -332,6 +334,9 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		return
 	}
 	log.Printf("webhook: merged PR repo=%s number=%d", pr.Repo, pr.Number)
+	if strings.EqualFold(pr.Base, "main") && (pr.Repo == "gitea_admin/project_valhalla" || pr.Repo == "kit/hirdforge-personas") {
+		g.syncMainToDevelop(pr.Repo)
+	}
 	if matches := webhookTaskRefRE.FindStringSubmatch(pr.Body); len(matches) == 2 {
 		log.Printf("webhook: merged PR #%d references task kit/hirdforge-tasks#%s", pr.Number, matches[1])
 	}
@@ -503,6 +508,59 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 	)
 }
 
+func (g *gateway) syncMainToDevelop(fullRepo string) {
+	owner, repoName, ok := splitFullRepoName(fullRepo)
+	if !ok {
+		log.Printf("webhook: main->develop sync skipped: invalid repo %q", fullRepo)
+		return
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	createPayload := map[string]string{
+		"title": "sync: main \u2192 develop",
+		"body":  "Automated sync PR to keep develop up to date with main after merge.",
+		"head":  "main",
+		"base":  "develop",
+	}
+	createResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls", url.PathEscape(owner), url.PathEscape(repoName)), bytes.NewReader(mustJSON(createPayload)))
+	if err != nil {
+		log.Printf("webhook: main->develop sync PR create failed for %s: %v", fullRepo, err)
+		return
+	}
+	createBody, _ := io.ReadAll(io.LimitReader(createResp.Body, 4096))
+	createResp.Body.Close()
+	if createResp.StatusCode < 200 || createResp.StatusCode >= 300 {
+		if createResp.StatusCode == http.StatusConflict {
+			log.Printf("webhook: main->develop sync PR not created for %s (likely already up to date): %s", fullRepo, strings.TrimSpace(string(createBody)))
+			return
+		}
+		log.Printf("webhook: main->develop sync PR create returned %d for %s: %s", createResp.StatusCode, fullRepo, strings.TrimSpace(string(createBody)))
+		return
+	}
+	var created map[string]interface{}
+	if err := json.Unmarshal(createBody, &created); err != nil {
+		log.Printf("webhook: main->develop sync PR decode failed for %s: %v", fullRepo, err)
+		return
+	}
+	prNum, _ := created["number"].(float64)
+	if prNum == 0 {
+		log.Printf("webhook: main->develop sync PR create for %s returned no PR number", fullRepo)
+		return
+	}
+	mergePayload := map[string]string{"Do": "merge"}
+	mergeResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), int64(prNum)), bytes.NewReader(mustJSON(mergePayload)))
+	if err != nil {
+		log.Printf("webhook: main->develop sync merge failed for %s PR #%d: %v", fullRepo, int64(prNum), err)
+		return
+	}
+	defer mergeResp.Body.Close()
+	mergeBody, _ := io.ReadAll(io.LimitReader(mergeResp.Body, 4096))
+	if mergeResp.StatusCode < 200 || mergeResp.StatusCode >= 300 {
+		log.Printf("webhook: main->develop sync merge returned %d for %s PR #%d: %s", mergeResp.StatusCode, fullRepo, int64(prNum), strings.TrimSpace(string(mergeBody)))
+		return
+	}
+	log.Printf("webhook: synced main back to develop for %s via PR #%d", fullRepo, int64(prNum))
+}
+
 func (g *gateway) builderFromBranch(branch string) string {
 	candidate := strings.TrimSpace(strings.SplitN(branch, "/", 2)[0])
 	if candidate == "" {
@@ -529,14 +587,164 @@ func (g *gateway) getPRReviewState(key string) (prReviewState, bool) {
 
 func (g *gateway) setPRReviewState(key string, state prReviewState) {
 	g.prReviewMu.Lock()
-	defer g.prReviewMu.Unlock()
 	g.prReviewState[key] = state
+	g.prReviewMu.Unlock()
+	g.savePipelineState()
 }
 
 func (g *gateway) clearPRReviewState(key string) {
 	g.prReviewMu.Lock()
-	defer g.prReviewMu.Unlock()
 	delete(g.prReviewState, key)
+	g.prReviewMu.Unlock()
+	g.savePipelineState()
+}
+
+func (g *gateway) snapshotPRReviewState() map[string]prReviewState {
+	g.prReviewMu.RLock()
+	defer g.prReviewMu.RUnlock()
+	out := make(map[string]prReviewState, len(g.prReviewState))
+	for key, state := range g.prReviewState {
+		out[key] = state
+	}
+	return out
+}
+
+func (g *gateway) savePipelineState() {
+	if g.k8s == nil || !g.k8s.enabled {
+		return
+	}
+	stateJSON, err := json.Marshal(g.snapshotPRReviewState())
+	if err != nil {
+		log.Printf("webhook: failed to marshal pipeline state: %v", err)
+		return
+	}
+	configMapPath := fmt.Sprintf("/api/v1/namespaces/%s/configmaps/%s", pipelineStateNamespace, pipelineStateConfigMap)
+	resp, err := g.k8s.do(http.MethodGet, configMapPath, nil)
+	if err != nil {
+		log.Printf("webhook: failed to read pipeline state ConfigMap: %v", err)
+		return
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		if err := g.createPipelineStateConfigMap(string(stateJSON)); err != nil {
+			log.Printf("webhook: failed to create pipeline state ConfigMap: %v", err)
+		}
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		log.Printf("webhook: failed to read pipeline state ConfigMap: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return
+	}
+	var configMap map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&configMap); err != nil {
+		resp.Body.Close()
+		log.Printf("webhook: failed to decode pipeline state ConfigMap: %v", err)
+		return
+	}
+	resp.Body.Close()
+	metadata, _ := configMap["metadata"].(map[string]interface{})
+	resourceVersion := strings.TrimSpace(fmt.Sprint(metadata["resourceVersion"]))
+	payload := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]string{
+			"name":            pipelineStateConfigMap,
+			"namespace":       pipelineStateNamespace,
+			"resourceVersion": resourceVersion,
+		},
+		"data": map[string]string{
+			"state": string(stateJSON),
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("webhook: failed to encode pipeline state ConfigMap: %v", err)
+		return
+	}
+	updateResp, err := g.k8s.do(http.MethodPut, configMapPath, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("webhook: failed to update pipeline state ConfigMap: %v", err)
+		return
+	}
+	defer updateResp.Body.Close()
+	if updateResp.StatusCode < 200 || updateResp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(updateResp.Body, 2048))
+		log.Printf("webhook: failed to update pipeline state ConfigMap: status %d: %s", updateResp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+}
+
+func (g *gateway) loadPipelineState() error {
+	if g.k8s == nil || !g.k8s.enabled {
+		return nil
+	}
+	configMapPath := fmt.Sprintf("/api/v1/namespaces/%s/configmaps/%s", pipelineStateNamespace, pipelineStateConfigMap)
+	resp, err := g.k8s.do(http.MethodGet, configMapPath, nil)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		resp.Body.Close()
+		if err := g.createPipelineStateConfigMap("{}"); err != nil {
+			return err
+		}
+		g.prReviewMu.Lock()
+		g.prReviewState = map[string]prReviewState{}
+		g.prReviewMu.Unlock()
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var configMap struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&configMap); err != nil {
+		resp.Body.Close()
+		return err
+	}
+	resp.Body.Close()
+	loaded := map[string]prReviewState{}
+	if raw := strings.TrimSpace(configMap.Data["state"]); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &loaded); err != nil {
+			return err
+		}
+	}
+	g.prReviewMu.Lock()
+	g.prReviewState = loaded
+	g.prReviewMu.Unlock()
+	return nil
+}
+
+func (g *gateway) createPipelineStateConfigMap(stateJSON string) error {
+	payload := map[string]interface{}{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata": map[string]string{
+			"name":      pipelineStateConfigMap,
+			"namespace": pipelineStateNamespace,
+		},
+		"data": map[string]string{
+			"state": stateJSON,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	resp, err := g.k8s.do(http.MethodPost, fmt.Sprintf("/api/v1/namespaces/%s/configmaps", pipelineStateNamespace), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 func (g *gateway) selectPeerReviewer(author string) (*Agent, bool) {
@@ -688,8 +896,27 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		log.Printf("webhook: merge skipped for PR #%d: invalid repo %q", review.PRNumber, review.Repo)
 		return
 	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	updatePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/update", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber)
+	updateResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, updatePath, bytes.NewReader(mustJSON(map[string]string{})))
+	if err != nil {
+		log.Printf("webhook: update-branch failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+	} else {
+		updateBody, _ := io.ReadAll(io.LimitReader(updateResp.Body, 2048))
+		updateResp.Body.Close()
+		updateMsg := strings.TrimSpace(string(updateBody))
+		switch {
+		case updateResp.StatusCode >= 200 && updateResp.StatusCode < 300:
+		case updateResp.StatusCode == http.StatusConflict && strings.Contains(strings.ToLower(updateMsg), "already up to date"):
+		case updateResp.StatusCode == http.StatusConflict:
+			log.Printf("webhook: update-branch conflict for PR #%d on %s: %s", review.PRNumber, review.Repo, updateMsg)
+			return
+		default:
+			log.Printf("webhook: update-branch returned %d for PR #%d on %s: %s", updateResp.StatusCode, review.PRNumber, review.Repo, updateMsg)
+		}
+	}
 	payload := map[string]string{"Do": "merge"}
-	resp, err := giteaRequest(&http.Client{Timeout: 10 * time.Second}, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
+	resp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
 	if err != nil {
 		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
 		return
@@ -731,17 +958,25 @@ func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 	} else {
 		phase = "unknown"
 	}
-	phaseLabel := phase
-	if phaseLabel != "" {
-		phaseLabel = strings.ToUpper(phaseLabel[:1]) + phaseLabel[1:]
+	owner, repoName, ok := splitFullRepoName(review.Repo)
+	if !ok {
+		log.Printf("webhook: fix dispatch skipped - invalid repo %q", review.Repo)
+		return
 	}
 	fixMsg := fmt.Sprintf(
-		"%s review requested changes on PR #%d (%q) on %s. Feedback: %s. Fix the issues and push to the same branch (%s). Do NOT create a new PR — push to existing branch.",
-		phaseLabel,
+		"A reviewer requested changes on PR #%d (%q) on %s.\n\nFeedback:\n%s\n\nFIX INSTRUCTIONS:\n1. Clone the repo: git-clone url=%s/%s/%s.git\n2. Fetch and checkout the existing branch:\n   exec: cd /workspace/%s && git fetch origin %s && git checkout %s\n3. Make the requested fixes\n4. Commit: git-commit message=\"fix: address review feedback on PR #%d\"\n5. Push to the SAME branch: exec: cd /workspace/%s && git push origin %s\n6. Do NOT create a new PR. Pushing to the branch updates the existing PR automatically.",
 		review.PRNumber,
 		review.PRTitle,
 		review.Repo,
 		review.ReviewBody,
+		g.giteaURL,
+		owner,
+		repoName,
+		repoName,
+		review.PRHead,
+		review.PRHead,
+		review.PRNumber,
+		repoName,
 		review.PRHead,
 	)
 	sessionID := fmt.Sprintf("webhook-review-fix-%s-%d", sanitizeWebhookToken(review.Repo), review.PRNumber)
