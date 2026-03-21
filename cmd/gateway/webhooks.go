@@ -404,10 +404,20 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 			labelAgent = strings.TrimPrefix(label, "agent/")
 		}
 	}
-	selectedAgent, reason := g.selectAgentForTask(task)
+	selectedAgent := ""
+	reason := ""
+	if labelAgent != "" {
+		if agent, ok := g.getAgent(labelAgent); ok && agent.Healthy {
+			selectedAgent = labelAgent
+			reason = fmt.Sprintf("label: agent/%s", labelAgent)
+		}
+	}
 	if selectedAgent == "" {
-		selectedAgent = labelAgent
-		reason = "bifrost: no candidates, using label fallback"
+		selectedAgent, reason = g.selectAgentForTask(task)
+		if selectedAgent == "" && labelAgent != "" {
+			selectedAgent = labelAgent
+			reason = "bifrost: no candidates, using label fallback"
+		}
 	}
 	if selectedAgent == "" {
 		log.Printf("webhook: task #%d skipped: no agent from bifrost or labels", task.Number)
