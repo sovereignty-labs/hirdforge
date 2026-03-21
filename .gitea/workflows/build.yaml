@@ -122,10 +122,36 @@ jobs:
             fi
             docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
           fi
+  build-hirdforge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-hirdforge && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-hirdforge
+      - name: Build and push hirdforge
+        run: |
+          cd /src-hirdforge
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(cmd/hirdforge/|go\.mod$|go\.sum$|Dockerfile\.hirdforge$)'; then
+            if docker pull $REGISTRY/valhalla-hirdforge:latest 2>/dev/null; then
+              docker tag $REGISTRY/valhalla-hirdforge:latest $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.hirdforge -t $REGISTRY/valhalla-hirdforge:latest -t $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-hirdforge:latest
+            fi
+          else
+            docker build -f Dockerfile.hirdforge -t $REGISTRY/valhalla-hirdforge:latest -t $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT .
+            docker push $REGISTRY/valhalla-hirdforge:latest
+          fi
+          docker push $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
   update-infra:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox]
+    needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox, build-hirdforge]
     steps:
       - name: Install tools
         run: apk add --no-cache curl jq python3
