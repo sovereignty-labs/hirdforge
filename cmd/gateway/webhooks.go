@@ -336,6 +336,9 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		return
 	}
 	log.Printf("webhook: merged PR repo=%s number=%d", pr.Repo, pr.Number)
+	if strings.EqualFold(pr.Base, "develop") {
+		g.syncDevelopToMain(pr.Repo)
+	}
 	if strings.EqualFold(pr.Base, "main") && (pr.Repo == "gitea_admin/project_valhalla" || pr.Repo == "kit/hirdforge-personas") {
 		g.syncMainToDevelop(pr.Repo)
 	}
@@ -581,6 +584,53 @@ func (g *gateway) syncMainToDevelop(fullRepo string) {
 		return
 	}
 	log.Printf("webhook: synced main back to develop for %s via PR #%d", fullRepo, int64(prNum))
+}
+
+func (g *gateway) syncDevelopToMain(fullRepo string) {
+	owner, repoName, ok := splitFullRepoName(fullRepo)
+	if !ok {
+		log.Printf("webhook: develop->main sync skipped: invalid repo %q", fullRepo)
+		return
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	checkPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&base=main&head=develop&limit=10", url.PathEscape(owner), url.PathEscape(repoName))
+	var pulls []map[string]interface{}
+	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, checkPath, &pulls)
+	if err != nil {
+		log.Printf("webhook: develop->main PR existence check failed for %s: %v", fullRepo, err)
+		return
+	}
+	if status < 200 || status >= 300 {
+		log.Printf("webhook: develop->main PR existence check returned %d for %s: %s", status, fullRepo, strings.TrimSpace(string(body)))
+		return
+	}
+	if len(pulls) > 0 {
+		log.Printf("webhook: develop->main PR already exists, skipping")
+		return
+	}
+
+	createPayload := map[string]string{
+		"title": "develop → main",
+		"body":  "Batched develop changes ready for Sovereign merge.",
+		"head":  "develop",
+		"base":  "main",
+	}
+	createResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls", url.PathEscape(owner), url.PathEscape(repoName)), bytes.NewReader(mustJSON(createPayload)))
+	if err != nil {
+		log.Printf("webhook: develop->main PR create failed for %s: %v", fullRepo, err)
+		return
+	}
+	createBody, _ := io.ReadAll(io.LimitReader(createResp.Body, 4096))
+	createResp.Body.Close()
+	if createResp.StatusCode < 200 || createResp.StatusCode >= 300 {
+		if createResp.StatusCode == http.StatusConflict {
+			log.Printf("webhook: develop->main PR already exists, skipping")
+			return
+		}
+		log.Printf("webhook: develop->main PR create returned %d for %s: %s", createResp.StatusCode, fullRepo, strings.TrimSpace(string(createBody)))
+		return
+	}
+	log.Printf("webhook: Auto-created develop→main PR")
 }
 
 func (g *gateway) builderFromBranch(branch string) string {
