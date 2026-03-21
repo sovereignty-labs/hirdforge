@@ -2083,6 +2083,110 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
   </aside>;
 }
 
+// ═══════════ METRICS VIEW ═══════════
+function MetricsView({}){
+  const[metrics,setMetrics]=useState(null);
+  const[loading,setLoading]=useState(true);
+  const[error,setError]=useState(null);
+  const[lastRefresh,setLastRefresh]=useState(null);
+
+  const fetchMetrics=useCallback(async()=>{
+    try{
+      const r=await fetch('/api/v1/metrics/fleet');
+      if(!r.ok)throw new Error(`HTTP ${r.status}`);
+      const d=await r.json();
+      setMetrics(d);
+      setError(null);
+      setLastRefresh(new Date());
+    }catch(e){
+      setError(e.message||'Failed to load metrics');
+    }finally{
+      setLoading(false);
+    }
+  },[]);
+
+  useEffect(()=>{
+    fetchMetrics();
+    const id=setInterval(fetchMetrics,30000);
+    return()=>clearInterval(id);
+  },[fetchMetrics]);
+
+  const totalAgents=metrics?.total_agents||0;
+  const reachableAgents=metrics?.reachable||0;
+  const agentList=metrics?.agents||[];
+  const healthyCount=agentList.filter(a=>a.reachable).length;
+  const unhealthyCount=agentList.length-healthyCount;
+
+  return <div style={{padding:"16px",overflowY:"auto",height:"100%",boxSizing:"border-box"}}>
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+      <div>
+        <span style={{fontSize:11,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>Fleet Metrics</span>
+        <span style={{fontSize:10,color:"rgba(255,255,255,0.2)",marginLeft:8}}>Auto-refreshes every 30s</span>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        {lastRefresh&&<span style={{fontSize:9,color:"rgba(255,255,255,0.15)"}}>Last: {lastRefresh.toLocaleTimeString('en-US',{hour12:false})}</span>}
+        <button onClick={fetchMetrics} disabled={loading} style={{padding:"4px 10px",fontSize:9,fontWeight:700,background:"rgba(129,140,248,0.08)",border:"1px solid rgba(129,140,248,0.2)",color:"#a5b4fc",borderRadius:3,cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace"}}>Refresh</button>
+      </div>
+    </div>
+
+    {/* Summary bar */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,minmax(0,1fr))",gap:8,marginBottom:16}}>
+      <div className="glass metric" style={{padding:"12px 14px"}}>
+        <span className="metric-label">Healthy</span>
+        <span className="metric-value" style={{color:"#34d399"}}>{healthyCount}/{agentList.length}</span>
+        <span className="metric-sub">agents reachable</span>
+      </div>
+      <div className="glass metric" style={{padding:"12px 14px"}}>
+        <span className="metric-label">Unreachable</span>
+        <span className="metric-value" style={{color:unhealthyCount>0?"#ef4444":"#34d399"}}>{unhealthyCount}</span>
+        <span className="metric-sub">agents down</span>
+      </div>
+      <div className="glass metric" style={{padding:"12px 14px"}}>
+        <span className="metric-label">Checked</span>
+        <span className="metric-value" style={{color:"#818cf8"}}>{metrics?.timestamp?"":"—"}</span>
+        <span className="metric-sub">{metrics?.timestamp?new Date(metrics.timestamp).toLocaleTimeString('en-US',{hour12:false}):"pending"}</span>
+      </div>
+    </div>
+
+    {/* Agent cards grid */}
+    <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(280px,1fr))",gap:12}}>
+      {loading&&!metrics&&<div style={{gridColumn:"1/-1",padding:"40px",textAlign:"center",color:"rgba(255,255,255,0.2)"}}>Loading fleet metrics...</div>}
+      {error&&!metrics&&<div style={{gridColumn:"1/-1",padding:"40px",textAlign:"center",color:"#f87171"}}>Error: {error}</div>}
+      {!loading&&!error&&agentList.length===0&&<div style={{gridColumn:"1/-1",padding:"40px",textAlign:"center",color:"rgba(255,255,255,0.2)"}}>No agents found in fleet</div>}
+      {agentList.map((agent,i)=>{
+        const reachable=!!agent.reachable;
+        const dotColor=reachable?"#34d399":"#ef4444";
+        const cardBg=reachable?"rgba(52,211,153,0.03)":"rgba(239,68,68,0.03)";
+        const cardBorder=reachable?"rgba(52,211,153,0.15)":"rgba(239,68,68,0.15)";
+        return <div key={agent.name||i} style={{background:cardBg,border:`1px solid ${cardBorder}`,borderRadius:8,padding:"14px 16px",display:"flex",flexDirection:"column",gap:10}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <span style={{width:10,height:10,borderRadius:"50%",background:dotColor,boxShadow:`0 0 8px ${dotColor}60`,flexShrink:0}}/>
+              <span style={{fontSize:14,fontWeight:700,color:"#e2e8f0",fontFamily:"'Space Grotesk',sans-serif"}}>{agent.name||"unknown"}</span>
+            </div>
+            <span style={{fontSize:10,fontWeight:700,letterSpacing:".08em",textTransform:"uppercase",color:dotColor}}>{reachable?"UP":"DOWN"}</span>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
+              <span style={{color:"rgba(255,255,255,0.35)"}}>Status</span>
+              <span style={{color:reachable?"#34d399":"#ef4444",fontWeight:600}}>{reachable?"Reachable":"Unreachable"}</span>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:11}}>
+              <span style={{color:"rgba(255,255,255,0.35)"}}>Response</span>
+              <span style={{color:"rgba(255,255,255,0.6)"}}>{agent.metrics_bytes>0?`${agent.metrics_bytes} bytes`:"—"}</span>
+            </div>
+          </div>
+        </div>;
+      })}
+    </div>
+
+    {/* Error state when metrics load fails */}
+    {error&&metrics&&<div style={{marginTop:16,padding:"12px 14px",background:"rgba(239,68,68,0.06)",border:"1px solid rgba(239,68,68,0.15)",borderRadius:6}}>
+      <span style={{fontSize:11,color:"#f87171"}}>Warning: {error} — displaying cached data</span>
+    </div>}
+  </div>;
+}
+
 function App(){
   const[tab,setTab]=useState("mission");
   const[viewportWidth,setViewportWidth]=useState(window.innerWidth);
@@ -2159,7 +2263,7 @@ function App(){
         </div>
       </div>
       <nav className="topnav">
-        {[["mission","Mission Control"],["cluster","Cluster"],["history","History"],["settings","Settings"]].map(item=><button key={item[0]} className={tab===item[0]?"active":""} onClick={()=>setTab(item[0])}>{item[1]}</button>)}
+        {[["mission","Mission Control"],["metrics","Metrics"],["cluster","Cluster"],["history","History"],["settings","Settings"]].map(item=><button key={item[0]} className={tab===item[0]?"active":""} onClick={()=>setTab(item[0])}>{item[1]}</button>)}
       </nav>
       <div className="hud-strip">
         <div className="hud-card"><span className={`status-dot ${wsOk?"green":"red"}`}/><div className="hud-meta"><span className="hud-label">Cluster health</span><span className="hud-note">{wsOk?"live control plane":"reconnecting events"}</span></div></div>
@@ -2169,6 +2273,7 @@ function App(){
     </header>
     <div className="main-shell">
       {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalStatus={approvalStatus} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} prActionBusy={prActionBusy} onPRAction={handlePRAction} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}}/>}
+      {tab==="metrics"&&<MetricsView/>}
       {tab==="cluster"&&<ClusterView nodes={nodes} pods={pods} gitops={gitops} gitopsStatus={gitopsStatus} onRefreshGitops={refreshGitops} toast={showToast}/>}
       {tab==="history"&&<HistoryView tasks={taskHistory} taskStatus={taskHistoryStatus} deployments={deployHistory} deployStatus={deployHistoryStatus} agents={agents}/>}
       {tab==="settings"&&<SettingsViewNext agents={agents} repos={repos} fleetState={fleetState} toast={showToast}/>}
