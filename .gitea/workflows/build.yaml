@@ -137,8 +137,12 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
           if ! echo "$CHANGED" | grep -Eq '^(cmd/hirdforge/|go\.mod$|go\.sum$|Dockerfile\.hirdforge$)'; then
-            docker pull $REGISTRY/valhalla-hirdforge:latest
-            docker tag $REGISTRY/valhalla-hirdforge:latest $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
+            if docker pull $REGISTRY/valhalla-hirdforge:latest 2>/dev/null; then
+              docker tag $REGISTRY/valhalla-hirdforge:latest $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.hirdforge -t $REGISTRY/valhalla-hirdforge:latest -t $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-hirdforge:latest
+            fi
           else
             docker build -f Dockerfile.hirdforge -t $REGISTRY/valhalla-hirdforge:latest -t $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-hirdforge:latest
