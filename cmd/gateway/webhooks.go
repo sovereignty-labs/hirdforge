@@ -901,8 +901,8 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 	}
 
 	if !state.PeerReviewed {
-		if review.Reviewer != state.PeerAgent {
-			log.Printf("webhook: approved review ignored for PR #%d on %s: expected peer %s, got %s", review.PRNumber, review.Repo, state.PeerAgent, review.Reviewer)
+		if review.Reviewer != "warband_review" {
+			log.Printf("webhook: approved review ignored for PR #%d on %s: expected peer approval via warband_review for dispatched peer %s, got %s", review.PRNumber, review.Repo, state.PeerAgent, review.Reviewer)
 			return
 		}
 		state.PeerReviewed = true
@@ -912,8 +912,8 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		return
 	}
 
-	if review.Reviewer != "freya" {
-		log.Printf("webhook: second approval ignored for PR #%d on %s: expected freya, got %s", review.PRNumber, review.Repo, review.Reviewer)
+	if review.Reviewer != "warband_review" {
+		log.Printf("webhook: second approval ignored for PR #%d on %s: expected freya approval via warband_review, got %s", review.PRNumber, review.Repo, review.Reviewer)
 		return
 	}
 
