@@ -16,6 +16,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -514,12 +515,33 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 }
 
 func (g *gateway) syncMainToDevelop(fullRepo string) {
+	g.syncMu.Lock()
+	defer g.syncMu.Unlock()
+
 	owner, repoName, ok := splitFullRepoName(fullRepo)
 	if !ok {
 		log.Printf("webhook: main->develop sync skipped: invalid repo %q", fullRepo)
 		return
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
+
+	// Check for existing open sync PRs to avoid duplicates
+	checkPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&base=develop&head=main&limit=10", url.PathEscape(owner), url.PathEscape(repoName))
+	var pulls []map[string]interface{}
+	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, checkPath, &pulls)
+	if err != nil {
+		log.Printf("webhook: main->develop PR existence check failed for %s: %v", fullRepo, err)
+		return
+	}
+	if status < 200 || status >= 300 {
+		log.Printf("webhook: main->develop PR existence check returned %d for %s: %s", status, fullRepo, strings.TrimSpace(string(body)))
+		return
+	}
+	if len(pulls) > 0 {
+		log.Printf("webhook: main->develop sync PR already exists, skipping")
+		return
+	}
+
 	createPayload := map[string]string{
 		"title": "sync: main \u2192 develop",
 		"body":  "Automated sync PR to keep develop up to date with main after merge.",
@@ -587,6 +609,9 @@ func (g *gateway) syncMainToDevelop(fullRepo string) {
 }
 
 func (g *gateway) syncDevelopToMain(fullRepo string) {
+	g.syncMu.Lock()
+	defer g.syncMu.Unlock()
+
 	owner, repoName, ok := splitFullRepoName(fullRepo)
 	if !ok {
 		log.Printf("webhook: develop->main sync skipped: invalid repo %q", fullRepo)
