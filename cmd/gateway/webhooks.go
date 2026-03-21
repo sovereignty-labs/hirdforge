@@ -334,6 +334,9 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		return
 	}
 	log.Printf("webhook: merged PR repo=%s number=%d", pr.Repo, pr.Number)
+	if strings.EqualFold(pr.Base, "main") && (pr.Repo == "gitea_admin/project_valhalla" || pr.Repo == "kit/hirdforge-personas") {
+		g.syncMainToDevelop(pr.Repo)
+	}
 	if matches := webhookTaskRefRE.FindStringSubmatch(pr.Body); len(matches) == 2 {
 		log.Printf("webhook: merged PR #%d references task kit/hirdforge-tasks#%s", pr.Number, matches[1])
 	}
@@ -503,6 +506,59 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 			{Name: "PR", Value: pr.HTMLURL, Inline: false},
 		},
 	)
+}
+
+func (g *gateway) syncMainToDevelop(fullRepo string) {
+	owner, repoName, ok := splitFullRepoName(fullRepo)
+	if !ok {
+		log.Printf("webhook: main->develop sync skipped: invalid repo %q", fullRepo)
+		return
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	createPayload := map[string]string{
+		"title": "sync: main \u2192 develop",
+		"body":  "Automated sync PR to keep develop up to date with main after merge.",
+		"head":  "main",
+		"base":  "develop",
+	}
+	createResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls", url.PathEscape(owner), url.PathEscape(repoName)), bytes.NewReader(mustJSON(createPayload)))
+	if err != nil {
+		log.Printf("webhook: main->develop sync PR create failed for %s: %v", fullRepo, err)
+		return
+	}
+	createBody, _ := io.ReadAll(io.LimitReader(createResp.Body, 4096))
+	createResp.Body.Close()
+	if createResp.StatusCode < 200 || createResp.StatusCode >= 300 {
+		if createResp.StatusCode == http.StatusConflict {
+			log.Printf("webhook: main->develop sync PR not created for %s (likely already up to date): %s", fullRepo, strings.TrimSpace(string(createBody)))
+			return
+		}
+		log.Printf("webhook: main->develop sync PR create returned %d for %s: %s", createResp.StatusCode, fullRepo, strings.TrimSpace(string(createBody)))
+		return
+	}
+	var created map[string]interface{}
+	if err := json.Unmarshal(createBody, &created); err != nil {
+		log.Printf("webhook: main->develop sync PR decode failed for %s: %v", fullRepo, err)
+		return
+	}
+	prNum, _ := created["number"].(float64)
+	if prNum == 0 {
+		log.Printf("webhook: main->develop sync PR create for %s returned no PR number", fullRepo)
+		return
+	}
+	mergePayload := map[string]string{"Do": "merge"}
+	mergeResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), int64(prNum)), bytes.NewReader(mustJSON(mergePayload)))
+	if err != nil {
+		log.Printf("webhook: main->develop sync merge failed for %s PR #%d: %v", fullRepo, int64(prNum), err)
+		return
+	}
+	defer mergeResp.Body.Close()
+	mergeBody, _ := io.ReadAll(io.LimitReader(mergeResp.Body, 4096))
+	if mergeResp.StatusCode < 200 || mergeResp.StatusCode >= 300 {
+		log.Printf("webhook: main->develop sync merge returned %d for %s PR #%d: %s", mergeResp.StatusCode, fullRepo, int64(prNum), strings.TrimSpace(string(mergeBody)))
+		return
+	}
+	log.Printf("webhook: synced main back to develop for %s via PR #%d", fullRepo, int64(prNum))
 }
 
 func (g *gateway) builderFromBranch(branch string) string {
