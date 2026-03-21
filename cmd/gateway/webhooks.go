@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,9 +67,30 @@ type webhookPRReview struct {
 }
 
 type prReviewState struct {
-	PeerReviewed bool
-	PeerAgent    string
-	Author       string
+	PeerReviewed          bool
+	PeerAgent             string
+	Author                string
+	TaskNumber            int64
+	ChangesRequestedCount int
+	ReviewFeedback        []string
+}
+
+type dispatchedTask struct {
+	TaskNumber     int64     `json:"task_number"`
+	Agent          string    `json:"agent"`
+	DispatchedAt   time.Time `json:"dispatched_at"`
+	Repo           string    `json:"repo"`
+	Attempts       int       `json:"attempts"`
+	FailedAgents   []string  `json:"failed_agents"`
+	TaskTitle      string    `json:"task_title"`
+	TaskBody       string    `json:"task_body"`
+	TaskLabels     []string  `json:"task_labels"`
+	ReviewFeedback []string  `json:"review_feedback"`
+}
+
+type persistedPipelineState struct {
+	PRReviewState   map[string]prReviewState  `json:"pr_review_state"`
+	DispatchedTasks map[int64]*dispatchedTask `json:"dispatched_tasks"`
 }
 
 func (g *gateway) validateWebhookSignature(body []byte, signature string) bool {
@@ -186,7 +208,7 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 				FullName string `json:"full_name"`
 			} `json:"repository"`
 			Review struct {
-				Number int64 `json:"number"`
+				Number int64  `json:"number"`
 				State  string `json:"state"`
 				Body   string `json:"body"`
 				User   struct {
@@ -194,9 +216,9 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 				} `json:"user"`
 			} `json:"review"`
 			PullRequest struct {
-				Number  int64 `json:"number"`
-				Title   string `json:"title"`
-				Head    struct {
+				Number int64  `json:"number"`
+				Title  string `json:"title"`
+				Head   struct {
 					Ref string `json:"ref"`
 				} `json:"head"`
 				Base struct {
@@ -280,44 +302,9 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	sessionID := fmt.Sprintf("webhook-review-%s-%d", sanitizeWebhookToken(pr.Repo), pr.Number)
-	payload, err := json.Marshal(map[string]string{
-		"content":    reviewMsg,
-		"session_id": sessionID,
-	})
-	if err != nil {
-		log.Printf("webhook: build review request failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(freyaAgentURL, "/")+"/message", bytes.NewReader(payload))
-	if err != nil {
-		log.Printf("webhook: create reviewer request failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	agentClient := &http.Client{}
-	agentResp, err := agentClient.Do(req)
-	if err != nil {
+	if _, err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, reviewMsg, "webhook_review"); err != nil {
 		log.Printf("webhook: review dispatch failed for PR #%d on %s via freya: %v", pr.Number, pr.Repo, err)
-		return
 	}
-	reviewText, err := readAgentSSEContent(agentResp)
-	if err != nil {
-		log.Printf("webhook: review read failed for PR #%d on %s via freya: %v", pr.Number, pr.Repo, err)
-		return
-	}
-	reviewText = strings.TrimSpace(thinkTagRE.ReplaceAllString(reviewText, ""))
-	if reviewText == "" {
-		log.Printf("webhook: review completed for PR #%d on %s via freya with empty response", pr.Number, pr.Repo)
-		g.addEvent("webhook_review", "freya", fmt.Sprintf("Queued review for PR #%d on %s", pr.Number, pr.Repo))
-		return
-	}
-	log.Printf("webhook: review completed for PR #%d on %s via freya: %s", pr.Number, pr.Repo, reviewText)
-	g.addEvent("webhook_review", "freya", fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
 }
 
 func (g *gateway) handleAgentPRSynchronized(pr webhookPR) {
@@ -344,6 +331,9 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 	}
 	if matches := webhookTaskRefRE.FindStringSubmatch(pr.Body); len(matches) == 2 {
 		log.Printf("webhook: merged PR #%d references task kit/hirdforge-tasks#%s", pr.Number, matches[1])
+		if taskNumber, err := parseWebhookTaskNumber(matches[1]); err == nil {
+			g.clearDispatchedTask(taskNumber)
+		}
 	}
 
 	taskOwner, taskRepoName, ok := splitFullRepoName(g.taskRepo)
@@ -414,10 +404,20 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 			labelAgent = strings.TrimPrefix(label, "agent/")
 		}
 	}
-	selectedAgent, reason := g.selectAgentForTask(task)
+	selectedAgent := ""
+	reason := ""
+	if labelAgent != "" {
+		if agent, ok := g.getAgent(labelAgent); ok && agent.Healthy {
+			selectedAgent = labelAgent
+			reason = fmt.Sprintf("label: agent/%s", labelAgent)
+		}
+	}
 	if selectedAgent == "" {
-		selectedAgent = labelAgent
-		reason = "bifrost: no candidates, using label fallback"
+		selectedAgent, reason = g.selectAgentForTask(task)
+		if selectedAgent == "" && labelAgent != "" {
+			selectedAgent = labelAgent
+			reason = "bifrost: no candidates, using label fallback"
+		}
 	}
 	if selectedAgent == "" {
 		log.Printf("webhook: task #%d skipped: no agent from bifrost or labels", task.Number)
@@ -473,35 +473,22 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		return
 	}
 
-	taskReqBody, err := json.Marshal(map[string]string{
-		"content":    wrapTaskForDispatch(task.Body, task.Number),
-		"session_id": fmt.Sprintf("webhook-task-%d", task.Number),
-	})
-	if err != nil {
-		log.Printf("webhook: failed marshaling task dispatch for #%d: %v", task.Number, err)
-		return
-	}
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(taskReqBody))
-	if err != nil {
-		log.Printf("webhook: failed creating dispatch request for task #%d: %v", task.Number, err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	agentClient := &http.Client{Timeout: 5 * time.Second}
-	resp, err := agentClient.Do(req)
-	if err != nil {
+	if err := g.dispatchTaskToAgent(targetAgent, agent.URL, task, wrapTaskForDispatch(task.Body, task.Number), fmt.Sprintf("webhook-task-%d", task.Number)); err != nil {
 		log.Printf("webhook: dispatch failed for task #%d to %s: %v", task.Number, targetAgent, err)
 		return
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
-	resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("webhook: dispatch returned %d for task #%d to %s", resp.StatusCode, task.Number, targetAgent)
-		return
-	}
+	g.recordDispatchedTask(&dispatchedTask{
+		TaskNumber:   task.Number,
+		Agent:        targetAgent,
+		DispatchedAt: time.Now().UTC(),
+		Repo:         pr.Repo,
+		Attempts:     1,
+		TaskTitle:    task.Title,
+		TaskBody:     task.Body,
+		TaskLabels:   append([]string(nil), task.Labels...),
+	})
 
 	log.Printf("webhook: dispatched task #%d to %s after merge of PR #%d on %s", task.Number, targetAgent, pr.Number, pr.Repo)
-	g.addEvent("webhook_dispatch", targetAgent, fmt.Sprintf("Dispatched task #%d: %s", task.Number, task.Title))
 	g.sendDiscordWebhookNotification(
 		"Task Dispatched",
 		fmt.Sprintf("Dispatched `%s` on task #%d: %s", targetAgent, task.Number, task.Title),
@@ -705,11 +692,66 @@ func (g *gateway) snapshotPRReviewState() map[string]prReviewState {
 	return out
 }
 
+func (g *gateway) getDispatchedTask(taskNumber int64) (*dispatchedTask, bool) {
+	g.dispatchedTasksMu.Lock()
+	defer g.dispatchedTasksMu.Unlock()
+	task, ok := g.dispatchedTasks[taskNumber]
+	if !ok || task == nil {
+		return nil, false
+	}
+	cp := *task
+	cp.FailedAgents = append([]string(nil), task.FailedAgents...)
+	cp.TaskLabels = append([]string(nil), task.TaskLabels...)
+	cp.ReviewFeedback = append([]string(nil), task.ReviewFeedback...)
+	return &cp, true
+}
+
+func (g *gateway) recordDispatchedTask(task *dispatchedTask) {
+	if task == nil {
+		return
+	}
+	g.dispatchedTasksMu.Lock()
+	cp := *task
+	cp.FailedAgents = append([]string(nil), task.FailedAgents...)
+	cp.TaskLabels = append([]string(nil), task.TaskLabels...)
+	cp.ReviewFeedback = append([]string(nil), task.ReviewFeedback...)
+	g.dispatchedTasks[task.TaskNumber] = &cp
+	g.dispatchedTasksMu.Unlock()
+	g.savePipelineState()
+}
+
+func (g *gateway) clearDispatchedTask(taskNumber int64) {
+	g.dispatchedTasksMu.Lock()
+	delete(g.dispatchedTasks, taskNumber)
+	g.dispatchedTasksMu.Unlock()
+	g.savePipelineState()
+}
+
+func (g *gateway) snapshotDispatchedTasks() map[int64]*dispatchedTask {
+	g.dispatchedTasksMu.Lock()
+	defer g.dispatchedTasksMu.Unlock()
+	out := make(map[int64]*dispatchedTask, len(g.dispatchedTasks))
+	for key, task := range g.dispatchedTasks {
+		if task == nil {
+			continue
+		}
+		cp := *task
+		cp.FailedAgents = append([]string(nil), task.FailedAgents...)
+		cp.TaskLabels = append([]string(nil), task.TaskLabels...)
+		cp.ReviewFeedback = append([]string(nil), task.ReviewFeedback...)
+		out[key] = &cp
+	}
+	return out
+}
+
 func (g *gateway) savePipelineState() {
 	if g.k8s == nil || !g.k8s.enabled {
 		return
 	}
-	stateJSON, err := json.Marshal(g.snapshotPRReviewState())
+	stateJSON, err := json.Marshal(persistedPipelineState{
+		PRReviewState:   g.snapshotPRReviewState(),
+		DispatchedTasks: g.snapshotDispatchedTasks(),
+	})
 	if err != nil {
 		log.Printf("webhook: failed to marshal pipeline state: %v", err)
 		return
@@ -788,6 +830,9 @@ func (g *gateway) loadPipelineState() error {
 		g.prReviewMu.Lock()
 		g.prReviewState = map[string]prReviewState{}
 		g.prReviewMu.Unlock()
+		g.dispatchedTasksMu.Lock()
+		g.dispatchedTasks = map[int64]*dispatchedTask{}
+		g.dispatchedTasksMu.Unlock()
 		return nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -803,15 +848,28 @@ func (g *gateway) loadPipelineState() error {
 		return err
 	}
 	resp.Body.Close()
-	loaded := map[string]prReviewState{}
+	loaded := persistedPipelineState{
+		PRReviewState:   map[string]prReviewState{},
+		DispatchedTasks: map[int64]*dispatchedTask{},
+	}
 	if raw := strings.TrimSpace(configMap.Data["state"]); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &loaded); err != nil {
-			return err
+			legacy := map[string]prReviewState{}
+			if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+				return err
+			}
+			loaded.PRReviewState = legacy
 		}
 	}
 	g.prReviewMu.Lock()
-	g.prReviewState = loaded
+	g.prReviewState = loaded.PRReviewState
 	g.prReviewMu.Unlock()
+	g.dispatchedTasksMu.Lock()
+	if loaded.DispatchedTasks == nil {
+		loaded.DispatchedTasks = map[int64]*dispatchedTask{}
+	}
+	g.dispatchedTasks = loaded.DispatchedTasks
+	g.dispatchedTasksMu.Unlock()
 	return nil
 }
 
@@ -861,34 +919,34 @@ func (g *gateway) selectPeerReviewer(author string) (*Agent, bool) {
 	return nil, false
 }
 
-func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr webhookPR, prompt string, eventType string) error {
+func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr webhookPR, prompt string, eventType string) (string, error) {
 	sessionID := fmt.Sprintf("webhook-review-%s-%d-%s", sanitizeWebhookToken(pr.Repo), pr.Number, sanitizeWebhookToken(agentName))
 	payload, err := json.Marshal(map[string]string{
 		"content":    prompt,
 		"session_id": sessionID,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal review request: %w", err)
+		return "", fmt.Errorf("marshal review request: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agentURL, "/")+"/message", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create review request: %w", err)
+		return "", fmt.Errorf("create review request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return fmt.Errorf("dispatch review request: %w", err)
+		return "", fmt.Errorf("dispatch review request: %w", err)
 	}
 	reviewText, err := readAgentSSEContent(resp)
 	if err != nil {
-		return fmt.Errorf("read review response: %w", err)
+		return "", fmt.Errorf("read review response: %w", err)
 	}
 	reviewText = strings.TrimSpace(thinkTagRE.ReplaceAllString(reviewText, ""))
 	log.Printf("webhook: %s completed for PR #%d on %s by %s: %s", eventType, pr.Number, pr.Repo, agentName, reviewText)
 	g.addEvent(eventType, agentName, fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
-	return nil
+	return reviewText, nil
 }
 
 func (g *gateway) dispatchPeerReview(pr webhookPR) {
@@ -904,9 +962,11 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 		log.Printf("webhook: peer review author unknown for PR #%d on %s from branch %s; assigning healthy peer reviewer without self-review exclusion", pr.Number, pr.Repo, pr.Head)
 	}
 	key := g.prReviewKey(pr.Repo, pr.Number)
+	taskNumber := extractTaskNumberFromText(pr.Body)
 	g.setPRReviewState(key, prReviewState{
-		PeerAgent: peer.Name,
-		Author:    stateAuthor,
+		PeerAgent:  peer.Name,
+		Author:     stateAuthor,
+		TaskNumber: taskNumber,
 	})
 	owner, repoName, ok := splitFullRepoName(pr.Repo)
 	if !ok {
@@ -926,12 +986,23 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	if err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review"); err != nil {
+	reviewText, err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review")
+	if err != nil {
 		g.clearPRReviewState(key)
 		log.Printf("webhook: peer review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, peer.Name, err)
 		return
 	}
 	log.Printf("webhook: queued peer review for PR #%d on %s via %s", pr.Number, pr.Repo, peer.Name)
+	if looksApproved(reviewText) {
+		state, ok := g.getPRReviewState(key)
+		if !ok {
+			return
+		}
+		state.PeerReviewed = true
+		g.setPRReviewState(key, state)
+		log.Printf("webhook: peer review text signaled approval for PR #%d on %s; dispatching freya without waiting for review webhook", pr.Number, pr.Repo)
+		g.dispatchFreyaApprovalReview(pr)
+	}
 }
 
 func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
@@ -953,8 +1024,16 @@ func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	if err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review"); err != nil {
+	reviewText, err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review")
+	if err != nil {
 		log.Printf("webhook: freya review dispatch failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		return
+	}
+	if looksApproved(reviewText) {
+		log.Printf("webhook: freya review text signaled approval for PR #%d on %s; merging without waiting for review webhook", pr.Number, pr.Repo)
+		if err := g.mergeDevelopPR(pr.Repo, pr.Number); err != nil {
+			log.Printf("webhook: direct merge after freya text approval failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		}
 	}
 }
 
@@ -964,6 +1043,13 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 	if !ok {
 		log.Printf("webhook: approved review ignored for PR #%d on %s: no pipeline state", review.PRNumber, review.Repo)
 		return
+	}
+
+	if state.PeerReviewed {
+		if merged, err := g.prAlreadyMerged(review.Repo, review.PRNumber); err == nil && merged {
+			log.Printf("webhook: approval ignored for PR #%d on %s: already merged", review.PRNumber, review.Repo)
+			return
+		}
 	}
 
 	pr := webhookPR{
@@ -991,16 +1077,24 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		return
 	}
 
-	owner, repoName, ok := splitFullRepoName(review.Repo)
-	if !ok {
-		log.Printf("webhook: merge skipped for PR #%d: invalid repo %q", review.PRNumber, review.Repo)
+	if err := g.mergeDevelopPR(review.Repo, review.PRNumber); err != nil {
+		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
 		return
 	}
+	log.Printf("webhook: merged PR #%d on %s after peer and freya approvals", review.PRNumber, review.Repo)
+	g.addEvent("webhook_pr_merged", "freya", fmt.Sprintf("Merged PR #%d on %s", review.PRNumber, review.Repo))
+}
+
+func (g *gateway) mergeDevelopPR(repo string, prNumber int64) error {
+	owner, repoName, ok := splitFullRepoName(repo)
+	if !ok {
+		return fmt.Errorf("invalid repo %q", repo)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	updatePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/update", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber)
+	updatePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/update", url.PathEscape(owner), url.PathEscape(repoName), prNumber)
 	updateResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, updatePath, bytes.NewReader(mustJSON(map[string]string{})))
 	if err != nil {
-		log.Printf("webhook: update-branch failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+		log.Printf("webhook: update-branch failed for PR #%d on %s: %v", prNumber, repo, err)
 	} else {
 		updateBody, _ := io.ReadAll(io.LimitReader(updateResp.Body, 2048))
 		updateResp.Body.Close()
@@ -1009,27 +1103,48 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		case updateResp.StatusCode >= 200 && updateResp.StatusCode < 300:
 		case updateResp.StatusCode == http.StatusConflict && strings.Contains(strings.ToLower(updateMsg), "already up to date"):
 		case updateResp.StatusCode == http.StatusConflict:
-			log.Printf("webhook: update-branch conflict for PR #%d on %s: %s", review.PRNumber, review.Repo, updateMsg)
-			return
+			return fmt.Errorf("update-branch conflict: %s", updateMsg)
 		default:
-			log.Printf("webhook: update-branch returned %d for PR #%d on %s: %s", updateResp.StatusCode, review.PRNumber, review.Repo, updateMsg)
+			log.Printf("webhook: update-branch returned %d for PR #%d on %s: %s", updateResp.StatusCode, prNumber, repo, updateMsg)
 		}
 	}
 	payload := map[string]string{"Do": "merge"}
-	resp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
+	resp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), prNumber), bytes.NewReader(mustJSON(payload)))
 	if err != nil {
-		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("webhook: merge returned %d for PR #%d on %s: %s", resp.StatusCode, review.PRNumber, review.Repo, strings.TrimSpace(string(respBody)))
-		return
+		return fmt.Errorf("merge returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	g.clearPRReviewState(key)
-	log.Printf("webhook: merged PR #%d on %s after peer and freya approvals", review.PRNumber, review.Repo)
-	g.addEvent("webhook_pr_merged", "freya", fmt.Sprintf("Merged PR #%d on %s", review.PRNumber, review.Repo))
+	g.clearPRReviewState(g.prReviewKey(repo, prNumber))
+	return nil
+}
+
+func (g *gateway) prAlreadyMerged(repo string, prNumber int64) (bool, error) {
+	owner, repoName, ok := splitFullRepoName(repo)
+	if !ok {
+		return false, fmt.Errorf("invalid repo %q", repo)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	var pull map[string]interface{}
+	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repoName), prNumber), &pull)
+	if err != nil {
+		return false, err
+	}
+	if status < 200 || status >= 300 {
+		return false, fmt.Errorf("status %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	return pull["merged"] == true, nil
+}
+
+func looksApproved(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "approved") ||
+		strings.Contains(lower, "approve") ||
+		strings.Contains(lower, "ready to merge") ||
+		strings.Contains(lower, "lgtm")
 }
 
 func mustJSON(v interface{}) []byte {
@@ -1038,9 +1153,39 @@ func mustJSON(v interface{}) []byte {
 }
 
 func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
+	key := g.prReviewKey(review.Repo, review.PRNumber)
+	state, hasState := g.getPRReviewState(key)
+	state.ChangesRequestedCount++
+	if body := strings.TrimSpace(review.ReviewBody); body != "" {
+		state.ReviewFeedback = append(state.ReviewFeedback, body)
+	}
+	if hasState {
+		g.setPRReviewState(key, state)
+	}
 	builder := g.builderFromBranch(review.PRHead)
 	if builder == "" {
 		log.Printf("webhook: review feedback skipped - unable to detect builder from branch %s", review.PRHead)
+		return
+	}
+	phase := "peer"
+	if hasState {
+		if state.PeerReviewed {
+			phase = "freya"
+		}
+	} else {
+		phase = "unknown"
+	}
+	if hasState && state.ChangesRequestedCount >= 2 && state.TaskNumber > 0 {
+		task, ok := g.getDispatchedTask(state.TaskNumber)
+		if !ok {
+			log.Printf("webhook: review escalation skipped for PR #%d on %s: no dispatched task state for #%d", review.PRNumber, review.Repo, state.TaskNumber)
+			return
+		}
+		task.ReviewFeedback = append(append([]string(nil), task.ReviewFeedback...), state.ReviewFeedback...)
+		g.recordDispatchedTask(task)
+		g.clearPRReviewState(key)
+		log.Printf("webhook: rotating task #%d after %d changes_requested reviews on PR #%d during %s phase", task.TaskNumber, state.ChangesRequestedCount, review.PRNumber, phase)
+		g.rotateTask(task)
 		return
 	}
 	agent, ok := g.getAgent(builder)
@@ -1048,16 +1193,7 @@ func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 		log.Printf("webhook: review feedback skipped - builder agent %s not found or unhealthy", builder)
 		return
 	}
-	key := g.prReviewKey(review.Repo, review.PRNumber)
-	phase := "peer"
-	if state, ok := g.getPRReviewState(key); ok {
-		if state.PeerReviewed {
-			phase = "freya"
-		}
-		g.clearPRReviewState(key)
-	} else {
-		phase = "unknown"
-	}
+	g.clearPRReviewState(key)
 	owner, repoName, ok := splitFullRepoName(review.Repo)
 	if !ok {
 		log.Printf("webhook: fix dispatch skipped - invalid repo %q", review.Repo)
@@ -1110,6 +1246,236 @@ func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 	}
 	log.Printf("webhook: queued %s-phase fix request for PR #%d on %s to builder %s after review by %s", phase, review.PRNumber, review.Repo, builder, review.Reviewer)
 	g.addEvent("webhook_review_fix", builder, fmt.Sprintf("Queued %s-phase fix request for PR #%d on %s", phase, review.PRNumber, review.Repo))
+}
+
+func (g *gateway) dispatchTaskToAgent(agentName, agentURL string, task webhookIssue, content, sessionID string) error {
+	taskReqBody, err := json.Marshal(map[string]string{
+		"content":    content,
+		"session_id": sessionID,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal dispatch: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(agentURL, "/")+"/message", bytes.NewReader(taskReqBody))
+	if err != nil {
+		return fmt.Errorf("create dispatch request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	agentClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := agentClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("dispatch returned %d", resp.StatusCode)
+	}
+	g.addEvent("webhook_dispatch", agentName, fmt.Sprintf("Dispatched task #%d: %s", task.Number, task.Title))
+	return nil
+}
+
+func (g *gateway) runTaskCompletionGuard() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		g.checkDispatchedTasks()
+	}
+}
+
+func (g *gateway) checkDispatchedTasks() {
+	for _, task := range g.snapshotDispatchedTasks() {
+		if task == nil || time.Since(task.DispatchedAt) < 30*time.Minute {
+			continue
+		}
+		hasPR, err := g.taskHasOpenPR(task)
+		if err != nil {
+			log.Printf("webhook: completion guard check failed for task #%d (%s): %v", task.TaskNumber, task.Agent, err)
+			continue
+		}
+		if hasPR {
+			log.Printf("webhook: completion guard confirmed open PR for task #%d from %s", task.TaskNumber, task.Agent)
+			continue
+		}
+		log.Printf("webhook: completion guard timed out task #%d for %s after %s with no PR", task.TaskNumber, task.Agent, time.Since(task.DispatchedAt).Round(time.Minute))
+		g.rotateTask(task)
+	}
+}
+
+func (g *gateway) taskHasOpenPR(task *dispatchedTask) (bool, error) {
+	owner, repoName, ok := splitFullRepoName(task.Repo)
+	if !ok {
+		return false, fmt.Errorf("invalid repo %q", task.Repo)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	path := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&limit=50", url.PathEscape(owner), url.PathEscape(repoName))
+	var pulls []map[string]interface{}
+	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, path, &pulls)
+	if err != nil {
+		return false, err
+	}
+	if status < 200 || status >= 300 {
+		return false, fmt.Errorf("status %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	branchPrefix := strings.TrimSpace(task.Agent) + "/"
+	for _, pull := range pulls {
+		head := asMap(pull["head"])
+		if !strings.HasPrefix(strings.TrimSpace(asString(head["ref"])), branchPrefix) {
+			continue
+		}
+		if extractTaskNumberFromText(asString(pull["body"])) == task.TaskNumber {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (g *gateway) rotateTask(task *dispatchedTask) {
+	if task == nil {
+		return
+	}
+	if strings.TrimSpace(task.Agent) != "" {
+		task.FailedAgents = appendIfMissing(task.FailedAgents, task.Agent)
+	}
+	if task.Attempts >= 3 {
+		log.Printf("webhook: task #%d exceeded retry budget after %d attempts", task.TaskNumber, task.Attempts)
+		g.markTaskFailed(task.TaskNumber)
+		g.clearDispatchedTask(task.TaskNumber)
+		return
+	}
+	nextAgent, reason := g.selectAgentForTaskExcluding(task, task.FailedAgents)
+	if nextAgent == "" {
+		log.Printf("webhook: task #%d failed - no healthy replacement agent available", task.TaskNumber)
+		g.markTaskFailed(task.TaskNumber)
+		g.clearDispatchedTask(task.TaskNumber)
+		return
+	}
+	agent, ok := g.getAgent(nextAgent)
+	if !ok || !agent.Healthy {
+		log.Printf("webhook: task #%d failed - replacement agent %s unavailable", task.TaskNumber, nextAgent)
+		g.markTaskFailed(task.TaskNumber)
+		g.clearDispatchedTask(task.TaskNumber)
+		return
+	}
+	prefix := fmt.Sprintf("Previous agent %s failed to complete this task. Their attempt timed out after 30 minutes with no PR created. Pick up where they left off.\n\n", task.Agent)
+	if len(task.ReviewFeedback) > 0 {
+		prefix += "Accumulated review feedback:\n- " + strings.Join(task.ReviewFeedback, "\n- ") + "\n\n"
+	}
+	issue := webhookIssue{
+		Number: task.TaskNumber,
+		Title:  task.TaskTitle,
+		Body:   task.TaskBody,
+		Labels: append([]string(nil), task.TaskLabels...),
+	}
+	if err := g.dispatchTaskToAgent(nextAgent, agent.URL, issue, prefix+wrapTaskForDispatch(task.TaskBody, task.TaskNumber), fmt.Sprintf("webhook-task-%d-retry-%d", task.TaskNumber, task.Attempts)); err != nil {
+		log.Printf("webhook: task #%d rotation dispatch to %s failed: %v", task.TaskNumber, nextAgent, err)
+		g.markTaskFailed(task.TaskNumber)
+		g.clearDispatchedTask(task.TaskNumber)
+		return
+	}
+	task.Agent = nextAgent
+	task.Attempts++
+	task.DispatchedAt = time.Now().UTC()
+	g.recordDispatchedTask(task)
+	log.Printf("webhook: rotated task #%d to %s (%s)", task.TaskNumber, nextAgent, reason)
+}
+
+func (g *gateway) selectAgentForTaskExcluding(task *dispatchedTask, failed []string) (string, string) {
+	excluded := map[string]bool{}
+	for _, name := range failed {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			excluded[trimmed] = true
+		}
+	}
+	issue := webhookIssue{
+		Number: task.TaskNumber,
+		Title:  task.TaskTitle,
+		Body:   task.TaskBody,
+		Labels: append([]string(nil), task.TaskLabels...),
+	}
+	if agentName, reason := g.selectAgentForTask(issue); agentName != "" && !excluded[agentName] {
+		return agentName, reason
+	}
+	for _, candidate := range g.order {
+		if excluded[candidate] || bifrostExcluded[candidate] {
+			continue
+		}
+		agent, ok := g.getAgent(candidate)
+		if ok && agent.Healthy {
+			return candidate, "rotation fallback: healthy agent not in failed set"
+		}
+	}
+	return "", ""
+}
+
+func (g *gateway) markTaskFailed(taskNumber int64) {
+	taskOwner, taskRepoName, ok := splitFullRepoName(g.taskRepo)
+	if !ok {
+		log.Printf("webhook: failed task update skipped: invalid task repo %q", g.taskRepo)
+		return
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	labelID, err := g.lookupIssueLabelID(client, taskOwner, taskRepoName, "status/failed")
+	if err != nil {
+		log.Printf("webhook: failed task #%d could not resolve status/failed label: %v", taskNumber, err)
+		return
+	}
+	payload := map[string]interface{}{"labels": []int64{labelID}}
+	resp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/issues/%d/labels", url.PathEscape(taskOwner), url.PathEscape(taskRepoName), taskNumber), bytes.NewReader(mustJSON(payload)))
+	if err != nil {
+		log.Printf("webhook: failed task #%d label update failed: %v", taskNumber, err)
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("webhook: failed task #%d label update returned %d: %s", taskNumber, resp.StatusCode, strings.TrimSpace(string(body)))
+		return
+	}
+	log.Printf("webhook: marked task #%d status/failed", taskNumber)
+}
+
+func (g *gateway) lookupIssueLabelID(client *http.Client, owner, repoName, labelName string) (int64, error) {
+	var labels []map[string]interface{}
+	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/labels?limit=100", url.PathEscape(owner), url.PathEscape(repoName)), &labels)
+	if err != nil {
+		return 0, err
+	}
+	if status < 200 || status >= 300 {
+		return 0, fmt.Errorf("status %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	for _, label := range labels {
+		if strings.TrimSpace(asString(label["name"])) == labelName {
+			return asInt64(label["id"]), nil
+		}
+	}
+	return 0, fmt.Errorf("label %q not found", labelName)
+}
+
+func parseWebhookTaskNumber(raw string) (int64, error) {
+	return strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+}
+
+func extractTaskNumberFromText(text string) int64 {
+	matches := webhookTaskRefRE.FindStringSubmatch(text)
+	if len(matches) != 2 {
+		return 0
+	}
+	n, _ := parseWebhookTaskNumber(matches[1])
+	return n
+}
+
+func appendIfMissing(items []string, candidate string) []string {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		return items
+	}
+	for _, item := range items {
+		if strings.TrimSpace(item) == candidate {
+			return items
+		}
+	}
+	return append(items, candidate)
 }
 
 func (g *gateway) sendDiscordWebhookNotification(title, description string, color int, fields []discordField) {
