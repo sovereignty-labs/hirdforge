@@ -82,6 +82,7 @@ type gitopsStatus struct {
 	App          string `json:"app"`
 	SyncStatus   string `json:"sync_status"`
 	HealthStatus string `json:"health_status"`
+	LastSync     string `json:"last_sync"`
 	DeployedSHA  string `json:"deployed_sha"`
 	GitHeadSHA   string `json:"git_head_sha"`
 }
@@ -266,12 +267,16 @@ func (a *app) runCommand(rl *readline.Instance, line string) error {
 		return a.decideApproval(strings.TrimSpace(strings.TrimPrefix(line, "reject ")), false)
 	case line == "cluster":
 		return a.printCluster()
+	case line == "sync":
+		return a.syncGitOps()
 	case line == "pods":
 		return a.printPods()
 	case strings.HasPrefix(line, "pods logs "):
 		return a.printPodLogs(strings.TrimSpace(strings.TrimPrefix(line, "pods logs ")))
 	case strings.HasPrefix(line, "pods restart "):
 		return a.restartPodInteractive(strings.TrimSpace(strings.TrimPrefix(line, "pods restart ")))
+	case strings.HasPrefix(line, "logs "):
+		return a.printAgentLogs(strings.TrimSpace(strings.TrimPrefix(line, "logs ")))
 	case line == "history":
 		return a.printHistory()
 	default:
@@ -460,6 +465,76 @@ func (a *app) printPodLogs(name string) error {
 	return nil
 }
 
+func (a *app) printAgentLogs(raw string) error {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return fmt.Errorf("usage: logs <agent> [--follow]")
+	}
+	agent := fields[0]
+	follow := false
+	for _, field := range fields[1:] {
+		if field == "--follow" {
+			follow = true
+		}
+	}
+
+	podName, err := a.resolveAgentPod(agent)
+	if err != nil {
+		return err
+	}
+	if !follow {
+		return a.printPodLogs(podName)
+	}
+	return a.followPodLogs(podName)
+}
+
+func (a *app) resolveAgentPod(agent string) (string, error) {
+	var pods []podInfo
+	if err := a.getJSON("/api/v1/cluster/pods", &pods); err != nil {
+		return "", err
+	}
+	for _, pod := range pods {
+		if pod.Namespace == "valhalla" && strings.HasPrefix(pod.Name, agent) {
+			return pod.Name, nil
+		}
+	}
+	return "", fmt.Errorf("no pod found for agent %q", agent)
+}
+
+func (a *app) followPodLogs(name string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	lastPrinted := 0
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		var out podLogsResponse
+		if err := a.getJSON("/api/v1/cluster/pods/valhalla/"+name+"/logs?tail=500", &out); err != nil {
+			return err
+		}
+		lines := strings.Split(strings.ReplaceAll(out.Logs, "\r\n", "\n"), "\n")
+		if lastPrinted > len(lines) {
+			lastPrinted = 0
+		}
+		for _, line := range lines[lastPrinted:] {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			fmt.Println(line)
+		}
+		lastPrinted = len(lines)
+
+		select {
+		case <-ctx.Done():
+			fmt.Println()
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
 func (a *app) printHistory() error {
 	var out historyTasksResponse
 	if err := a.getJSON("/api/v1/history/tasks?limit=20", &out); err != nil {
@@ -471,6 +546,38 @@ func (a *app) printHistory() error {
 		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%s\n", task.ID, task.Outcome, strings.Join(task.Agents, ","), task.PRNumber, task.Title)
 	}
 	return tw.Flush()
+}
+
+func (a *app) syncGitOps() error {
+	var out map[string]interface{}
+	if err := a.postJSON("/api/v1/gitops/sync", map[string]string{}, &out); err != nil {
+		return err
+	}
+	status := strings.TrimSpace(asStringAny(out["status"]))
+	message := strings.TrimSpace(asStringAny(out["message"]))
+	if status == "" {
+		status = "ok"
+	}
+	if message == "" || message == "null" {
+		message = "sync triggered"
+	}
+	printOK(fmt.Sprintf("%s: %s", status, message))
+
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		var gitops gitopsStatus
+		if err := a.getJSON("/api/v1/gitops/status", &gitops); err == nil {
+			fmt.Printf("Sync status: %s\tHealth: %s\n", gitops.SyncStatus, gitops.HealthStatus)
+			if strings.EqualFold(gitops.SyncStatus, "Synced") {
+				printOK("final sync status: Synced")
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for sync to complete")
+		}
+		time.Sleep(3 * time.Second)
+	}
 }
 
 func (a *app) mergePRInteractive(raw string) error {
@@ -574,12 +681,16 @@ func (a *app) streamMessage(agent, content string) error {
 func (d *dynamicCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	prefix := string(line[:pos])
 	fields := strings.Fields(prefix)
-	commands := []string{"status", "agents", "delegate", "chat", "prs", "approve", "reject", "cluster", "pods", "history", "config", "clear", "help", "exit", "quit", "kubectl"}
+	commands := []string{"status", "agents", "delegate", "chat", "prs", "approve", "reject", "cluster", "pods", "logs", "sync", "history", "config", "clear", "help", "exit", "quit", "kubectl"}
 	candidates := commands
 	if len(fields) >= 1 {
 		switch fields[0] {
 		case "chat", "delegate":
 			candidates = d.agentNames()
+		case "logs":
+			if len(fields) <= 2 {
+				candidates = d.agentNames()
+			}
 		case "prs":
 			if len(fields) >= 2 && fields[1] == "merge" {
 				candidates = d.prNumbers()
@@ -744,9 +855,11 @@ func printHelp() {
 	fmt.Println("  approve <id>")
 	fmt.Println("  reject <id>")
 	fmt.Println("  cluster")
+	fmt.Println("  sync")
 	fmt.Println("  pods")
 	fmt.Println("  pods logs <name>")
 	fmt.Println("  pods restart <name>")
+	fmt.Println("  logs <agent> [--follow]")
 	fmt.Println("  history")
 	fmt.Println("  config")
 	fmt.Println("  clear")

@@ -16,7 +16,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
