@@ -236,7 +236,7 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 				Reviewer:    strings.TrimSpace(reviewPayload.Review.User.Login),
 			}
 			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
-			go g.handleFreyaReviewFeedback(rpr)
+			go g.handleReviewChangesRequested(rpr)
 		} else {
 			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
 		}
@@ -258,14 +258,22 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		log.Printf("webhook: review skipped for PR #%d on %s: self-review blocked for %s", pr.Number, pr.Repo, pr.Head)
 		return
 	}
+	owner, repoName, ok := splitFullRepoName(pr.Repo)
+	if !ok {
+		owner = ""
+		repoName = strings.TrimSpace(pr.Repo)
+	}
 	reviewMsg := fmt.Sprintf(
-		"Review PR #%d on %s: %q. Read the diff using gitea tool with action list-pr-files on repo %s pr %d. Assess code quality, correctness, and style. Then post a review comment on the PR using gitea tool with action create-comment on repo %s issue %d with your assessment. Be concise - 3-5 sentences max.",
+		"Review PR #%d on %s: %q. Clone the repo if not already cloned, then run git fetch origin and git diff origin/develop...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Assess code quality, correctness, and style. Then post a review comment on the PR using gitea action=create-comment owner=%s repo=%s issue=%d with your assessment. Be concise - 3-5 sentences max.",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
-		pr.Repo,
+		pr.Head,
+		owner,
+		repoName,
 		pr.Number,
-		pr.Repo,
+		owner,
+		repoName,
 		pr.Number,
 	)
 	sessionID := fmt.Sprintf("webhook-review-%s-%d", sanitizeWebhookToken(pr.Repo), pr.Number)
@@ -592,14 +600,22 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 	}
 	key := g.prReviewKey(pr.Repo, pr.Number)
 	g.setPRReviewState(key, prReviewState{PeerAgent: peer.Name})
+	owner, repoName, ok := splitFullRepoName(pr.Repo)
+	if !ok {
+		owner = ""
+		repoName = strings.TrimSpace(pr.Repo)
+	}
 	prompt := fmt.Sprintf(
-		"Review PR #%d on %s: %q. Read the diff using gitea tool with action list-pr-files on repo %s pr %d. Assess correctness, code quality, and style. Submit a formal PR review using gitea tool with action create-review on repo %s index %d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
+		"Review PR #%d on %s: %q. Clone the repo if not already cloned, then run git fetch origin and git diff origin/develop...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Assess correctness, code quality, and style. Submit a formal PR review using gitea action=create-review owner=%s repo=%s index=%d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
-		pr.Repo,
+		pr.Head,
+		owner,
+		repoName,
 		pr.Number,
-		pr.Repo,
+		owner,
+		repoName,
 		pr.Number,
 	)
 	if err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review"); err != nil {
@@ -611,14 +627,22 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 }
 
 func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
+	owner, repoName, ok := splitFullRepoName(pr.Repo)
+	if !ok {
+		owner = ""
+		repoName = strings.TrimSpace(pr.Repo)
+	}
 	prompt := fmt.Sprintf(
-		"Peer review has approved PR #%d on %s: %q. Perform final review. Read the diff using gitea tool with action list-pr-files on repo %s pr %d. Submit a formal PR review using gitea tool with action create-review on repo %s index %d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
+		"Peer review has approved PR #%d on %s: %q. Perform final review. Clone the repo if not already cloned, then run git fetch origin and git diff origin/develop...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Submit a formal PR review using gitea action=create-review owner=%s repo=%s index=%d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
-		pr.Repo,
+		pr.Head,
+		owner,
+		repoName,
 		pr.Number,
-		pr.Repo,
+		owner,
+		repoName,
 		pr.Number,
 	)
 	if err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review"); err != nil {
@@ -665,7 +689,7 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		return
 	}
 	payload := map[string]string{"Do": "merge"}
-	resp, err := giteaRequest(&http.Client{Timeout: 10 * time.Second}, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
+	resp, err := giteaRequest(&http.Client{Timeout: 10 * time.Second}, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
 	if err != nil {
 		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
 		return
@@ -686,11 +710,7 @@ func mustJSON(v interface{}) []byte {
 	return body
 }
 
-func (g *gateway) handleFreyaReviewFeedback(review webhookPRReview) {
-	if review.Reviewer != "freya" {
-		log.Printf("webhook: review feedback ignored - reviewer is not freya")
-		return
-	}
+func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 	builder := g.builderFromBranch(review.PRHead)
 	if builder == "" {
 		log.Printf("webhook: review feedback skipped - unable to detect builder from branch %s", review.PRHead)
@@ -701,8 +721,23 @@ func (g *gateway) handleFreyaReviewFeedback(review webhookPRReview) {
 		log.Printf("webhook: review feedback skipped - builder agent %s not found or unhealthy", builder)
 		return
 	}
+	key := g.prReviewKey(review.Repo, review.PRNumber)
+	phase := "peer"
+	if state, ok := g.getPRReviewState(key); ok {
+		if state.PeerReviewed {
+			phase = "freya"
+		}
+		g.clearPRReviewState(key)
+	} else {
+		phase = "unknown"
+	}
+	phaseLabel := phase
+	if phaseLabel != "" {
+		phaseLabel = strings.ToUpper(phaseLabel[:1]) + phaseLabel[1:]
+	}
 	fixMsg := fmt.Sprintf(
-		"Freya reviewed PR #%d (%q) on %s and requested changes. Feedback: %s. Fix the issues and push to the same branch (%s). Do NOT create a new PR — push to existing branch.",
+		"%s review requested changes on PR #%d (%q) on %s. Feedback: %s. Fix the issues and push to the same branch (%s). Do NOT create a new PR — push to existing branch.",
+		phaseLabel,
 		review.PRNumber,
 		review.PRTitle,
 		review.Repo,
@@ -738,8 +773,8 @@ func (g *gateway) handleFreyaReviewFeedback(review webhookPRReview) {
 		log.Printf("webhook: fix dispatch returned %d for PR #%d on %s: %s", agentResp.StatusCode, review.PRNumber, review.Repo, strings.TrimSpace(string(body)))
 		return
 	}
-	log.Printf("webhook: queued fix request for PR #%d on %s to builder %s", review.PRNumber, review.Repo, builder)
-	g.addEvent("webhook_review_fix", builder, fmt.Sprintf("Queued fix request for PR #%d on %s", review.PRNumber, review.Repo))
+	log.Printf("webhook: queued %s-phase fix request for PR #%d on %s to builder %s after review by %s", phase, review.PRNumber, review.Repo, builder, review.Reviewer)
+	g.addEvent("webhook_review_fix", builder, fmt.Sprintf("Queued %s-phase fix request for PR #%d on %s", phase, review.PRNumber, review.Repo))
 }
 
 func (g *gateway) sendDiscordWebhookNotification(title, description string, color int, fields []discordField) {
