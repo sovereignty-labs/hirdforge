@@ -232,6 +232,8 @@ func (a *app) repl(rl *readline.Instance, chatAgent string) error {
 
 func (a *app) runCommand(rl *readline.Instance, line string) error {
 	switch {
+	case line == "clear":
+		fmt.Print("\033[H\033[2J")
 	case line == "help":
 		printHelp()
 	case line == "config":
@@ -572,7 +574,7 @@ func (a *app) streamMessage(agent, content string) error {
 func (d *dynamicCompleter) Do(line []rune, pos int) ([][]rune, int) {
 	prefix := string(line[:pos])
 	fields := strings.Fields(prefix)
-	commands := []string{"status", "agents", "delegate", "chat", "prs", "approve", "reject", "cluster", "pods", "history", "config", "help", "exit", "quit", "kubectl"}
+	commands := []string{"status", "agents", "delegate", "chat", "prs", "approve", "reject", "cluster", "pods", "history", "config", "clear", "help", "exit", "quit", "kubectl"}
 	candidates := commands
 	if len(fields) >= 1 {
 		switch fields[0] {
@@ -744,6 +746,7 @@ func printHelp() {
 	fmt.Println("  pods restart <name>")
 	fmt.Println("  history")
 	fmt.Println("  config")
+	fmt.Println("  clear")
 	fmt.Println("  kubectl <args>")
 	fmt.Println("  help")
 	fmt.Println("  exit | quit")
