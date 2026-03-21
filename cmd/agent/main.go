@@ -4046,10 +4046,10 @@ func main() {
 	}
 	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] || enabled["gitea"] {
 		if enabled["git-clone"] {
-			reg.Register(toolpkg.NewGitCloneTool(*workspace, *giteaURL, giteaToken))
+			reg.Register(toolpkg.NewGitCloneTool(*workspace, *giteaURL, giteaToken, agentName))
 		}
 		if enabled["git-commit"] {
-			reg.Register(toolpkg.NewGitCommitTool(*workspace, *giteaURL, giteaToken))
+			reg.Register(toolpkg.NewGitCommitTool(*workspace, *giteaURL, giteaToken, agentName))
 		}
 		if enabled["git-diff"] {
 			reg.Register(toolpkg.NewGitDiffTool(*workspace))

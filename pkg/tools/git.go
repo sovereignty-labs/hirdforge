@@ -49,13 +49,19 @@ func runShellCapture(dir, command string, timeout time.Duration) (string, error)
 }
 
 type GitCloneTool struct {
-	WorkDir  string
-	GiteaURL string
-	Token    string
+	WorkDir   string
+	GiteaURL  string
+	Token     string
+	AgentName string
 }
 
-func NewGitCloneTool(workDir, giteaURL, token string) *GitCloneTool {
-	return &GitCloneTool{WorkDir: workDir, GiteaURL: giteaURL, Token: resolveGiteaToken(token)}
+func NewGitCloneTool(workDir, giteaURL, token, agentName string) *GitCloneTool {
+	return &GitCloneTool{
+		WorkDir:   workDir,
+		GiteaURL:  giteaURL,
+		Token:     resolveGiteaToken(token),
+		AgentName: strings.TrimSpace(agentName),
+	}
 }
 
 func (t *GitCloneTool) Name() string { return "git-clone" }
@@ -537,13 +543,19 @@ func fileLooksBinary(path string) (bool, error) {
 }
 
 type GitCommitTool struct {
-	WorkDir  string
-	GiteaURL string
-	Token    string
+	WorkDir   string
+	GiteaURL  string
+	Token     string
+	AgentName string
 }
 
-func NewGitCommitTool(workDir, giteaURL, token string) *GitCommitTool {
-	return &GitCommitTool{WorkDir: workDir, GiteaURL: giteaURL, Token: resolveGiteaToken(token)}
+func NewGitCommitTool(workDir, giteaURL, token, agentName string) *GitCommitTool {
+	return &GitCommitTool{
+		WorkDir:   workDir,
+		GiteaURL:  giteaURL,
+		Token:     resolveGiteaToken(token),
+		AgentName: strings.TrimSpace(agentName),
+	}
 }
 
 func (t *GitCommitTool) Name() string { return "git-commit" }
@@ -584,7 +596,16 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 	if branch != "" {
 		res := runGit(repoDir, []string{"git", "checkout", branch}, 10*time.Second)
 		if res.Error != "" {
-			res = runGit(repoDir, []string{"git", "checkout", "-b", branch}, 10*time.Second)
+			if remoteBranchExists(repoDir, branch) {
+				res = runGit(repoDir, []string{"git", "fetch", "origin", branch}, 30*time.Second)
+				if res.Error != "" {
+					return ToolResult{Error: fmt.Sprintf("failed to fetch remote branch %s: %s", branch, res.Error)}
+				}
+				res = runGit(repoDir, []string{"git", "checkout", "--track", "origin/" + branch}, 10*time.Second)
+			} else {
+				branch = formatNewBranchName(t.AgentName, branch)
+				res = runGit(repoDir, []string{"git", "checkout", "-B", branch}, 10*time.Second)
+			}
 			if res.Error != "" {
 				return ToolResult{Error: fmt.Sprintf("failed to create branch %s: %s", branch, res.Error)}
 			}
@@ -658,6 +679,8 @@ func (t *GitCommitTool) Verify(args map[string]interface{}, result ToolResult) e
 			return fmt.Errorf("git verification failed: resolve branch: %s", headRes.Error)
 		}
 		branch = strings.TrimSpace(headRes.Output)
+	} else if !remoteBranchExists(repoDir, branch) {
+		branch = formatNewBranchName(t.AgentName, branch)
 	}
 	if branch == "" {
 		return fmt.Errorf("git verification failed: branch is empty")
@@ -684,6 +707,33 @@ func (t *GitCommitTool) buildPushURL(repo string) string {
 		scheme = "https://"
 	}
 	return fmt.Sprintf("%stoken:%s@%s/%s/%s.git", scheme, t.Token, stripped, owner, name)
+}
+
+func remoteBranchExists(repoDir, branch string) bool {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return false
+	}
+	res := runGit(repoDir, []string{"git", "ls-remote", "--heads", "origin", branch}, 30*time.Second)
+	if res.Error != "" {
+		return false
+	}
+	return strings.TrimSpace(res.Output) != ""
+}
+
+func formatNewBranchName(agentName, branch string) string {
+	branch = strings.TrimSpace(branch)
+	agentName = strings.TrimSpace(agentName)
+	if branch == "" || agentName == "" {
+		return branch
+	}
+	prefix := agentName + "/"
+	if strings.HasPrefix(branch, prefix) {
+		return branch
+	}
+	branch = strings.TrimLeft(branch, "/")
+	branch = strings.ReplaceAll(branch, "/", "-")
+	return prefix + branch
 }
 
 func resolveRepoOwnerName(repo string) (owner, name string) {
