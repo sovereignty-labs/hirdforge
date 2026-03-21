@@ -3,6 +3,7 @@ module github.com/kitporath/project_valhalla
 go 1.23.0
 
 require (
+	github.com/chzyer/readline v1.5.1
 	golang.org/x/oauth2 v0.30.0
 	google.golang.org/api v0.226.0
 )
