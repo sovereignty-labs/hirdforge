@@ -2834,6 +2834,36 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, fetchGitOpsStatus(gw.k8s))
 	})
+	mux.HandleFunc("/api/v1/gitops/sync", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if gw.k8s == nil || !gw.k8s.enabled {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes integration disabled"})
+			return
+		}
+		status, body, err := gw.k8s.patchJSON("/apis/argoproj.io/v1alpha1/namespaces/argocd/applications/asgard", map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"annotations": map[string]string{
+					"argocd.argoproj.io/refresh": "hard",
+				},
+			},
+		})
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		if status == http.StatusNotFound {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "ArgoCD application CRD not found"})
+			return
+		}
+		if status < 200 || status >= 300 {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(body))})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "sync triggered"})
+	})
 	mux.HandleFunc("/api/v1/k8s/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3036,21 +3066,21 @@ func main() {
 		writeJSON(w, http.StatusOK, out)
 	})
 	mux.HandleFunc("/api/v1/gitea/prs/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if strings.TrimSpace(*giteaURL) == "" {
+		if strings.TrimSpace(gw.giteaURL) == "" {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
 			return
 		}
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/gitea/prs/")
 		parts := strings.Split(strings.Trim(path, "/"), "/")
-		if len(parts) != 4 || parts[3] != "merge" {
+		if len(parts) != 4 {
 			http.NotFound(w, r)
 			return
 		}
-		owner, repo, idxRaw := parts[0], parts[1], parts[2]
+		owner, repo, idxRaw, action := parts[0], parts[1], parts[2], parts[3]
 		if owner == "" || repo == "" || idxRaw == "" {
 			http.NotFound(w, r)
 			return
@@ -3059,14 +3089,196 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		body, _ := json.Marshal(map[string]string{
-			"Do":                  "merge",
-			"merge_message_field": "Merged via Hirdforge UI",
-		})
-		uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/merge", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
-		resp, err := giteaRequest(giteaClient, http.MethodPost, *giteaURL, *giteaToken, uPath, bytes.NewReader(body))
+		var (
+			resp *http.Response
+			err  error
+		)
+		switch action {
+		case "merge":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			body, _ := json.Marshal(map[string]string{
+				"Do":                  "merge",
+				"merge_message_field": "Merged via Hirdforge UI",
+			})
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/merge", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodPost, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
+		case "close":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			body, _ := json.Marshal(map[string]string{"state": "closed"})
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodPatch, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
+		case "approve":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			body, _ := json.Marshal(map[string]string{"event": "APPROVED", "body": "Approved via Hirdforge UI"})
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/reviews", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodPost, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
+		case "status":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			prPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			prResp, prErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, prPath, nil)
+			if prErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			prBody, _ := io.ReadAll(io.LimitReader(prResp.Body, 2<<20))
+			prResp.Body.Close()
+			if prResp.StatusCode < 200 || prResp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(prBody))})
+				return
+			}
+			var pr map[string]interface{}
+			if err := json.Unmarshal(prBody, &pr); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Gitea PR response"})
+				return
+			}
+			headSHA := asString(asMap(pr["head"])["sha"])
+			if strings.TrimSpace(headSHA) == "" {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "unknown"})
+				return
+			}
+			statusPath := fmt.Sprintf("/api/v1/repos/%s/%s/commits/%s/status", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(headSHA))
+			statusResp, statusErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, statusPath, nil)
+			if statusErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			statusBody, _ := io.ReadAll(io.LimitReader(statusResp.Body, 2<<20))
+			statusResp.Body.Close()
+			if statusResp.StatusCode < 200 || statusResp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(statusBody))})
+				return
+			}
+			var statusPayload map[string]interface{}
+			if err := json.Unmarshal(statusBody, &statusPayload); err != nil {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "unknown"})
+				return
+			}
+			overall := strings.TrimSpace(asString(statusPayload["state"]))
+			if overall == "" {
+				overall = "unknown"
+			}
+			result := map[string]string{"status": overall}
+			statuses := asSlice(statusPayload["statuses"])
+			if len(statuses) > 0 {
+				first := asMap(statuses[0])
+				if workflow := strings.TrimSpace(asString(first["context"])); workflow != "" {
+					result["workflow"] = workflow
+				}
+				started := strings.TrimSpace(asString(first["created_at"]))
+				finished := strings.TrimSpace(asString(first["updated_at"]))
+				if started != "" && finished != "" {
+					if startTime, err := time.Parse(time.RFC3339, started); err == nil {
+						if endTime, err := time.Parse(time.RFC3339, finished); err == nil && !endTime.Before(startTime) {
+							result["duration"] = endTime.Sub(startTime).String()
+						}
+					}
+				}
+			}
+			writeJSON(w, http.StatusOK, result)
+			return
+		default:
+			http.NotFound(w, r)
+			return
+		}
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+			return
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		for k, vv := range resp.Header {
+			if strings.EqualFold(k, "Content-Type") && len(vv) > 0 {
+				w.Header().Set("Content-Type", vv[0])
+				break
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		if len(respBody) > 0 {
+			_, _ = w.Write(respBody)
+		}
+	})
+	mux.HandleFunc("/api/v1/seidr/memories", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(gw.seidrURL) == "" {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Seidr unavailable"})
+			return
+		}
+		agent := strings.TrimSpace(r.URL.Query().Get("agent"))
+		query := strings.TrimSpace(r.URL.Query().Get("query"))
+		limit := clampInt(asInt(r.URL.Query().Get("limit")), 20, 100)
+		payload, _ := json.Marshal(map[string]interface{}{
+			"query_text": query,
+			"agent_name": agent,
+			"n_results":  limit,
+		})
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(gw.seidrURL, "/")+"/query", bytes.NewReader(payload))
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		for k, vv := range resp.Header {
+			if strings.EqualFold(k, "Content-Type") && len(vv) > 0 {
+				w.Header().Set("Content-Type", vv[0])
+				break
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		if len(respBody) > 0 {
+			_, _ = w.Write(respBody)
+		}
+	})
+	mux.HandleFunc("/api/v1/seidr/memories/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(gw.seidrURL) == "" {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Seidr unavailable"})
+			return
+		}
+		id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/seidr/memories/"), "/")
+		if id == "" || strings.Contains(id, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		agent := strings.TrimSpace(r.URL.Query().Get("agent"))
+		client := &http.Client{Timeout: 10 * time.Second}
+		u := strings.TrimRight(gw.seidrURL, "/") + "/memories/" + url.PathEscape(id)
+		if agent != "" {
+			u += "?agent_name=" + url.QueryEscape(agent)
+		}
+		req, err := http.NewRequest(http.MethodDelete, u, nil)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			return
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 			return
 		}
 		defer resp.Body.Close()
