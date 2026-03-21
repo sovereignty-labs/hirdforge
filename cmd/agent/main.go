@@ -4044,7 +4044,7 @@ func main() {
 	if enabled["edit"] {
 		reg.Register(toolpkg.NewEditTool(*workspace))
 	}
-	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] || enabled["gitea"] {
+	if enabled["git-clone"] || enabled["git-commit"] || enabled["git-diff"] || enabled["gitea"] || enabled["parallel-build"] {
 		if enabled["git-clone"] {
 			reg.Register(toolpkg.NewGitCloneTool(*workspace, *giteaURL, giteaToken, agentName))
 		}
@@ -4057,6 +4057,9 @@ func main() {
 		if enabled["gitea"] {
 			giteaTool = toolpkg.NewGiteaAPITool(*giteaURL, giteaToken)
 			reg.Register(giteaTool)
+		}
+		if enabled["parallel-build"] {
+			reg.Register(toolpkg.NewParallelBuildTool(*workspace))
 		}
 	}
 	if enabled["delegate"] || len(peers) > 0 {
