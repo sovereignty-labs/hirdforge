@@ -731,17 +731,25 @@ func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 	} else {
 		phase = "unknown"
 	}
-	phaseLabel := phase
-	if phaseLabel != "" {
-		phaseLabel = strings.ToUpper(phaseLabel[:1]) + phaseLabel[1:]
+	owner, repoName, ok := splitFullRepoName(review.Repo)
+	if !ok {
+		log.Printf("webhook: fix dispatch skipped - invalid repo %q", review.Repo)
+		return
 	}
 	fixMsg := fmt.Sprintf(
-		"%s review requested changes on PR #%d (%q) on %s. Feedback: %s. Fix the issues and push to the same branch (%s). Do NOT create a new PR — push to existing branch.",
-		phaseLabel,
+		"A reviewer requested changes on PR #%d (%q) on %s.\n\nFeedback:\n%s\n\nFIX INSTRUCTIONS:\n1. Clone the repo: git-clone url=%s/%s/%s.git\n2. Fetch and checkout the existing branch:\n   exec: cd /workspace/%s && git fetch origin %s && git checkout %s\n3. Make the requested fixes\n4. Commit: git-commit message=\"fix: address review feedback on PR #%d\"\n5. Push to the SAME branch: exec: cd /workspace/%s && git push origin %s\n6. Do NOT create a new PR. Pushing to the branch updates the existing PR automatically.",
 		review.PRNumber,
 		review.PRTitle,
 		review.Repo,
 		review.ReviewBody,
+		g.giteaURL,
+		owner,
+		repoName,
+		repoName,
+		review.PRHead,
+		review.PRHead,
+		review.PRNumber,
+		repoName,
 		review.PRHead,
 	)
 	sessionID := fmt.Sprintf("webhook-review-fix-%s-%d", sanitizeWebhookToken(review.Repo), review.PRNumber)
