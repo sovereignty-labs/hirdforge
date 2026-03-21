@@ -302,44 +302,9 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	sessionID := fmt.Sprintf("webhook-review-%s-%d", sanitizeWebhookToken(pr.Repo), pr.Number)
-	payload, err := json.Marshal(map[string]string{
-		"content":    reviewMsg,
-		"session_id": sessionID,
-	})
-	if err != nil {
-		log.Printf("webhook: build review request failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(freyaAgentURL, "/")+"/message", bytes.NewReader(payload))
-	if err != nil {
-		log.Printf("webhook: create reviewer request failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	agentClient := &http.Client{}
-	agentResp, err := agentClient.Do(req)
-	if err != nil {
+	if _, err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, reviewMsg, "webhook_review"); err != nil {
 		log.Printf("webhook: review dispatch failed for PR #%d on %s via freya: %v", pr.Number, pr.Repo, err)
-		return
 	}
-	reviewText, err := readAgentSSEContent(agentResp)
-	if err != nil {
-		log.Printf("webhook: review read failed for PR #%d on %s via freya: %v", pr.Number, pr.Repo, err)
-		return
-	}
-	reviewText = strings.TrimSpace(thinkTagRE.ReplaceAllString(reviewText, ""))
-	if reviewText == "" {
-		log.Printf("webhook: review completed for PR #%d on %s via freya with empty response", pr.Number, pr.Repo)
-		g.addEvent("webhook_review", "freya", fmt.Sprintf("Queued review for PR #%d on %s", pr.Number, pr.Repo))
-		return
-	}
-	log.Printf("webhook: review completed for PR #%d on %s via freya: %s", pr.Number, pr.Repo, reviewText)
-	g.addEvent("webhook_review", "freya", fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
 }
 
 func (g *gateway) handleAgentPRSynchronized(pr webhookPR) {
@@ -944,34 +909,34 @@ func (g *gateway) selectPeerReviewer(author string) (*Agent, bool) {
 	return nil, false
 }
 
-func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr webhookPR, prompt string, eventType string) error {
+func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr webhookPR, prompt string, eventType string) (string, error) {
 	sessionID := fmt.Sprintf("webhook-review-%s-%d-%s", sanitizeWebhookToken(pr.Repo), pr.Number, sanitizeWebhookToken(agentName))
 	payload, err := json.Marshal(map[string]string{
 		"content":    prompt,
 		"session_id": sessionID,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal review request: %w", err)
+		return "", fmt.Errorf("marshal review request: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agentURL, "/")+"/message", bytes.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("create review request: %w", err)
+		return "", fmt.Errorf("create review request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return fmt.Errorf("dispatch review request: %w", err)
+		return "", fmt.Errorf("dispatch review request: %w", err)
 	}
 	reviewText, err := readAgentSSEContent(resp)
 	if err != nil {
-		return fmt.Errorf("read review response: %w", err)
+		return "", fmt.Errorf("read review response: %w", err)
 	}
 	reviewText = strings.TrimSpace(thinkTagRE.ReplaceAllString(reviewText, ""))
 	log.Printf("webhook: %s completed for PR #%d on %s by %s: %s", eventType, pr.Number, pr.Repo, agentName, reviewText)
 	g.addEvent(eventType, agentName, fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
-	return nil
+	return reviewText, nil
 }
 
 func (g *gateway) dispatchPeerReview(pr webhookPR) {
@@ -1011,12 +976,23 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	if err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review"); err != nil {
+	reviewText, err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review")
+	if err != nil {
 		g.clearPRReviewState(key)
 		log.Printf("webhook: peer review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, peer.Name, err)
 		return
 	}
 	log.Printf("webhook: queued peer review for PR #%d on %s via %s", pr.Number, pr.Repo, peer.Name)
+	if looksApproved(reviewText) {
+		state, ok := g.getPRReviewState(key)
+		if !ok {
+			return
+		}
+		state.PeerReviewed = true
+		g.setPRReviewState(key, state)
+		log.Printf("webhook: peer review text signaled approval for PR #%d on %s; dispatching freya without waiting for review webhook", pr.Number, pr.Repo)
+		g.dispatchFreyaApprovalReview(pr)
+	}
 }
 
 func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
@@ -1038,8 +1014,16 @@ func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	if err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review"); err != nil {
+	reviewText, err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review")
+	if err != nil {
 		log.Printf("webhook: freya review dispatch failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		return
+	}
+	if looksApproved(reviewText) {
+		log.Printf("webhook: freya review text signaled approval for PR #%d on %s; merging without waiting for review webhook", pr.Number, pr.Repo)
+		if err := g.mergeDevelopPR(pr.Repo, pr.Number); err != nil {
+			log.Printf("webhook: direct merge after freya text approval failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		}
 	}
 }
 
@@ -1049,6 +1033,13 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 	if !ok {
 		log.Printf("webhook: approved review ignored for PR #%d on %s: no pipeline state", review.PRNumber, review.Repo)
 		return
+	}
+
+	if state.PeerReviewed {
+		if merged, err := g.prAlreadyMerged(review.Repo, review.PRNumber); err == nil && merged {
+			log.Printf("webhook: approval ignored for PR #%d on %s: already merged", review.PRNumber, review.Repo)
+			return
+		}
 	}
 
 	pr := webhookPR{
@@ -1076,16 +1067,24 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		return
 	}
 
-	owner, repoName, ok := splitFullRepoName(review.Repo)
-	if !ok {
-		log.Printf("webhook: merge skipped for PR #%d: invalid repo %q", review.PRNumber, review.Repo)
+	if err := g.mergeDevelopPR(review.Repo, review.PRNumber); err != nil {
+		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
 		return
 	}
+	log.Printf("webhook: merged PR #%d on %s after peer and freya approvals", review.PRNumber, review.Repo)
+	g.addEvent("webhook_pr_merged", "freya", fmt.Sprintf("Merged PR #%d on %s", review.PRNumber, review.Repo))
+}
+
+func (g *gateway) mergeDevelopPR(repo string, prNumber int64) error {
+	owner, repoName, ok := splitFullRepoName(repo)
+	if !ok {
+		return fmt.Errorf("invalid repo %q", repo)
+	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	updatePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/update", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber)
+	updatePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/update", url.PathEscape(owner), url.PathEscape(repoName), prNumber)
 	updateResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, updatePath, bytes.NewReader(mustJSON(map[string]string{})))
 	if err != nil {
-		log.Printf("webhook: update-branch failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
+		log.Printf("webhook: update-branch failed for PR #%d on %s: %v", prNumber, repo, err)
 	} else {
 		updateBody, _ := io.ReadAll(io.LimitReader(updateResp.Body, 2048))
 		updateResp.Body.Close()
@@ -1094,27 +1093,48 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		case updateResp.StatusCode >= 200 && updateResp.StatusCode < 300:
 		case updateResp.StatusCode == http.StatusConflict && strings.Contains(strings.ToLower(updateMsg), "already up to date"):
 		case updateResp.StatusCode == http.StatusConflict:
-			log.Printf("webhook: update-branch conflict for PR #%d on %s: %s", review.PRNumber, review.Repo, updateMsg)
-			return
+			return fmt.Errorf("update-branch conflict: %s", updateMsg)
 		default:
-			log.Printf("webhook: update-branch returned %d for PR #%d on %s: %s", updateResp.StatusCode, review.PRNumber, review.Repo, updateMsg)
+			log.Printf("webhook: update-branch returned %d for PR #%d on %s: %s", updateResp.StatusCode, prNumber, repo, updateMsg)
 		}
 	}
 	payload := map[string]string{"Do": "merge"}
-	resp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), review.PRNumber), bytes.NewReader(mustJSON(payload)))
+	resp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), prNumber), bytes.NewReader(mustJSON(payload)))
 	if err != nil {
-		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
-		return
+		return err
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("webhook: merge returned %d for PR #%d on %s: %s", resp.StatusCode, review.PRNumber, review.Repo, strings.TrimSpace(string(respBody)))
-		return
+		return fmt.Errorf("merge returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
-	g.clearPRReviewState(key)
-	log.Printf("webhook: merged PR #%d on %s after peer and freya approvals", review.PRNumber, review.Repo)
-	g.addEvent("webhook_pr_merged", "freya", fmt.Sprintf("Merged PR #%d on %s", review.PRNumber, review.Repo))
+	g.clearPRReviewState(g.prReviewKey(repo, prNumber))
+	return nil
+}
+
+func (g *gateway) prAlreadyMerged(repo string, prNumber int64) (bool, error) {
+	owner, repoName, ok := splitFullRepoName(repo)
+	if !ok {
+		return false, fmt.Errorf("invalid repo %q", repo)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	var pull map[string]interface{}
+	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d", url.PathEscape(owner), url.PathEscape(repoName), prNumber), &pull)
+	if err != nil {
+		return false, err
+	}
+	if status < 200 || status >= 300 {
+		return false, fmt.Errorf("status %d: %s", status, strings.TrimSpace(string(body)))
+	}
+	return pull["merged"] == true, nil
+}
+
+func looksApproved(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "approved") ||
+		strings.Contains(lower, "approve") ||
+		strings.Contains(lower, "ready to merge") ||
+		strings.Contains(lower, "lgtm")
 }
 
 func mustJSON(v interface{}) []byte {
