@@ -32,12 +32,12 @@ func NewGiteaAPITool(giteaURL, token string) *GiteaAPITool {
 func (t *GiteaAPITool) Name() string { return "gitea" }
 
 func (t *GiteaAPITool) Description() string {
-	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, create-review, merge-pr, update-labels"
+	return "Interact with Gitea API. Actions: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, create-review, merge-pr, list-pr-files, update-labels"
 }
 
 func (t *GiteaAPITool) Parameters() map[string]string {
 	return map[string]string{
-		"action": "One of: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, create-review, merge-pr, update-labels",
+		"action": "One of: create-issue, comment, list-issues, get-issue, list-branches, close-issue, create-pr, create-review, merge-pr, list-pr-files, update-labels",
 		"owner":  "Repository owner for get-issue (optional if repo is owner/repo)",
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
 		"title":  "Title for issue or PR (create-issue, create-pr)",
@@ -45,7 +45,7 @@ func (t *GiteaAPITool) Parameters() map[string]string {
 		"labels": "Comma-separated label names (create-issue, list-issues, update-labels)",
 		"state":  "Issue state for list-issues: open or closed (default open), or review state for create-review: APPROVED or REQUEST_CHANGES",
 		"issue":  "Issue or PR number (comment, close-issue, update-labels)",
-		"index":  "Issue or PR number for get-issue, update-labels, create-review, or merge-pr",
+		"index":  "Issue or PR number for get-issue, list-pr-files, update-labels, create-review, or merge-pr",
 		"head":   "Source branch for PR (create-pr)",
 		"base":   "Target branch for PR (create-pr, defaults to main)",
 	}
@@ -95,10 +95,12 @@ func (t *GiteaAPITool) Execute(args map[string]interface{}) ToolResult {
 		return t.createReview(owner, name, args)
 	case "merge-pr":
 		return t.mergePR(owner, name, args)
+	case "list-pr-files":
+		return t.listPRFiles(owner, name, args)
 	case "update-labels":
 		return t.updateLabels(owner, name, args)
 	default:
-		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %q. Available actions: create-pr, create-review, merge-pr, create-issue, list-issues, close-issue, comment, get-issue, update-labels.", action)}
+		return ToolResult{Error: fmt.Sprintf("Unknown gitea action: %q. Available actions: create-pr, create-review, merge-pr, create-issue, list-issues, close-issue, comment, get-issue, list-pr-files, update-labels.", action)}
 	}
 }
 
@@ -603,6 +605,50 @@ func (t *GiteaAPITool) mergePR(owner, repo string, args map[string]interface{}) 
 	return ToolResult{Output: fmt.Sprintf("merged PR #%d", prNum)}
 }
 
+func (t *GiteaAPITool) listPRFiles(owner, repo string, args map[string]interface{}) ToolResult {
+	prNum := t.extractNumber(args["index"])
+	if prNum == 0 {
+		return ToolResult{Error: t.actionUsage("list-pr-files")}
+	}
+
+	resp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/pulls/%d/files", owner, repo, prNum), nil)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	if status >= 400 {
+		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(resp))}
+	}
+
+	var files []map[string]interface{}
+	if err := json.Unmarshal(resp, &files); err != nil {
+		return ToolResult{Error: fmt.Sprintf("failed to parse response: %v", err)}
+	}
+
+	if len(files) == 0 {
+		return ToolResult{Output: "no changed files in this PR"}
+	}
+
+	summary := make([]map[string]interface{}, 0, len(files))
+	for _, f := range files {
+		filename, _ := f["filename"].(string)
+		status, _ := f["status"].(string)
+		additions, _ := f["additions"].(float64)
+		deletions, _ := f["deletions"].(float64)
+		summary = append(summary, map[string]interface{}{
+			"filename":  filename,
+			"status":    status,
+			"additions": int(additions),
+			"deletions": int(deletions),
+		})
+	}
+
+	out, err := json.Marshal(summary)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	return ToolResult{Output: string(out)}
+}
+
 func (t *GiteaAPITool) ReplaceLabels(owner, repo string, issueNum int, labelNames []string) error {
 	labelsCSV := strings.Join(labelNames, ",")
 	labelIDs, err := t.resolveLabelIDs(owner, repo, labelsCSV)
@@ -819,6 +865,12 @@ repo     Repository name
 index    Issue number
 labels   Comma-separated label names (replaces all labels on the issue)
 Example: gitea update-labels owner=kit repo=hirdforge-tasks index=42 labels="status/done,agent/val,priority/normal,tier/autonomous"`
+	case "list-pr-files":
+		return `gitea list-pr-files — required params:
+owner    Repository owner
+repo     Repository name
+index    PR number
+Example: gitea list-pr-files owner=kit repo=hirdforge-personas index=42`
 	default:
 		return t.giteaOverviewUsage()
 	}
@@ -829,6 +881,7 @@ func (t *GiteaAPITool) giteaOverviewUsage() string {
 create-pr      Create a pull request
 create-review  Submit a formal PR review
 merge-pr       Merge a pull request
+list-pr-files  List changed files in a PR
 create-issue   Create an issue (supports label names)
 list-issues    List issues with state/label filters
 close-issue    Close an issue
