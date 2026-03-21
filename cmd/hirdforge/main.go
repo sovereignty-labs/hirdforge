@@ -635,7 +635,10 @@ func runKubectl(line string) error {
 		return fmt.Errorf("kubectl not found on PATH — install kubectl or use 'hirdforge cluster' for basic cluster info")
 	}
 	args := strings.Fields(line)
-	cmd := exec.Command(args[0], args[1:]...)
+	if len(args) == 0 {
+		return nil
+	}
+	cmd := exec.Command("sh", "-c", "kubectl "+strings.Join(args[1:], " "))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
