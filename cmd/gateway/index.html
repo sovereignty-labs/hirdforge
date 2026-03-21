@@ -377,8 +377,23 @@
   .gitops-row{display:flex;justify-content:space-between;gap:10px;font-size:12px}
   .gitops-label{color:var(--text-dim)}
   .gitops-value{color:var(--text)}
+  .gitops-actions{display:flex;justify-content:space-between;align-items:center;gap:10px}
   .deploy-list{display:flex;flex-direction:column;gap:8px}
   .deploy-item{padding:8px 10px;background:var(--bg-alt);border:1px solid var(--line)}
+  .queue-badges{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .tool-call-list{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+  .tool-call-item{padding:8px 10px;background:var(--bg-alt);border:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+  .tool-call-main{display:flex;flex-direction:column;gap:4px;min-width:0}
+  .tool-call-title{font-size:11px;font-weight:700;color:var(--text)}
+  .tool-call-meta{font-size:10px;color:var(--text-dim);word-break:break-word}
+  .spinner-inline{display:inline-block;animation:spin 1s linear infinite}
+  .memory-browser{border:1px solid var(--line);background:var(--bg-alt);padding:14px;display:flex;flex-direction:column;gap:12px}
+  .memory-search{display:grid;grid-template-columns:180px minmax(0,1fr) 120px;gap:10px}
+  .memory-result{padding:10px 12px;background:var(--bg-panel);border:1px solid var(--line);display:flex;justify-content:space-between;gap:12px}
+  .memory-result-main{display:flex;flex-direction:column;gap:6px;min-width:0}
+  .memory-result-text{font-size:12px;line-height:1.5;color:var(--text-soft)}
+  .memory-result-meta{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
   .history-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;height:100%}
   .history-panel{background:var(--bg-panel);border:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
   .history-filter{display:flex;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--bg-alt)}
@@ -502,11 +517,24 @@ function useRepos(){
   ]);}};go();const id=setInterval(go,30000);return()=>{m=false;clearInterval(id);};},[]);
   return repos;
 }
-async function mergePR(repo,index){
+function splitRepoFullName(repo){
   const [owner,repoName]=String(repo||"").split("/",2);
-  if(!owner||!repoName)return{ok:false,error:"invalid repo"};
-  try{const r=await fetch(`/api/v1/gitea/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${index}/merge`,{method:'POST'});
-    return r.ok?{ok:true}:{ok:false,error:`${r.status}`};}catch(e){return{ok:false,error:e.message};}
+  return owner&&repoName?{owner,repoName}:null;
+}
+async function prAction(repo,index,action){
+  const parts=splitRepoFullName(repo);
+  if(!parts)return{ok:false,error:"invalid repo"};
+  try{
+    const r=await fetch(`/api/v1/gitea/prs/${encodeURIComponent(parts.owner)}/${encodeURIComponent(parts.repoName)}/${index}/${action}`,{method:action==="status"?"GET":"POST"});
+    const text=await r.text();
+    let data={};
+    try{data=text?JSON.parse(text):{};}catch{data={error:text};}
+    return{ok:r.ok,status:r.status,data};
+  }catch(e){return{ok:false,status:0,data:{error:e.message}};}
+}
+async function mergePR(repo,index){
+  const out=await prAction(repo,index,"merge");
+  return out.ok?{ok:true,data:out.data}:{ok:false,error:out.data?.error||`${out.status||0}`};
 }
 async function apiDelete(path){
   try{
@@ -588,6 +616,21 @@ function useBufferedWS(visible){
 function useSimplePoll(path,fallback,interval){
   const[data,setData]=useState(fallback);
   const[status,setStatus]=useState('loading');
+  const refresh=useCallback(async()=>{
+    const res=await apiGetJSONDetailed(path);
+    if(res.ok){
+      setData(res.data==null?fallback:res.data);
+      setStatus('ready');
+      return res.data;
+    }
+    if(res.status===404){
+      setData(fallback);
+      setStatus('missing');
+      return fallback;
+    }
+    setStatus('error');
+    return fallback;
+  },[path,fallback]);
   useEffect(()=>{
     let live=true;
     const go=async()=>{
@@ -609,8 +652,20 @@ function useSimplePoll(path,fallback,interval){
     const id=setInterval(go,interval||CFG.POLL);
     return()=>{live=false;clearInterval(id);};
   },[path]);
-  return{data,status};
+  return{data,status,refresh};
 }
+
+const ciTone=status=>status==="success"?"var(--green)":status==="failure"?"var(--red)":status==="pending"?"var(--amber)":"var(--text-dim)";
+const ciGlyph=status=>status==="success"?"✓":status==="failure"?"✕":status==="pending"?"◌":"—";
+const scoreTone=score=>score>0.7?"var(--green)":score>0.4?"var(--amber)":"var(--red)";
+const truncateText=(text,max=200)=>{const s=String(text||"").trim();return s.length>max?`${s.slice(0,max)}…`:s;};
+const memoryListFromResponse=data=>Array.isArray(data)?data:(Array.isArray(data?.memories)?data.memories:(Array.isArray(data?.results)?data.results:(Array.isArray(data?.items)?data.items:[])));
+const memoryText=item=>item?.content||item?.text||item?.memory||item?.document||item?.payload?.content||"";
+const memoryScore=item=>Number(item?.importance_score??item?.importance??item?.score??0);
+const memoryType=item=>item?.memory_type||item?.type||item?.kind||"memory";
+const memoryAge=item=>item?.created_at||item?.updated_at||item?.timestamp||item?.time||"";
+const memoryId=item=>item?.id||item?.memory_id||item?.uuid||item?._id||"";
+const toolSnippet=args=>{if(args==null)return"no args";if(typeof args==="string")return truncateText(args,80);if(typeof args==="object"){const keys=Object.keys(args).slice(0,2);return keys.map(k=>`${k}=${truncateText(typeof args[k]==="string"?args[k]:JSON.stringify(args[k]),40)}`).join(" · ")||"object";}return truncateText(String(args),80);};
 
 // ═══════════ STREAM ═══════════
 async function streamChat(ag,msg,sid,sig,onC,onR,onTC,onTR,onD,onE){
@@ -1419,24 +1474,48 @@ const extractFileName=text=>{const m=(text||"").match(/([A-Za-z0-9_./-]+\.[A-Za-
 const summarizeEvent=e=>e?.summary||e?.message||e?.result||e?.error||e?.type||"event";
 const progressFromEventType=type=>({recon_started:18,recon_reading:28,tool_call:55,message:62,injection_sent:66,webhook_peer_review:78,webhook_freya_review:88,pr_created:100,task_complete:100,task_failed:100})[(type||"").toLowerCase()]||45;
 
-function MissionControlView({agents,fleetState,approvals,approvalStatus,approvalBusy,onApproval,prs,mergeBusy,onMerge,events,feedCollapsed,onToggleFeed,onOpenChat}){
-  const mergeReady=useMemo(()=>prs.filter(pr=>pr.state==="open"&&pr.mergeable),[prs]);
+function MissionControlView({agents,fleetState,approvals,approvalStatus,approvalBusy,onApproval,prs,prActionBusy,onPRAction,events,feedCollapsed,onToggleFeed,onOpenChat}){
+  const openPRs=useMemo(()=>prs.filter(pr=>pr.state==="open"),[prs]);
+  const[ciStatusByPR,setCiStatusByPR]=useState({});
+  const[openToolCalls,setOpenToolCalls]=useState({});
   const activeGroups=useMemo(()=>{
     const byTask={};
     (fleetState||[]).filter(item=>item.active).forEach(item=>{
       const key=item.task_ref||item.session_id||item.name;
       if(!byTask[key])byTask[key]={key,title:item.task_ref||`Session ${item.session_id||item.name}`,agents:[]};
       const latest=(events||[]).find(ev=>(ev.agent||"").toLowerCase()===item.name);
+      const toolCalls=(events||[]).filter(ev=>ev.type==="tool_call"&&(ev.agent||"").toLowerCase()===item.name).slice(0,10);
       byTask[key].agents.push({
         name:item.name,
         status:summarizeEvent(latest),
         file:extractFileName(summarizeEvent(latest)),
         progress:progressFromEventType(latest?.type),
-        since:item.since
+        since:item.since,
+        toolCalls
       });
     });
     return Object.values(byTask);
   },[fleetState,events]);
+  useEffect(()=>{
+    const activeAgents=new Set((fleetState||[]).filter(item=>item.active).map(item=>item.name));
+    setOpenToolCalls(prev=>{
+      const next={...prev};
+      Object.keys(next).forEach(name=>{if(!activeAgents.has(name))delete next[name];});
+      return next;
+    });
+  },[fleetState]);
+  useEffect(()=>{
+    let cancelled=false;
+    openPRs.forEach(pr=>{
+      const key=`${pr.repo}-${pr.number}`;
+      if(ciStatusByPR[key])return;
+      prAction(pr.repo,pr.number,"status").then(out=>{
+        if(cancelled)return;
+        setCiStatusByPR(prev=>({...prev,[key]:out.ok?(out.data||{status:"unknown"}):{status:"unknown"}}));
+      });
+    });
+    return()=>{cancelled=true;};
+  },[openPRs,ciStatusByPR]);
   return <div className="mission-grid" style={{gridTemplateColumns:feedCollapsed?"180px minmax(0,1fr) 32px":"180px minmax(0,1fr) 240px"}}>
     <aside className="warband-sidebar">
       <div className="sidebar-head">
@@ -1465,7 +1544,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
             <div className="panel-subtitle">Pending Lockbox decisions and merge-ready pull requests.</div>
             {approvalStatus==="unavailable"&&<div className="subtle" style={{marginTop:4,color:"var(--amber)"}}>Approval queue temporarily unavailable.</div>}
           </div>
-          <div className="subtle">{approvals.filter(item=>item.status==="pending").length+mergeReady.length} items</div>
+          <div className="subtle">{approvals.filter(item=>item.status==="pending").length+openPRs.length} items</div>
         </div>
         <div className="queue-grid">
           {approvals.filter(item=>item.status==="pending").map(item=><div key={item.queue_id} className="queue-card warning">
@@ -1482,21 +1561,29 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
               <button className="flat-btn red" disabled={!!approvalBusy[item.queue_id]} onClick={()=>onApproval(item.queue_id,false)}>Reject</button>
             </div>
           </div>)}
-          {mergeReady.map(pr=><div key={`${pr.repo}-${pr.number}`} className="queue-card info">
+          {openPRs.map(pr=>{const key=`${pr.repo}-${pr.number}`;const ci=ciStatusByPR[key]||{status:"unknown"};const mergeDisabled=!pr.mergeable||ci.status==="failure"||!!prActionBusy[`${key}-merge`];
+            return <div key={key} className="queue-card info">
             <div className="queue-header">
               <div>
-                <div className="queue-type">Merge ready PR</div>
+                <div className="queue-type">Pull request</div>
                 <div className="queue-title">#{pr.number} {pr.title}</div>
+                <div className="queue-badges">
+                  <Badge text={`${pr.approvals||0} approvals`} color="rgba(34,211,238,0.16)"/>
+                  <Badge text={pr.mergeable?"mergeable":"blocked"} color={pr.mergeable?"rgba(52,211,153,0.16)":"rgba(239,68,68,0.16)"}/>
+                  <Badge text={`${ciGlyph(ci.status)} ${ci.status||"unknown"}`} color={ciTone(ci.status)} />
+                </div>
               </div>
               <div className="subtle">{pr.repo}</div>
             </div>
-            <div className="queue-meta">{pr.user} · {pr.base} ← {pr.head}</div>
+            <div className="queue-meta">{pr.user} · {pr.base} ← {pr.head}{ci.workflow?` · ${ci.workflow}`:""}{ci.duration?` · ${ci.duration}`:""}</div>
             <div className="queue-actions">
-              <button className="flat-btn blue" disabled={!!mergeBusy[`${pr.repo}-${pr.number}`]} onClick={()=>onMerge(pr.repo,pr.number)}>Merge PR</button>
+              <button className="flat-btn blue" disabled={mergeDisabled} onClick={()=>onPRAction(pr.repo,pr.number,"merge")}>Merge</button>
+              <button className="flat-btn green" disabled={!!prActionBusy[`${key}-approve`]} onClick={()=>onPRAction(pr.repo,pr.number,"approve")}>Approve</button>
+              <button className="flat-btn red" disabled={!!prActionBusy[`${key}-close`]} onClick={()=>onPRAction(pr.repo,pr.number,"close")}>Close</button>
               <a className="flat-btn" style={{display:"inline-flex",alignItems:"center",textDecoration:"none"}} href={pr.html_url} target="_blank" rel="noreferrer">Open in Gitea</a>
             </div>
-          </div>)}
-          {!approvals.filter(item=>item.status==="pending").length&&!mergeReady.length&&<div className="empty-state">No approvals or merge-ready pull requests are waiting on sovereign action.</div>}
+          </div>;})}
+          {!approvals.filter(item=>item.status==="pending").length&&!openPRs.length&&<div className="empty-state">No approvals or pull requests are waiting on sovereign action.</div>}
         </div>
       </section>
       <section className="panel">
@@ -1515,7 +1602,8 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
                 <div className="operation-meta">{group.agents.length} agent{group.agents.length===1?"":"s"} engaged</div>
               </div>
             </div>
-            {group.agents.map(row=><div key={`${group.key}-${row.name}`} className="operation-row">
+            {group.agents.map(row=><div key={`${group.key}-${row.name}`}>
+              <div className="operation-row">
               <div>
                 <div className="operation-agent">{row.name}</div>
                 <div className="subtle">{row.since?fAgo(new Date(row.since*1000).toISOString()):"active now"}</div>
@@ -1524,7 +1612,20 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
                 <div className="operation-status">{row.file} · {row.status}</div>
                 <div className="progress-track"><div className="progress-fill" style={{width:`${row.progress}%`,background:"var(--blue)"}}/></div>
               </div>
-              <div className="subtle" style={{textAlign:"right"}}>{row.progress}%</div>
+              <div className="subtle" style={{textAlign:"right"}}>
+                <div>{row.progress}%</div>
+                {!!row.toolCalls.length&&<button className="toggle-chip" style={{marginTop:6}} onClick={()=>setOpenToolCalls(prev=>({...prev,[row.name]:!prev[row.name]}))}>{openToolCalls[row.name]?"Hide tools":"Show tools"}</button>}
+              </div>
+            </div>
+            {openToolCalls[row.name]&&!!row.toolCalls.length&&<div className="tool-call-list">
+              {row.toolCalls.map((call,index)=><div key={`${row.name}-${index}-${call.timestamp||index}`} className="tool-call-item">
+                <div className="tool-call-main">
+                  <div className="tool-call-title">{call.tool||"tool"}</div>
+                  <div className="tool-call-meta">{toolSnippet(call.args)}</div>
+                </div>
+                <div className="subtle" style={{color:call.error?"var(--red)":"var(--green)"}}>{call.error?"error":"ok"}</div>
+              </div>)}
+            </div>}
             </div>)}
           </div>)}
           {!activeGroups.length&&<div className="empty-state">No active operations are running right now.</div>}
@@ -1548,11 +1649,12 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
   </div>;
 }
 
-function ClusterView({nodes,pods,gitops,gitopsStatus,toast}){
+function ClusterView({nodes,pods,gitops,gitopsStatus,onRefreshGitops,toast}){
   const[expanded,setExpanded]=useState({});
   const[logsByPod,setLogsByPod]=useState({});
   const[loadingLogs,setLoadingLogs]=useState({});
   const[restartArmed,setRestartArmed]=useState({});
+  const[syncing,setSyncing]=useState(false);
   useEffect(()=>{
     const next={};
     (pods||[]).filter(p=>(p.namespace||"valhalla")==="valhalla"&&(p.restarts||0)>=3).forEach(p=>{next[p.name]=true;});
@@ -1588,6 +1690,13 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,toast}){
     setRestartArmed(prev=>{const out={...prev};delete out[podName];return out;});
   };
   const gitopsDeployments=Array.isArray(gitops?.deployments)?gitops.deployments:(Array.isArray(gitops?.recent_deployments)?gitops.recent_deployments:[]);
+  const triggerSync=async()=>{
+    setSyncing(true);
+    const out=await apiPost('/api/v1/gitops/sync');
+    if(out?.error)toast(out.error);else toast(out?.message||"Sync triggered");
+    if(onRefreshGitops)await onRefreshGitops();
+    setSyncing(false);
+  };
   return <div className="cluster-view">
     <div className="node-grid-mc">
       {["node-cp-1","node-worker-1","node-worker-2"].map(name=>{
@@ -1646,22 +1755,25 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,toast}){
             <div className="panel-title">GitOps</div>
             <div className="panel-subtitle">ArgoCD deployment status and drift signals.</div>
           </div>
-          <div className="subtle">{gitopsStatus==="missing"?"endpoint pending":"live"}</div>
+          <div className="gitops-actions">
+            <div className="subtle">{gitopsStatus==="missing"?"endpoint pending":"live"}</div>
+            <button className="flat-btn blue" disabled={gitopsStatus==="missing"||syncing} onClick={triggerSync}>{syncing?<span className="spinner-inline">⟳</span>:"Sync Now"}</button>
+          </div>
         </div>
         {gitopsStatus==="missing"?<div className="empty-state">`/api/v1/gitops/status` is not available on this gateway yet.</div>:<div className="gitops-grid">
-          <div className="gitops-row"><span className="gitops-label">Sync status</span><span className="gitops-value">{gitops?.sync_status||gitops?.syncStatus||"unknown"}</span></div>
-          <div className="gitops-row"><span className="gitops-label">Last sync</span><span className="gitops-value">{gitops?.last_sync_time||gitops?.lastSyncTime||"—"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Sync status</span><span className="gitops-value" style={{color:(gitops?.sync_status||"") === "Synced"?"var(--green)":"var(--amber)"}}>{gitops?.sync_status||gitops?.syncStatus||"unknown"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Health status</span><span className="gitops-value" style={{color:(gitops?.health_status||"") === "Healthy"?"var(--green)":"var(--amber)"}}>{gitops?.health_status||"unknown"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Last sync</span><span className="gitops-value">{gitops?.last_sync||gitops?.last_sync_time||gitops?.lastSyncTime||"—"}</span></div>
           <div className="gitops-row"><span className="gitops-label">Deployed SHA</span><span className="gitops-value">{gitops?.deployed_sha||gitops?.deployedSha||"—"}</span></div>
           <div className="gitops-row"><span className="gitops-label">Git head SHA</span><span className="gitops-value">{gitops?.git_head_sha||gitops?.gitHeadSha||"—"}</span></div>
-          <div className="gitops-row"><span className="gitops-label">Drift</span><span className="gitops-value">{gitops?.drift_indicator||gitops?.drift||"—"}</span></div>
-          <div className="gitops-row"><span className="gitops-label">Self-heal</span><span className="gitops-value">{String(gitops?.self_heal_enabled??gitops?.selfHealEnabled??"—")}</span></div>
-          <div className="gitops-row"><span className="gitops-label">TLS expiry</span><span className="gitops-value">{gitops?.tls_expiry||gitops?.tlsExpiry||"—"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Drift</span><span className="gitops-value" style={{color:gitops?.drift?"var(--amber)":"var(--green)"}}>{gitops?.drift?"Drift detected":"In sync"}</span></div>
+          <div className="gitops-row"><span className="gitops-label">Self-heal</span><span className="gitops-value">{String(gitops?.self_heal??gitops?.self_heal_enabled??gitops?.selfHealEnabled??"—")}</span></div>
           <div>
             <div className="section-kicker" style={{marginBottom:8}}>Recent deployments</div>
             <div className="deploy-list">
               {gitopsDeployments.slice(0,5).map((item,index)=><div key={index} className="deploy-item">
                 <div style={{fontSize:12,fontWeight:700}}>{item.sha||item.version||item.id||"deployment"}</div>
-                <div className="subtle" style={{marginTop:4}}>{item.time||item.timestamp||item.status||"—"}</div>
+                <div className="subtle" style={{marginTop:4}}>{item.deployed_at||item.time||item.timestamp||item.status||"—"}</div>
               </div>)}
               {!gitopsDeployments.length&&<div className="subtle">No deployment history returned.</div>}
             </div>
@@ -1731,8 +1843,13 @@ function SettingsViewNext({agents,repos,fleetState,toast}){
   const[modelValue,setModelValue]=useState("");
   const[webhookURL,setWebhookURL]=useState("");
   const[saveBusy,setSaveBusy]=useState(false);
+  const[memoryAgent,setMemoryAgent]=useState("");
+  const[memoryQuery,setMemoryQuery]=useState("");
+  const[memoryBusy,setMemoryBusy]=useState(false);
+  const[memoryResults,setMemoryResults]=useState([]);
   const personaRepo=(repos||[]).find(repo=>repo.full_name==="kit/hirdforge-personas"||`${repo.owner}/${repo.name}`==="kit/hirdforge-personas");
   useEffect(()=>{if(!selectedAgent&&agents[0])setSelectedAgent(agents[0].id);},[agents,selectedAgent]);
+  useEffect(()=>{if(!memoryAgent&&agents[0])setMemoryAgent(agents[0].id);},[agents,memoryAgent]);
   useEffect(()=>{
     let live=true;
     (async()=>{
@@ -1764,6 +1881,28 @@ function SettingsViewNext({agents,repos,fleetState,toast}){
       else toast("Model update requested");
     }catch(e){toast(e.message||"Model update failed");}
     setSaveBusy(false);
+  };
+  const searchMemories=async()=>{
+    if(!memoryAgent)return;
+    setMemoryBusy(true);
+    const res=await apiGetJSONDetailed(`/api/v1/seidr/memories?agent=${encodeURIComponent(memoryAgent)}&query=${encodeURIComponent(memoryQuery)}&limit=20`);
+    if(!res.ok){
+      toast(res.data?.error||"Memory search failed");
+      setMemoryResults([]);
+      setMemoryBusy(false);
+      return;
+    }
+    setMemoryResults(memoryListFromResponse(res.data));
+    setMemoryBusy(false);
+  };
+  const deleteMemory=async memory=>{
+    const id=memoryId(memory);
+    if(!id||!memoryAgent)return;
+    if(!window.confirm("Delete this memory?"))return;
+    const res=await apiDelete(`/api/v1/seidr/memories/${encodeURIComponent(id)}?agent=${encodeURIComponent(memoryAgent)}`);
+    if(!res.ok){toast(res.data?.error||"Memory delete failed");return;}
+    setMemoryResults(prev=>prev.filter(item=>memoryId(item)!==id));
+    toast("Memory deleted");
   };
   const selected=agents.find(item=>item.id===selectedAgent);
   return <div className="settings-shell">
@@ -1805,6 +1944,32 @@ function SettingsViewNext({agents,repos,fleetState,toast}){
               </div>
               <div className="detail-actions"><button className="flat-btn blue" disabled={saveBusy} onClick={updateModel}>Apply model</button></div>
             </div>}
+            <div className="memory-browser">
+              <div className="panel-head" style={{padding:0,border:"none"}}>
+                <div><div className="panel-title">Agent memory browser</div><div className="panel-subtitle">Search and prune Seidr memory for one agent.</div></div>
+              </div>
+              <div className="memory-search">
+                <select value={memoryAgent} onChange={e=>setMemoryAgent(e.target.value)}>
+                  {agents.map(agent=><option key={agent.id} value={agent.id}>{agent.id}</option>)}
+                </select>
+                <input value={memoryQuery} onChange={e=>setMemoryQuery(e.target.value)} placeholder="Search memory text"/>
+                <button className="flat-btn blue" disabled={memoryBusy} onClick={searchMemories}>{memoryBusy?"Searching…":"Search"}</button>
+              </div>
+              <div className="kv-list">
+                {memoryResults.map((item,index)=>{const score=memoryScore(item);return <div key={memoryId(item)||index} className="memory-result">
+                  <div className="memory-result-main">
+                    <div className="memory-result-text">{truncateText(memoryText(item),200)||"Empty memory content"}</div>
+                    <div className="memory-result-meta">
+                      <Badge text={`score ${score.toFixed(2)}`} color={scoreTone(score)}/>
+                      <Badge text={memoryType(item)} color="rgba(34,211,238,0.16)"/>
+                      <span className="subtle">{memoryAge(item)?fAgo(memoryAge(item)):"unknown age"}</span>
+                    </div>
+                  </div>
+                  <button className="flat-btn red" onClick={()=>deleteMemory(item)}>Delete</button>
+                </div>;})}
+                {!memoryBusy&&!memoryResults.length&&<div className="empty-state">No memories found.</div>}
+              </div>
+            </div>
           </>}
           {section==="notifications"&&<>
             <div className="field-grid">
@@ -1935,7 +2100,7 @@ function App(){
   const[approvals,setApprovals]=useState([]);
   const[approvalStatus,setApprovalStatus]=useState("loading");
   const[approvalBusy,setApprovalBusy]=useState({});
-  const[mergeBusy,setMergeBusy]=useState({});
+  const[prActionBusy,setPRActionBusy]=useState({});
   const[toast,setToast]=useState("");
   const auth=useAuth();
   const agents=usePoll('/api/v1/agents',FA,CFG.POLL);
@@ -1944,7 +2109,7 @@ function App(){
   const pods=usePoll('/api/v1/cluster/pods',[],10000);
   const repos=useRepos();
   const{prs}=usePRs();
-  const{data:gitops,status:gitopsStatus}=useSimplePoll('/api/v1/gitops/status',{},15000);
+  const{data:gitops,status:gitopsStatus,refresh:refreshGitops}=useSimplePoll('/api/v1/gitops/status',{},15000);
   const{data:taskHistory,status:taskHistoryStatus}=useSimplePoll('/api/v1/history/tasks',[],15000);
   const{data:deployHistory,status:deployHistoryStatus}=useSimplePoll('/api/v1/history/deployments',[],15000);
   const{events,ok:wsOk}=useBufferedWS(tab==="mission"&&!feedCollapsed);
@@ -1980,7 +2145,7 @@ function App(){
   const clearHistory=()=>{setCh([]);localStorage.removeItem(lck(auth.user,tgt));};
   const refreshApprovals=async()=>{try{const res=await fetch('/api/v1/approvals');if(!res.ok){setApprovals([]);setApprovalStatus("unavailable");return;}const data=await res.json();setApprovals(Array.isArray(data?.queues)?data.queues:[]);setApprovalStatus("ready");}catch{setApprovals([]);setApprovalStatus("unavailable");}};
   const decideApproval=async(queueID,approved)=>{if(!queueID)return;setApprovalBusy(prev=>({...prev,[queueID]:true}));const path=approved?'/api/v1/approvals/approve':'/api/v1/approvals/reject';const out=await apiPostJSON(path,{queue_id:queueID});showToast(out?.error||(approved?"Approval granted":"Approval rejected"));await refreshApprovals();setApprovalBusy(prev=>({...prev,[queueID]:false}));};
-  const requestMerge=async(repo,index)=>{const key=`${repo}-${index}`;setMergeBusy(prev=>({...prev,[key]:true}));const out=await mergePR(repo,index);showToast(out.ok?`Merged ${repo}#${index}`:(out.error||"Merge failed"));setMergeBusy(prev=>({...prev,[key]:false}));};
+  const handlePRAction=async(repo,index,action)=>{const key=`${repo}-${index}-${action}`;setPRActionBusy(prev=>({...prev,[key]:true}));const out=await prAction(repo,index,action);showToast(out.ok?`${action} completed for ${repo}#${index}`:(out.data?.error||`${action} failed`));setPRActionBusy(prev=>({...prev,[key]:false}));};
   if(viewportWidth<900){
     return <div className="screen-warning"><div className="screen-warning-card">Use a larger screen. Hirdforge mission control requires at least 900px of width and is designed for 1200px and above.</div></div>;
   }
@@ -2003,8 +2168,8 @@ function App(){
       </div>
     </header>
     <div className="main-shell">
-      {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalStatus={approvalStatus} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} mergeBusy={mergeBusy} onMerge={requestMerge} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}}/>}
-      {tab==="cluster"&&<ClusterView nodes={nodes} pods={pods} gitops={gitops} gitopsStatus={gitopsStatus} toast={showToast}/>}
+      {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalStatus={approvalStatus} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} prActionBusy={prActionBusy} onPRAction={handlePRAction} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}}/>}
+      {tab==="cluster"&&<ClusterView nodes={nodes} pods={pods} gitops={gitops} gitopsStatus={gitopsStatus} onRefreshGitops={refreshGitops} toast={showToast}/>}
       {tab==="history"&&<HistoryView tasks={taskHistory} taskStatus={taskHistoryStatus} deployments={deployHistory} deployStatus={deployHistoryStatus} agents={agents}/>}
       {tab==="settings"&&<SettingsViewNext agents={agents} repos={repos} fleetState={fleetState} toast={showToast}/>}
     </div>
