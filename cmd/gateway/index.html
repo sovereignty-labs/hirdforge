@@ -503,7 +503,9 @@ function useRepos(){
   return repos;
 }
 async function mergePR(repo,index){
-  try{const r=await fetch(`/api/v1/gitea/prs/${repo}/${index}/merge`,{method:'POST'});
+  const [owner,repoName]=String(repo||"").split("/",2);
+  if(!owner||!repoName)return{ok:false,error:"invalid repo"};
+  try{const r=await fetch(`/api/v1/gitea/prs/${encodeURIComponent(owner)}/${encodeURIComponent(repoName)}/${index}/merge`,{method:'POST'});
     return r.ok?{ok:true}:{ok:false,error:`${r.status}`};}catch(e){return{ok:false,error:e.message};}
 }
 async function apiDelete(path){
@@ -1417,7 +1419,7 @@ const extractFileName=text=>{const m=(text||"").match(/([A-Za-z0-9_./-]+\.[A-Za-
 const summarizeEvent=e=>e?.summary||e?.message||e?.result||e?.error||e?.type||"event";
 const progressFromEventType=type=>({recon_started:18,recon_reading:28,tool_call:55,message:62,injection_sent:66,webhook_peer_review:78,webhook_freya_review:88,pr_created:100,task_complete:100,task_failed:100})[(type||"").toLowerCase()]||45;
 
-function MissionControlView({agents,fleetState,approvals,approvalBusy,onApproval,prs,mergeBusy,onMerge,events,feedCollapsed,onToggleFeed,onOpenChat}){
+function MissionControlView({agents,fleetState,approvals,approvalStatus,approvalBusy,onApproval,prs,mergeBusy,onMerge,events,feedCollapsed,onToggleFeed,onOpenChat}){
   const mergeReady=useMemo(()=>prs.filter(pr=>pr.state==="open"&&pr.mergeable),[prs]);
   const activeGroups=useMemo(()=>{
     const byTask={};
@@ -1461,6 +1463,7 @@ function MissionControlView({agents,fleetState,approvals,approvalBusy,onApproval
           <div>
             <div className="panel-title">Sovereign required</div>
             <div className="panel-subtitle">Pending Lockbox decisions and merge-ready pull requests.</div>
+            {approvalStatus==="unavailable"&&<div className="subtle" style={{marginTop:4,color:"var(--amber)"}}>Approval queue temporarily unavailable.</div>}
           </div>
           <div className="subtle">{approvals.filter(item=>item.status==="pending").length+mergeReady.length} items</div>
         </div>
@@ -1672,12 +1675,12 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,toast}){
 function HistoryView({tasks,taskStatus,deployments,deployStatus,agents}){
   const[agentFilter,setAgentFilter]=useState("all");
   const[dateFilter,setDateFilter]=useState("");
-  const normalizedTasks=Array.isArray(tasks)?tasks:(Array.isArray(tasks?.items)?tasks.items:[]);
-  const normalizedDeployments=Array.isArray(deployments)?deployments:(Array.isArray(deployments?.items)?deployments.items:[]);
+  const normalizedTasks=Array.isArray(tasks)?tasks:(Array.isArray(tasks?.tasks)?tasks.tasks:(Array.isArray(tasks?.items)?tasks.items:[]));
+  const normalizedDeployments=Array.isArray(deployments)?deployments:(Array.isArray(deployments?.deployments)?deployments.deployments:(Array.isArray(deployments?.items)?deployments.items:[]));
   const filteredTasks=useMemo(()=>normalizedTasks.filter(item=>{
-    const agent=(item.agent||item.owner||"").toLowerCase();
-    const when=(item.completed_at||item.timestamp||item.time||"").slice(0,10);
-    if(agentFilter!=="all"&&agent!==agentFilter)return false;
+    const itemAgents=Array.isArray(item.agents)?item.agents.map(agent=>String(agent).toLowerCase()):[(item.agent||item.owner||"").toLowerCase()].filter(Boolean);
+    const when=(item.closed_at||item.completed_at||item.timestamp||item.time||"").slice(0,10);
+    if(agentFilter!=="all"&&!itemAgents.includes(agentFilter))return false;
     if(dateFilter&&when!==dateFilter)return false;
     return true;
   }),[normalizedTasks,agentFilter,dateFilter]);
@@ -1698,7 +1701,7 @@ function HistoryView({tasks,taskStatus,deployments,deployStatus,agents}){
           {taskStatus==="missing"&&<div className="empty-state">`/api/v1/history/tasks` is not available yet.</div>}
           {filteredTasks.map((item,index)=><div key={item.id||index} className="history-item">
             <div className="history-item-title">{item.title||item.task||item.summary||"Completed task"}</div>
-            <div className="history-item-meta">{item.agent||item.owner||"unknown"} · {item.completed_at||item.timestamp||item.time||"—"}</div>
+            <div className="history-item-meta">{(Array.isArray(item.agents)&&item.agents.length?item.agents.join(", "):(item.agent||item.owner||"unknown"))} · {item.closed_at||item.completed_at||item.timestamp||item.time||"—"}</div>
           </div>)}
           {!filteredTasks.length&&taskStatus!=="missing"&&<div className="empty-state">No completed tasks match the current filter.</div>}
         </div>
@@ -1710,8 +1713,8 @@ function HistoryView({tasks,taskStatus,deployments,deployStatus,agents}){
         <div className="history-list">
           {deployStatus==="missing"&&<div className="empty-state">`/api/v1/history/deployments` is not available yet.</div>}
           {normalizedDeployments.map((item,index)=><div key={item.id||index} className="history-item">
-            <div className="history-item-title">{item.service||item.title||item.sha||"Deployment"}</div>
-            <div className="history-item-meta">{item.status||"unknown"} · {item.timestamp||item.time||item.completed_at||"—"}</div>
+            <div className="history-item-title">{item.message||item.service||item.title||item.sha||"Deployment"}</div>
+            <div className="history-item-meta">{item.triggered_by||item.status||"unknown"} · {item.deployed_at||item.timestamp||item.time||item.completed_at||"—"}</div>
           </div>)}
           {!normalizedDeployments.length&&deployStatus!=="missing"&&<div className="empty-state">No deployment events returned.</div>}
         </div>
@@ -1930,6 +1933,7 @@ function App(){
   const[showTools,setShowTools]=useState(false);
   const[feedCollapsed,setFeedCollapsed]=useState(false);
   const[approvals,setApprovals]=useState([]);
+  const[approvalStatus,setApprovalStatus]=useState("loading");
   const[approvalBusy,setApprovalBusy]=useState({});
   const[mergeBusy,setMergeBusy]=useState({});
   const[toast,setToast]=useState("");
@@ -1968,13 +1972,13 @@ function App(){
     localStorage.setItem(key,JSON.stringify(existing.concat([serialized])));
     if(owner===tgt)setCh(prev=>prev.concat([entry]));
   },[events,tgt,auth.user]);
-  useEffect(()=>{let live=true;const go=async()=>{try{const res=await fetch('/api/v1/approvals');if(!res.ok)throw new Error();const data=await res.json();if(live)setApprovals(Array.isArray(data?.queues)?data.queues:[]);}catch{if(live)setApprovals([]);}};go();const id=setInterval(go,10000);return()=>{live=false;clearInterval(id);};},[]);
+  useEffect(()=>{let live=true;const go=async()=>{try{const res=await fetch('/api/v1/approvals');if(!res.ok){if(live){setApprovals([]);setApprovalStatus("unavailable");}return;}const data=await res.json();if(live){setApprovals(Array.isArray(data?.queues)?data.queues:[]);setApprovalStatus("ready");}}catch{if(live){setApprovals([]);setApprovalStatus("unavailable");}}};go();const id=setInterval(go,10000);return()=>{live=false;clearInterval(id);};},[]);
   const showToast=text=>{setToast(text);setTimeout(()=>setToast(""),1800);};
   const setCurSid=sid=>setSidByA(prev=>({...prev,[tgt]:sid}));
   const loadSession=async(sid,meta)=>{const data=await api(`/api/v1/sessions/${sid}`,null);if(data?.messages){setCurSid(sid);setSessionMeta({source:data.source||meta?.source||"",task_ref:data.task_ref||meta?.task_ref||"",id:data.id||sid});setCh(data.messages.map(item=>s2u(tgt,item,auth.user,data.source||meta?.source)));}};
   const newConversation=()=>{setCurSid(`hirdforge-${tgt}-${Date.now()}`);setSessionMeta(null);setCh([]);};
   const clearHistory=()=>{setCh([]);localStorage.removeItem(lck(auth.user,tgt));};
-  const refreshApprovals=async()=>{try{const res=await fetch('/api/v1/approvals');if(!res.ok)throw new Error();const data=await res.json();setApprovals(Array.isArray(data?.queues)?data.queues:[]);}catch{setApprovals([]);}};
+  const refreshApprovals=async()=>{try{const res=await fetch('/api/v1/approvals');if(!res.ok){setApprovals([]);setApprovalStatus("unavailable");return;}const data=await res.json();setApprovals(Array.isArray(data?.queues)?data.queues:[]);setApprovalStatus("ready");}catch{setApprovals([]);setApprovalStatus("unavailable");}};
   const decideApproval=async(queueID,approved)=>{if(!queueID)return;setApprovalBusy(prev=>({...prev,[queueID]:true}));const path=approved?'/api/v1/approvals/approve':'/api/v1/approvals/reject';const out=await apiPostJSON(path,{queue_id:queueID});showToast(out?.error||(approved?"Approval granted":"Approval rejected"));await refreshApprovals();setApprovalBusy(prev=>({...prev,[queueID]:false}));};
   const requestMerge=async(repo,index)=>{const key=`${repo}-${index}`;setMergeBusy(prev=>({...prev,[key]:true}));const out=await mergePR(repo,index);showToast(out.ok?`Merged ${repo}#${index}`:(out.error||"Merge failed"));setMergeBusy(prev=>({...prev,[key]:false}));};
   if(viewportWidth<900){
@@ -1995,11 +1999,11 @@ function App(){
       <div className="hud-strip">
         <div className="hud-card"><span className={`status-dot ${wsOk?"green":"red"}`}/><div className="hud-meta"><span className="hud-label">Cluster health</span><span className="hud-note">{wsOk?"live control plane":"reconnecting events"}</span></div></div>
         <div className="hud-card"><div className="hud-value" style={{color:"var(--green)"}}>{online}/{agents.length}</div><div className="hud-meta"><span className="hud-label">Agents</span><span className="hud-note">{agents.length-online} unavailable</span></div></div>
-        <div className="hud-card"><div className="hud-value" style={{color:pendingApprovals.length?"var(--amber)":"var(--blue)"}}>{pendingApprovals.length}</div><div className="hud-meta"><span className="hud-label">Awaiting sovereign</span><span className="hud-note">{auth.user} · {auth.role}</span></div></div>
+        <div className="hud-card"><div className="hud-value" style={{color:approvalStatus==="unavailable"?"var(--amber)":(pendingApprovals.length?"var(--amber)":"var(--blue)")}}>{approvalStatus==="unavailable"?"—":pendingApprovals.length}</div><div className="hud-meta"><span className="hud-label">Awaiting sovereign</span><span className="hud-note">{approvalStatus==="unavailable"?"approval queue unavailable":`${auth.user} · ${auth.role}`}</span></div></div>
       </div>
     </header>
     <div className="main-shell">
-      {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} mergeBusy={mergeBusy} onMerge={requestMerge} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}}/>}
+      {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalStatus={approvalStatus} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} mergeBusy={mergeBusy} onMerge={requestMerge} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}}/>}
       {tab==="cluster"&&<ClusterView nodes={nodes} pods={pods} gitops={gitops} gitopsStatus={gitopsStatus} toast={showToast}/>}
       {tab==="history"&&<HistoryView tasks={taskHistory} taskStatus={taskHistoryStatus} deployments={deployHistory} deployStatus={deployHistoryStatus} agents={agents}/>}
       {tab==="settings"&&<SettingsViewNext agents={agents} repos={repos} fleetState={fleetState} toast={showToast}/>}
