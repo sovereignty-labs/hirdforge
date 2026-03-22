@@ -52,8 +52,8 @@ func TestAgentStructMarshalUnmarshal(t *testing.T) {
 // TestAgentHealthResponse ensures the health response struct works correctly
 func TestAgentHealthResponseMarshalUnmarshal(t *testing.T) {
 	resp := agentHealthResponse{
-		Healthy: true,
-		Uptime:  7200,
+		Status:        "ok",
+		UptimeSeconds: 7200,
 	}
 
 	data, err := json.Marshal(resp)
@@ -66,11 +66,11 @@ func TestAgentHealthResponseMarshalUnmarshal(t *testing.T) {
 		t.Fatalf("unmarshal health response: %v", err)
 	}
 
-	if unmarshaled.Healthy != resp.Healthy {
-		t.Fatalf("healthy mismatch: got %v, want %v", unmarshaled.Healthy, resp.Healthy)
+	if unmarshaled.Status != resp.Status {
+		t.Fatalf("status mismatch: got %q, want %q", unmarshaled.Status, resp.Status)
 	}
-	if unmarshaled.Uptime != resp.Uptime {
-		t.Fatalf("uptime mismatch: got %d, want %d", unmarshaled.Uptime, resp.Uptime)
+	if unmarshaled.UptimeSeconds != resp.UptimeSeconds {
+		t.Fatalf("uptime mismatch: got %d, want %d", unmarshaled.UptimeSeconds, resp.UptimeSeconds)
 	}
 }
 
@@ -81,8 +81,8 @@ func TestQueryAgentHealth(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(agentHealthResponse{
-			Healthy: true,
-			Uptime:  1800,
+			Status:        "ok",
+			UptimeSeconds: 1800,
 		})
 	}))
 	defer testServer.Close()
@@ -95,11 +95,11 @@ func TestQueryAgentHealth(t *testing.T) {
 		t.Fatalf("query agent health: %v", err)
 	}
 
-	if !resp.Healthy {
-		t.Fatalf("expected healthy agent, got unhealthy")
+	if resp.Status != "ok" {
+		t.Fatalf("expected healthy agent status, got %q", resp.Status)
 	}
-	if resp.Uptime != 1800 {
-		t.Fatalf("uptime mismatch: got %d, want %d", resp.Uptime, 1800)
+	if resp.UptimeSeconds != 1800 {
+		t.Fatalf("uptime mismatch: got %d, want %d", resp.UptimeSeconds, 1800)
 	}
 }
 
@@ -109,8 +109,8 @@ func TestQueryAgentHealthUnhealthy(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(agentHealthResponse{
-			Healthy: false,
-			Uptime:  0,
+			Status:        "error",
+			UptimeSeconds: 0,
 		})
 	}))
 	defer testServer.Close()
@@ -122,8 +122,8 @@ func TestQueryAgentHealthUnhealthy(t *testing.T) {
 		t.Fatalf("query agent health: %v", err)
 	}
 
-	if resp.Healthy {
-		t.Fatalf("expected unhealthy agent, got healthy")
+	if resp.Status == "ok" {
+		t.Fatalf("expected unhealthy agent, got healthy status")
 	}
 }
 
@@ -139,19 +139,18 @@ func TestQueryAgentHealthConnectionError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error for connection failure, got nil")
 	}
-	if resp.Healthy {
-		t.Fatalf("expected unhealthy on error, got healthy")
+	if resp.Status == "ok" {
+		t.Fatalf("expected unhealthy on error, got healthy status")
 	}
 }
 
 // TestAgentConfigureRequest ensures the configure request struct works
 func TestAgentConfigureRequestMarshalUnmarshal(t *testing.T) {
 	req := agentConfigureRequest{
-		Name:    "chuck",
-		URL:     "http://chuck.valhalla.svc:8081",
-		Model:   "gpt-4o",
-		Tools:   []string{"exec", "read", "write"},
-		Enabled: true,
+		Model:        "gpt-4o",
+		InferenceURL: "http://llm.valhalla.svc:8080",
+		Tools:        []string{"exec", "read", "write"},
+		Peers:        []string{"val=http://val.valhalla.svc:8081"},
 	}
 
 	data, err := json.Marshal(req)
@@ -164,47 +163,14 @@ func TestAgentConfigureRequestMarshalUnmarshal(t *testing.T) {
 		t.Fatalf("unmarshal configure request: %v", err)
 	}
 
-	if unmarshaled.Name != req.Name {
-		t.Fatalf("name mismatch: got %q, want %q", unmarshaled.Name, req.Name)
+	if unmarshaled.Model != req.Model {
+		t.Fatalf("model mismatch: got %q, want %q", unmarshaled.Model, req.Model)
 	}
-	if unmarshaled.URL != req.URL {
-		t.Fatalf("url mismatch: got %q, want %q", unmarshaled.URL, req.URL)
+	if unmarshaled.InferenceURL != req.InferenceURL {
+		t.Fatalf("inference url mismatch: got %q, want %q", unmarshaled.InferenceURL, req.InferenceURL)
 	}
-	if unmarshaled.Enabled != req.Enabled {
-		t.Fatalf("enabled mismatch: got %v, want %v", unmarshaled.Enabled, req.Enabled)
-	}
-}
-
-// TestAgentConfigureResponse ensures the configure response struct works
-func TestAgentConfigureResponseMarshalUnmarshal(t *testing.T) {
-	resp := agentConfigureResponse{
-		Name:             "chuck",
-		URL:              "http://chuck.valhalla.svc:8081",
-		Healthy:          true,
-		Model:            "gpt-4o",
-		Tools:            []string{"exec", "read", "write"},
-		LastSeen:         time.Now().Format(time.RFC3339),
-		UptimeSeconds:    7200,
-		RequestsServed:   50,
-		ToolCallsMade:    20,
-		DeploymentConfig: "infrastructure/valhalla/deployment-chuck.yaml",
-	}
-
-	data, err := json.Marshal(resp)
-	if err != nil {
-		t.Fatalf("marshal configure response: %v", err)
-	}
-
-	var unmarshaled agentConfigureResponse
-	if err := json.Unmarshal(data, &unmarshaled); err != nil {
-		t.Fatalf("unmarshal configure response: %v", err)
-	}
-
-	if unmarshaled.Name != resp.Name {
-		t.Fatalf("name mismatch: got %q, want %q", unmarshaled.Name, resp.Name)
-	}
-	if unmarshaled.Healthy != resp.Healthy {
-		t.Fatalf("healthy mismatch: got %v, want %v", unmarshaled.Healthy, resp.Healthy)
+	if got, ok := unmarshaled.Tools.([]interface{}); !ok || len(got) != 3 {
+		t.Fatalf("tools mismatch: got %#v", unmarshaled.Tools)
 	}
 }
 
@@ -289,11 +255,9 @@ func TestParseAgentsEmptyValidation(t *testing.T) {
 // TestUpdateAgentDeploymentArgs validates deployment args update
 func TestUpdateAgentDeploymentArgs(t *testing.T) {
 	req := agentConfigureRequest{
-		Name:    "val",
-		URL:     "http://val.valhalla.svc:8081",
-		Model:   "gpt-4o",
-		Tools:   []string{"exec", "read", "write", "git-clone"},
-		Enabled: true,
+		Model:        "gpt-4o",
+		InferenceURL: "http://val.valhalla.svc:8081",
+		Tools:        []string{"exec", "read", "write", "git-clone"},
 	}
 
 	content := `apiVersion: apps/v1
@@ -316,8 +280,8 @@ spec:
 		t.Fatalf("expected non-empty lines array")
 	}
 
-	if !strings.Contains(result, "val.valhalla.svc") {
-		t.Fatalf("result should contain agent URL")
+	if !strings.Contains(result, "--inference-url='http://val.valhalla.svc:8081'") {
+		t.Fatalf("result should contain updated inference URL")
 	}
 	if !strings.Contains(result, "gpt-4o") {
 		t.Fatalf("result should contain model name")
@@ -327,13 +291,10 @@ spec:
 // TestEventStruct ensures Event struct can be marshaled
 func TestEventStructMarshalUnmarshal(t *testing.T) {
 	event := Event{
-		Time:      time.Now().Format(time.RFC3339),
-		Type:      "agent_start",
-		Agent:     "gateway",
-		Summary:   "Gateway started with 3 agents",
-		TaskID:    "task-123",
-		Content:   "test content",
-		Delegated: true,
+		Time:    time.Now().Format(time.RFC3339),
+		Type:    "agent_start",
+		Agent:   "gateway",
+		Summary: "Gateway started with 3 agents",
 	}
 
 	data, err := json.Marshal(event)
@@ -356,14 +317,11 @@ func TestEventStructMarshalUnmarshal(t *testing.T) {
 
 // TestCreateGitOpsAgentConfigPRURLGeneration tests URL generation
 func TestCreateGitOpsAgentConfigPRURLGeneration(t *testing.T) {
-	// This test ensures the function signature is correct
-	// Actual PR creation would require network access, so we just verify the function exists
-	// and has the right signature by checking it compiles
-
-	// The actual implementation would be tested in integration tests
-	// This unit test just ensures the function is callable
-	if createGitOpsAgentConfigPR == nil {
-		t.Fatal("createGitOpsAgentConfigPR should not be nil")
+	// Compile-time signature check only; network behavior belongs in integration tests.
+	var fn func(*http.Client, string, string, string, agentConfigureRequest) (string, error)
+	fn = createGitOpsAgentConfigPR
+	if fn == nil {
+		t.Fatal("expected function assignment to succeed")
 	}
 }
 
@@ -389,7 +347,7 @@ func TestAgentSnapshot(t *testing.T) {
 				UptimeSeconds: 0,
 			},
 		},
-		agentOrder: []string{"val", "chuck"},
+		order: []string{"val", "chuck"},
 	}
 
 	agents := gw.snapshotAgents()
