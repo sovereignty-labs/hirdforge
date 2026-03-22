@@ -741,13 +741,16 @@ func (g *gateway) refreshAgentHealth() {
 	g.mu.RLock()
 	names := append([]string(nil), g.order...)
 	urls := make(map[string]string, len(g.order))
+	roles := make(map[string]string, len(g.order))
 	for _, n := range g.order {
 		urls[n] = g.agents[n].URL
+		roles[n] = g.agents[n].Role
 	}
 	g.mu.RUnlock()
 
 	for _, name := range names {
 		updated := Agent{Name: name, URL: urls[name], Tools: []string{}}
+		updated.Role = roles[name]
 		h, err := queryAgentHealth(client, urls[name])
 		if err == nil {
 			updated.Healthy = true
