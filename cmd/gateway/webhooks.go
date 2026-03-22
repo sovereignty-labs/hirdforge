@@ -13,7 +13,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -278,7 +277,15 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 
 func (g *gateway) handleAgentPROpened(pr webhookPR) {
 	log.Printf("webhook: agent PR opened repo=%s number=%d author=%s", pr.Repo, pr.Number, pr.User)
-	if strings.EqualFold(pr.Base, "develop") {
+	if pr.Repo == "kit/valhalla-infra" && strings.HasPrefix(pr.Head, "ci/") {
+		if err := g.mergeDevelopPR(pr.Repo, pr.Number); err != nil {
+			log.Printf("webhook: CI auto-merge failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		} else {
+			log.Printf("webhook: auto-merged CI PR #%d on %s", pr.Number, pr.Repo)
+		}
+		return
+	}
+	if strings.EqualFold(pr.Base, "main") {
 		g.dispatchPeerReview(pr)
 		return
 	}
@@ -315,7 +322,7 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 }
 
 func (g *gateway) handleAgentPRSynchronized(pr webhookPR) {
-	if !strings.EqualFold(pr.Base, "develop") {
+	if !strings.EqualFold(pr.Base, "main") {
 		return
 	}
 	key := g.prReviewKey(pr.Repo, pr.Number)
@@ -330,12 +337,6 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		return
 	}
 	log.Printf("webhook: merged PR repo=%s number=%d", pr.Repo, pr.Number)
-	if strings.EqualFold(pr.Base, "develop") {
-		g.syncDevelopToMain(pr.Repo)
-	}
-	if strings.EqualFold(pr.Base, "main") && (pr.Repo == "gitea_admin/project_valhalla" || pr.Repo == "kit/hirdforge-personas") {
-		g.syncMainToDevelop(pr.Repo)
-	}
 	if matches := webhookTaskRefRE.FindStringSubmatch(pr.Body); len(matches) == 2 {
 		log.Printf("webhook: merged PR #%d references task kit/hirdforge-tasks#%s", pr.Number, matches[1])
 		if taskNumber, err := parseWebhookTaskNumber(matches[1]); err == nil {
@@ -505,150 +506,6 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 			{Name: "PR", Value: pr.HTMLURL, Inline: false},
 		},
 	)
-}
-
-func (g *gateway) syncMainToDevelop(fullRepo string) {
-	g.syncMu.Lock()
-	defer g.syncMu.Unlock()
-
-	owner, repoName, ok := splitFullRepoName(fullRepo)
-	if !ok {
-		log.Printf("webhook: main->develop sync skipped: invalid repo %q", fullRepo)
-		return
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-
-	// Check for existing open sync PRs to avoid duplicates
-	checkPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&base=develop&head=main&limit=10", url.PathEscape(owner), url.PathEscape(repoName))
-	var pulls []map[string]interface{}
-	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, checkPath, &pulls)
-	if err != nil {
-		log.Printf("webhook: main->develop PR existence check failed for %s: %v", fullRepo, err)
-		return
-	}
-	if status < 200 || status >= 300 {
-		log.Printf("webhook: main->develop PR existence check returned %d for %s: %s", status, fullRepo, strings.TrimSpace(string(body)))
-		return
-	}
-	if len(pulls) > 0 {
-		log.Printf("webhook: main->develop sync PR already exists, skipping")
-		return
-	}
-
-	createPayload := map[string]string{
-		"title": "sync: main \u2192 develop",
-		"body":  "Automated sync PR to keep develop up to date with main after merge.",
-		"head":  "main",
-		"base":  "develop",
-	}
-	createResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls", url.PathEscape(owner), url.PathEscape(repoName)), bytes.NewReader(mustJSON(createPayload)))
-	if err != nil {
-		log.Printf("webhook: main->develop sync PR create failed for %s: %v", fullRepo, err)
-		return
-	}
-	createBody, _ := io.ReadAll(io.LimitReader(createResp.Body, 4096))
-	createResp.Body.Close()
-	if createResp.StatusCode < 200 || createResp.StatusCode >= 300 {
-		if createResp.StatusCode == http.StatusConflict {
-			log.Printf("webhook: main->develop sync PR not created for %s (likely already up to date): %s", fullRepo, strings.TrimSpace(string(createBody)))
-			return
-		}
-		log.Printf("webhook: main->develop sync PR create returned %d for %s: %s", createResp.StatusCode, fullRepo, strings.TrimSpace(string(createBody)))
-		return
-	}
-	var created map[string]interface{}
-	if err := json.Unmarshal(createBody, &created); err != nil {
-		log.Printf("webhook: main->develop sync PR decode failed for %s: %v", fullRepo, err)
-		return
-	}
-	prNum, _ := created["number"].(float64)
-	if prNum == 0 {
-		log.Printf("webhook: main->develop sync PR create for %s returned no PR number", fullRepo)
-		return
-	}
-	reviewersToken := strings.TrimSpace(os.Getenv("GITEA_REVIEWERS_TOKEN"))
-	if reviewersToken == "" {
-		log.Printf("webhook: main->develop sync approval skipped for %s PR #%d: missing GITEA_REVIEWERS_TOKEN", fullRepo, int64(prNum))
-		return
-	}
-	approvalPayload := map[string]string{
-		"event": "APPROVED",
-		"body":  "Auto-approved sync PR",
-	}
-	approvalResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, reviewersToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/reviews", url.PathEscape(owner), url.PathEscape(repoName), int64(prNum)), bytes.NewReader(mustJSON(approvalPayload)))
-	if err != nil {
-		log.Printf("webhook: main->develop sync approval failed for %s PR #%d: %v", fullRepo, int64(prNum), err)
-		return
-	}
-	approvalBody, _ := io.ReadAll(io.LimitReader(approvalResp.Body, 4096))
-	approvalResp.Body.Close()
-	if approvalResp.StatusCode < 200 || approvalResp.StatusCode >= 300 {
-		log.Printf("webhook: main->develop sync approval returned %d for %s PR #%d: %s", approvalResp.StatusCode, fullRepo, int64(prNum), strings.TrimSpace(string(approvalBody)))
-		return
-	}
-	mergePayload := map[string]string{"Do": "merge"}
-	mergeResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", url.PathEscape(owner), url.PathEscape(repoName), int64(prNum)), bytes.NewReader(mustJSON(mergePayload)))
-	if err != nil {
-		log.Printf("webhook: main->develop sync merge failed for %s PR #%d: %v", fullRepo, int64(prNum), err)
-		return
-	}
-	defer mergeResp.Body.Close()
-	mergeBody, _ := io.ReadAll(io.LimitReader(mergeResp.Body, 4096))
-	if mergeResp.StatusCode < 200 || mergeResp.StatusCode >= 300 {
-		log.Printf("webhook: main->develop sync merge returned %d for %s PR #%d: %s", mergeResp.StatusCode, fullRepo, int64(prNum), strings.TrimSpace(string(mergeBody)))
-		return
-	}
-	log.Printf("webhook: synced main back to develop for %s via PR #%d", fullRepo, int64(prNum))
-}
-
-func (g *gateway) syncDevelopToMain(fullRepo string) {
-	g.syncMu.Lock()
-	defer g.syncMu.Unlock()
-
-	owner, repoName, ok := splitFullRepoName(fullRepo)
-	if !ok {
-		log.Printf("webhook: develop->main sync skipped: invalid repo %q", fullRepo)
-		return
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	checkPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&base=main&head=develop&limit=10", url.PathEscape(owner), url.PathEscape(repoName))
-	var pulls []map[string]interface{}
-	status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, checkPath, &pulls)
-	if err != nil {
-		log.Printf("webhook: develop->main PR existence check failed for %s: %v", fullRepo, err)
-		return
-	}
-	if status < 200 || status >= 300 {
-		log.Printf("webhook: develop->main PR existence check returned %d for %s: %s", status, fullRepo, strings.TrimSpace(string(body)))
-		return
-	}
-	if len(pulls) > 0 {
-		log.Printf("webhook: develop->main PR already exists, skipping")
-		return
-	}
-
-	createPayload := map[string]string{
-		"title": "develop → main",
-		"body":  "Batched develop changes ready for Sovereign merge.",
-		"head":  "develop",
-		"base":  "main",
-	}
-	createResp, err := giteaRequest(client, http.MethodPost, g.giteaURL, g.giteaToken, fmt.Sprintf("/api/v1/repos/%s/%s/pulls", url.PathEscape(owner), url.PathEscape(repoName)), bytes.NewReader(mustJSON(createPayload)))
-	if err != nil {
-		log.Printf("webhook: develop->main PR create failed for %s: %v", fullRepo, err)
-		return
-	}
-	createBody, _ := io.ReadAll(io.LimitReader(createResp.Body, 4096))
-	createResp.Body.Close()
-	if createResp.StatusCode < 200 || createResp.StatusCode >= 300 {
-		if createResp.StatusCode == http.StatusConflict {
-			log.Printf("webhook: develop->main PR already exists, skipping")
-			return
-		}
-		log.Printf("webhook: develop->main PR create returned %d for %s: %s", createResp.StatusCode, fullRepo, strings.TrimSpace(string(createBody)))
-		return
-	}
-	log.Printf("webhook: Auto-created develop→main PR")
 }
 
 func (g *gateway) builderFromBranch(branch string) string {
@@ -1084,6 +941,16 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 		}
 		state.PeerReviewed = true
 		g.setPRReviewState(key, state)
+		if pr.Repo == "kit/hirdforge-personas" || pr.Repo == "kit/hirdforge-tasks" {
+			log.Printf("webhook: peer review text signaled approval for PR #%d on %s; skipping second-pass review", pr.Number, pr.Repo)
+			if err := g.mergeDevelopPR(pr.Repo, pr.Number); err != nil {
+				if g.handleSovereignMergePending(pr.Repo, pr.Number, err) {
+					return
+				}
+				log.Printf("webhook: direct merge after peer text approval failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+			}
+			return
+		}
 		log.Printf("webhook: peer review text signaled approval for PR #%d on %s; dispatching second-pass without waiting for review webhook", pr.Number, pr.Repo)
 		g.dispatchSecondPassReview(pr)
 	}
@@ -1135,9 +1002,30 @@ func (g *gateway) dispatchSecondPassReview(pr webhookPR) {
 	if looksApproved(reviewText) {
 		log.Printf("webhook: second-pass review text signaled approval for PR #%d on %s via %s; merging without waiting for review webhook", pr.Number, pr.Repo, reviewer.Name)
 		if err := g.mergeDevelopPR(pr.Repo, pr.Number); err != nil {
+			if g.handleSovereignMergePending(pr.Repo, pr.Number, err) {
+				return
+			}
 			log.Printf("webhook: direct merge after second-pass text approval failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
 		}
 	}
+}
+
+func (g *gateway) handleSovereignMergePending(repo string, prNumber int64, err error) bool {
+	msg := err.Error()
+	if !strings.Contains(msg, "403") && !strings.Contains(msg, "405") {
+		return false
+	}
+	log.Printf("webhook: PR #%d on %s approved — awaiting Sovereign merge", prNumber, repo)
+	g.sendDiscordWebhookNotification(
+		"Awaiting Sovereign",
+		fmt.Sprintf("PR #%d on %s is approved and awaiting Sovereign merge.", prNumber, repo),
+		16776960,
+		[]discordField{
+			{Name: "Repo", Value: repo, Inline: true},
+			{Name: "PR", Value: fmt.Sprintf("#%d", prNumber), Inline: true},
+		},
+	)
+	return true
 }
 
 func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
