@@ -147,10 +147,36 @@ jobs:
             docker push $REGISTRY/valhalla-hirdforge:latest
           fi
           docker push $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
+  build-astgraph:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-astgraph && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-astgraph
+      - name: Build and push astgraph
+        run: |
+          cd /src-astgraph
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(cmd/astgraph/|go\.mod$|go\.sum$|Dockerfile\.astgraph$)'; then
+            if docker pull $REGISTRY/valhalla-astgraph:latest 2>/dev/null; then
+              docker tag $REGISTRY/valhalla-astgraph:latest $REGISTRY/valhalla-astgraph:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.astgraph -t $REGISTRY/valhalla-astgraph:latest -t $REGISTRY/valhalla-astgraph:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-astgraph:latest
+            fi
+          else
+            docker build -f Dockerfile.astgraph -t $REGISTRY/valhalla-astgraph:latest -t $REGISTRY/valhalla-astgraph:sha-$SHA_SHORT .
+            docker push $REGISTRY/valhalla-astgraph:latest
+          fi
+          docker push $REGISTRY/valhalla-astgraph:sha-$SHA_SHORT
   update-infra:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox, build-hirdforge]
+    needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox, build-hirdforge, build-astgraph]
     steps:
       - name: Install tools
         run: apk add --no-cache curl jq python3
