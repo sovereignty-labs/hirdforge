@@ -67,6 +67,7 @@ type gatewayMCPServer struct {
 	token      string
 	giteaToken string
 	httpClient *http.Client
+	gateway    *gateway
 	mux        *http.ServeMux
 	tools      map[string]mcpToolHandler
 	sessions   *mcpSessionStore
@@ -104,11 +105,12 @@ func (s *mcpSessionStore) touch(id string) bool {
 	return true
 }
 
-func registerGatewayMCP(mux *http.ServeMux) {
+func registerGatewayMCP(mux *http.ServeMux, gw *gateway) {
 	server := &gatewayMCPServer{
 		token:      strings.TrimSpace(os.Getenv("MCP_SOVEREIGN_TOKEN")),
 		giteaToken: strings.TrimSpace(os.Getenv("GITEA_TOKEN")),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		gateway:    gw,
 		mux:        mux,
 		tools:      map[string]mcpToolHandler{},
 		sessions:   newMCPSessionStore(),
@@ -335,6 +337,14 @@ func (s *gatewayMCPServer) registerTools() {
 		},
 		WriteTier: "read",
 		Handler: func(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
+			if s.gateway != nil {
+				s.gateway.reposMu.RLock()
+				repos := append([]string(nil), s.gateway.repos...)
+				s.gateway.reposMu.RUnlock()
+				if len(repos) == 0 {
+					s.gateway.refreshRepos()
+				}
+			}
 			return s.invokeLocalJSON(ctx, http.MethodGet, "/api/v1/gitea/prs", nil)
 		},
 	}
