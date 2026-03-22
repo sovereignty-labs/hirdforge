@@ -2670,34 +2670,36 @@ func fetchIntuitiveContext(memoryURL, agentName, messageContent string) string {
 	if len(query) > 500 {
 		query = query[:500]
 	}
-	body, err := json.Marshal(map[string]interface{}{"query": query, "agent": agentName, "n_results": 5})
-	if err != nil {
-		return ""
+	agentResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": agentName, "n_results": 5})
+	warbandResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": "warband", "n_results": 5})
+	merged := append([]intuitiveResult{}, agentResults...)
+	seenPrefixes := make([]string, 0, len(agentResults))
+	for _, r := range agentResults {
+		if prefix := intuitiveContentPrefix(r.Content); prefix != "" {
+			seenPrefixes = append(seenPrefixes, prefix)
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
-	if err != nil {
-		return ""
+	for _, r := range warbandResults {
+		prefix := intuitiveContentPrefix(r.Content)
+		if prefix != "" {
+			duplicate := false
+			for _, existing := range seenPrefixes {
+				if prefix == existing {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+		}
+		merged = append(merged, r)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return ""
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ""
-	}
-	var result struct {
-		Results []struct {
-			Content    string  `json:"content"`
-			Similarity float64 `json:"similarity"`
-		} `json:"results"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return ""
-	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		return merged[i].Similarity > merged[j].Similarity
+	})
 	var lines []string
-	for _, r := range result.Results {
+	for _, r := range merged {
 		if r.Similarity < 0.55 {
 			continue
 		}
@@ -2717,6 +2719,59 @@ func fetchIntuitiveContext(memoryURL, agentName, messageContent string) string {
 		return ""
 	}
 	return "[INTUITION] Relevant past experience:\n" + strings.Join(lines, "\n")
+}
+
+type intuitiveResult struct {
+	Content    string
+	Similarity float64
+}
+
+func querySeidr(ctx context.Context, memoryURL string, payload map[string]interface{}) []intuitiveResult {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	var result struct {
+		Results []struct {
+			Content    string  `json:"content"`
+			Similarity float64 `json:"similarity"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+	out := make([]intuitiveResult, 0, len(result.Results))
+	for _, r := range result.Results {
+		out = append(out, intuitiveResult{
+			Content:    r.Content,
+			Similarity: r.Similarity,
+		})
+	}
+	return out
+}
+
+func intuitiveContentPrefix(content string) string {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return ""
+	}
+	if len(content) > 50 {
+		return content[:50]
+	}
+	return content
 }
 
 func validateContextMemoriesAsync(memoryURL, sessionID, outcome string) {
