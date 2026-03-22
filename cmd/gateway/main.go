@@ -42,6 +42,7 @@ var dashboardHTML string
 type Agent struct {
 	Name           string   `json:"name"`
 	URL            string   `json:"url"`
+	Role           string   `json:"role"`
 	Healthy        bool     `json:"healthy"`
 	Model          string   `json:"model"`
 	Tools          []string `json:"tools"`
@@ -304,12 +305,12 @@ type gateway struct {
 	arMu              sync.RWMutex
 	activeRequests    map[string]*ActiveRequest
 	webhookDedup      sync.Map
+	secondPassCounter uint64
 	injectionMu       sync.Mutex
 	injections        map[string][]InjectionMessage // keyed by agent name
 	pausedAgents      map[string]bool
 	syncMu            sync.Mutex
 	webhookSecret     string
-	reviewAgent       string
 	taskRepo          string
 	giteaURL          string
 	giteaToken        string
@@ -408,6 +409,14 @@ type k8sState struct {
 
 func die(msg string, err error) { log.Fatalf("%s: %v", msg, err) }
 
+var validAgentRoles = map[string]bool{
+	"builder":     true,
+	"reviewer":    true,
+	"coordinator": true,
+	"assistant":   true,
+	"specialist":  true,
+}
+
 func parseAgents(raw string) (map[string]*Agent, []string, error) {
 	out := map[string]*Agent{}
 	order := []string{}
@@ -420,11 +429,20 @@ func parseAgents(raw string) (map[string]*Agent, []string, error) {
 		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(url) == "" {
 			return nil, nil, fmt.Errorf("invalid agent entry %q", part)
 		}
-		name, url = strings.TrimSpace(name), strings.TrimRight(strings.TrimSpace(url), "/")
+		name, url = strings.TrimSpace(name), strings.TrimSpace(url)
+		role := ""
+		if idx := strings.LastIndex(url, ":"); idx > 0 {
+			suffix := strings.TrimSpace(url[idx+1:])
+			if validAgentRoles[suffix] {
+				role = suffix
+				url = strings.TrimSpace(url[:idx])
+			}
+		}
+		url = strings.TrimRight(url, "/")
 		if _, exists := out[name]; exists {
 			return nil, nil, fmt.Errorf("duplicate agent name %q", name)
 		}
-		out[name] = &Agent{Name: name, URL: url}
+		out[name] = &Agent{Name: name, URL: url, Role: role}
 		order = append(order, name)
 	}
 	if len(out) == 0 {
@@ -1932,14 +1950,13 @@ func sendDiscordApprovalWebhook(webhookURL string, item approvalQueueItem) error
 
 func main() {
 	port := flag.String("port", "8080", "HTTP port")
-	agentsFlag := flag.String("agents", "", "comma-separated name=url agent list")
+	agentsFlag := flag.String("agents", "", "comma-separated name=url[:role] agent list")
 	giteaURL := flag.String("gitea-url", "", "Gitea base URL")
 	giteaToken := flag.String("gitea-token", "", "Gitea API token (optional)")
 	giteaRepo := flag.String("gitea-repo", "gitea_admin/project_valhalla", "Gitea repo in owner/name format")
 	lockboxURL := flag.String("lockbox-url", "", "Lockbox base URL for approval queue proxy")
 	discordWebhookURL := flag.String("discord-webhook-url", "", "Discord webhook URL for new approval notifications")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for Gitea webhook validation (optional)")
-	reviewAgentFlag := flag.String("review-agent", "freya", "Agent to dispatch for PR reviews")
 	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
 	seidrURLFlag := flag.String("seidr-url", "http://seidr.valhalla.svc:8082", "Seidr memory service URL")
 	flag.Parse()
@@ -1978,7 +1995,6 @@ func main() {
 		injections:        map[string][]InjectionMessage{},
 		pausedAgents:      map[string]bool{},
 		webhookSecret:     strings.TrimSpace(*webhookSecret),
-		reviewAgent:       strings.TrimSpace(*reviewAgentFlag),
 		taskRepo:          strings.TrimSpace(*taskRepoFlag),
 		giteaURL:          strings.TrimSpace(*giteaURL),
 		giteaToken:        resolveGatewayGiteaToken(*giteaToken),
