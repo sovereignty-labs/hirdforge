@@ -337,6 +337,34 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		return
 	}
 	log.Printf("webhook: merged PR repo=%s number=%d", pr.Repo, pr.Number)
+	if owner, repoName, ok := splitFullRepoName(pr.Repo); ok {
+		go func() {
+			giteaClient := &http.Client{Timeout: 5 * time.Second}
+			filesPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/files", url.PathEscape(owner), url.PathEscape(repoName), pr.Number)
+			var files []map[string]interface{}
+			status, _, err := giteaGetJSONWithStatus(giteaClient, g.giteaURL, g.giteaToken, filesPath, &files)
+			if err != nil || status < 200 || status >= 300 {
+				return
+			}
+			paths := make([]string, 0, len(files))
+			for _, file := range files {
+				filename := strings.TrimSpace(asString(file["filename"]))
+				if filename != "" {
+					paths = append(paths, filename)
+				}
+			}
+			filesList := strings.Join(paths, ", ")
+			if len(filesList) > 500 {
+				filesList = filesList[:500]
+			}
+			seidrRememberAsync(
+				g.seidrURL,
+				"warband",
+				truncateWebhookMemory(fmt.Sprintf("WORKFLOW: PR #%d on %s by %s. Title: %s. Files: %s", pr.Number, pr.Repo, pr.User, pr.Title, filesList), 1000),
+				"workflow",
+			)
+		}()
+	}
 	if matches := webhookTaskRefRE.FindStringSubmatch(pr.Body); len(matches) == 2 {
 		log.Printf("webhook: merged PR #%d references task kit/hirdforge-tasks#%s", pr.Number, matches[1])
 		if taskNumber, err := parseWebhookTaskNumber(matches[1]); err == nil {
@@ -1216,6 +1244,14 @@ func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 		repoName,
 		review.PRHead,
 	)
+	if body := strings.TrimSpace(review.ReviewBody); len(body) > 20 {
+		seidrRememberAsync(
+			g.seidrURL,
+			"warband",
+			truncateWebhookMemory(fmt.Sprintf("REVIEW_LESSON: Reviewer flagged issue on PR #%d (%s). Feedback: %s. File context: branch %s", review.PRNumber, review.Repo, body, review.PRHead), 1000),
+			"review_lesson",
+		)
+	}
 	sessionID := fmt.Sprintf("webhook-review-fix-%s-%d", sanitizeWebhookToken(review.Repo), review.PRNumber)
 	payload, err := json.Marshal(map[string]string{
 		"content":    fixMsg,
@@ -1247,6 +1283,39 @@ func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 	}
 	log.Printf("webhook: queued %s-phase fix request for PR #%d on %s to builder %s after review by %s", phase, review.PRNumber, review.Repo, builder, review.Reviewer)
 	g.addEvent("webhook_review_fix", builder, fmt.Sprintf("Queued %s-phase fix request for PR #%d on %s", phase, review.PRNumber, review.Repo))
+}
+
+func truncateWebhookMemory(content string, max int) string {
+	content = strings.TrimSpace(content)
+	if max <= 0 || len(content) <= max {
+		return content
+	}
+	return content[:max]
+}
+
+func seidrRememberAsync(seidrURL, agentName, content, memoryType string) {
+	if strings.TrimSpace(seidrURL) == "" || strings.TrimSpace(content) == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		payload, _ := json.Marshal(map[string]interface{}{
+			"agent_name": agentName,
+			"content":    content,
+			"type":       memoryType,
+		})
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(seidrURL, "/")+"/remember", bytes.NewReader(payload))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		resp.Body.Close()
+	}()
 }
 
 func (g *gateway) dispatchTaskToAgent(agentName, agentURL string, task webhookIssue, content, sessionID string) error {
