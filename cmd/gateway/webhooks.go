@@ -299,7 +299,7 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		repoName = strings.TrimSpace(pr.Repo)
 	}
 	reviewMsg := fmt.Sprintf(
-		"Review PR #%d on %s: %q. Clone the repo if not already cloned, then run git fetch origin and git diff origin/develop...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Assess code quality, correctness, and style. Then post a review comment on the PR using gitea action=create-comment owner=%s repo=%s issue=%d with your assessment. Be concise - 3-5 sentences max.",
+		"Review PR #%d on %s: %q. Clone the repo if not already cloned, then run git fetch origin and git diff origin/main...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Assess code quality, correctness, and style. Then post a review comment on the PR using gitea action=create-comment owner=%s repo=%s issue=%d with your assessment. Be concise - 3-5 sentences max.",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
@@ -912,7 +912,7 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 		repoName = strings.TrimSpace(pr.Repo)
 	}
 	prompt := fmt.Sprintf(
-		"Review PR #%d on %s: %q. Clone the repo if not already cloned, then run git fetch origin and git diff origin/develop...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Assess correctness, code quality, and style. Submit a formal PR review using gitea action=create-review owner=%s repo=%s index=%d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
+		"Review PR #%d on %s: %q. Clone the repo if not already cloned, then run git fetch origin and git diff origin/main...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Assess correctness, code quality, and style. Submit a formal PR review using gitea action=create-review owner=%s repo=%s index=%d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
@@ -1002,7 +1002,7 @@ func (g *gateway) dispatchSecondPassReview(pr webhookPR) {
 		repoName = strings.TrimSpace(pr.Repo)
 	}
 	prompt := fmt.Sprintf(
-		"Peer review has approved PR #%d on %s: %q. Perform final review. Clone the repo if not already cloned, then run git fetch origin and git diff origin/develop...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Submit a formal PR review using gitea action=create-review owner=%s repo=%s index=%d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
+		"Peer review has approved PR #%d on %s: %q. Perform final review. Clone the repo if not already cloned, then run git fetch origin and git diff origin/main...%s to review the changes. Alternatively try gitea action=list-pr-files owner=%s repo=%s index=%d if available. Submit a formal PR review using gitea action=create-review owner=%s repo=%s index=%d body with your concise assessment and state APPROVED or REQUEST_CHANGES.",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
