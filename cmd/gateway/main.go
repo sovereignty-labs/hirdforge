@@ -285,6 +285,8 @@ type gateway struct {
 	mu                sync.RWMutex
 	agents            map[string]*Agent
 	order             []string
+	reposMu           sync.RWMutex
+	repos             []string
 	prReviewMu        sync.RWMutex
 	prReviewState     map[string]prReviewState
 	dispatchedTasksMu sync.Mutex
@@ -1871,6 +1873,54 @@ func shortSHA(in string) string {
 	return in
 }
 
+func (g *gateway) refreshRepos() {
+	if strings.TrimSpace(g.giteaURL) == "" || strings.TrimSpace(g.giteaToken) == "" {
+		return
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	all := make([]map[string]interface{}, 0, 100)
+	for _, path := range []string{
+		"/api/v1/user/repos?limit=50",
+		"/api/v1/orgs/gitea_admin/repos?limit=50",
+	} {
+		var repos []map[string]interface{}
+		status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, path, &repos)
+		if err != nil {
+			log.Printf("gitea repos: discovery failed for %s: %v", path, err)
+			continue
+		}
+		if status < 200 || status >= 300 {
+			log.Printf("gitea repos: discovery returned %d for %s: %s", status, path, strings.TrimSpace(string(body)))
+			continue
+		}
+		all = append(all, repos...)
+	}
+	if len(all) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(all))
+	repos := make([]string, 0, len(all))
+	for _, repo := range all {
+		fullName := strings.TrimSpace(asString(repo["full_name"]))
+		if fullName == "" {
+			continue
+		}
+		if _, ok := seen[fullName]; ok {
+			continue
+		}
+		seen[fullName] = struct{}{}
+		repos = append(repos, fullName)
+	}
+	sort.Strings(repos)
+
+	g.reposMu.Lock()
+	g.repos = repos
+	g.reposMu.Unlock()
+	log.Printf("gitea repos: discovered %v", repos)
+}
+
 func summarizeApprovalParams(params map[string]interface{}) string {
 	if len(params) == 0 {
 		return "(no params)"
@@ -1984,6 +2034,7 @@ func main() {
 	gw := &gateway{
 		agents:            agents,
 		order:             order,
+		repos:             []string{},
 		events:            make([]Event, 0, 200),
 		eventCap:          200,
 		k8s:               initK8s(),
@@ -2008,6 +2059,7 @@ func main() {
 		log.Printf("webhook: failed to load pipeline state: %v", err)
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
+	gw.refreshRepos()
 	gw.refreshAgentHealth()
 
 	go func() {
@@ -2015,6 +2067,13 @@ func main() {
 		defer t.Stop()
 		for range t.C {
 			gw.refreshAgentHealth()
+		}
+	}()
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			gw.refreshRepos()
 		}
 	}()
 	go gw.runTaskCompletionGuard()
@@ -3009,21 +3068,24 @@ func main() {
 			writeJSON(w, http.StatusOK, []giteaPRInfo{})
 			return
 		}
-		repos := []string{"gitea_admin/project_valhalla", "kit/valhalla-infra", "kit/hirdforge-personas", "kit/hirdforge-tasks"}
+		gw.reposMu.RLock()
+		repos := append([]string(nil), gw.repos...)
+		gw.reposMu.RUnlock()
+		if len(repos) == 0 {
+			writeJSON(w, http.StatusOK, []giteaPRInfo{})
+			return
+		}
 		type query struct {
 			repo  string
 			state string
 			limit int
 		}
-		queries := []query{
-			{repo: repos[0], state: "open", limit: 20},
-			{repo: repos[1], state: "open", limit: 20},
-			{repo: repos[2], state: "open", limit: 20},
-			{repo: repos[3], state: "open", limit: 20},
-			{repo: repos[0], state: "closed", limit: 10},
-			{repo: repos[1], state: "closed", limit: 10},
-			{repo: repos[2], state: "closed", limit: 10},
-			{repo: repos[3], state: "closed", limit: 10},
+		queries := make([]query, 0, len(repos)*2)
+		for _, repo := range repos {
+			queries = append(queries,
+				query{repo: repo, state: "open", limit: 20},
+				query{repo: repo, state: "closed", limit: 10},
+			)
 		}
 		out := make([]giteaPRInfo, 0, 60)
 		for _, q := range queries {
@@ -3894,7 +3956,7 @@ func main() {
 		}
 	})
 	gw.registerHealthEndpoints(mux)
-	registerGatewayMCP(mux)
+	registerGatewayMCP(mux, gw)
 	gw.registerWebhookHandlers(mux)
 	go func() {
 		time.Sleep(10 * time.Second)

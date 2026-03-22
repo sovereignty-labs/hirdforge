@@ -1562,10 +1562,18 @@ func (g *gateway) ensureGiteaWebhooks() {
 		log.Printf("webhook: auto-registration skipped: missing Gitea URL or token")
 		return
 	}
-	repos := []string{
-		"gitea_admin/project_valhalla",
-		"kit/valhalla-infra",
-		"kit/hirdforge-personas",
+	g.reposMu.RLock()
+	repos := append([]string(nil), g.repos...)
+	g.reposMu.RUnlock()
+	if len(repos) == 0 {
+		g.refreshRepos()
+		g.reposMu.RLock()
+		repos = append([]string(nil), g.repos...)
+		g.reposMu.RUnlock()
+	}
+	if len(repos) == 0 {
+		log.Printf("webhook: auto-registration skipped: no discovered repos")
+		return
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	for _, fullRepo := range repos {
