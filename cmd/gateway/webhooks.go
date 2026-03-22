@@ -1243,10 +1243,20 @@ func (g *gateway) prAlreadyMerged(repo string, prNumber int64) (bool, error) {
 
 func looksApproved(text string) bool {
 	lower := strings.ToLower(text)
+	if strings.Contains(lower, "request_changes") ||
+		strings.Contains(lower, "changes requested") ||
+		strings.Contains(lower, "requesting changes") {
+		return false
+	}
 	return strings.Contains(lower, "approved") ||
 		strings.Contains(lower, "approve") ||
 		strings.Contains(lower, "ready to merge") ||
-		strings.Contains(lower, "lgtm")
+		strings.Contains(lower, "lgtm") ||
+		strings.Contains(lower, "no issues") ||
+		strings.Contains(lower, "looks good") ||
+		strings.Contains(lower, "ship it") ||
+		strings.Contains(lower, "no critical") ||
+		strings.Contains(lower, "no concerns")
 }
 
 func mustJSON(v interface{}) []byte {
