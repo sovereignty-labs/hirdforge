@@ -303,6 +303,7 @@ type gateway struct {
 	lastSession       map[string]string
 	arMu              sync.RWMutex
 	activeRequests    map[string]*ActiveRequest
+	webhookDedup      sync.Map
 	injectionMu       sync.Mutex
 	injections        map[string][]InjectionMessage // keyed by agent name
 	pausedAgents      map[string]bool
@@ -1998,6 +1999,7 @@ func main() {
 		}
 	}()
 	go gw.runTaskCompletionGuard()
+	go gw.runWebhookDedupCleanup()
 
 	if gw.k8s.enabled {
 		gw.addEvent("k8s_event", "cluster", "Kubernetes integration enabled")
@@ -3909,7 +3911,7 @@ func main() {
 				resp, err := client.Do(req)
 				if err == nil {
 					if resp.StatusCode == 200 {
-						body, _ := io.ReadAll(io.LimitReader(resp.Body, 1 << 20))
+						body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 						m.Reachable = true
 						m.MetricsBytes = len(body)
 						reachable++
@@ -3920,10 +3922,10 @@ func main() {
 			metricsList = append(metricsList, m)
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"agents":        metricsList,
-			"timestamp":     time.Now().UTC().Format(time.RFC3339),
-			"total_agents":  len(agents),
-			"reachable":     reachable,
+			"agents":       metricsList,
+			"timestamp":    time.Now().UTC().Format(time.RFC3339),
+			"total_agents": len(agents),
+			"reachable":    reachable,
 		})
 	})
 
