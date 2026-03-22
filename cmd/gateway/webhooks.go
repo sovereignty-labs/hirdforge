@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,7 +25,6 @@ const (
 	webhookReadyLabelID      = 3
 	webhookInProgressLabelID = 4
 	webhookEndpointURL       = "http://gateway.valhalla.svc:8080/api/v1/webhooks/gitea"
-	freyaAgentURL            = "http://freya.valhalla.svc:8081"
 	pipelineStateConfigMap   = "gateway-pipeline-state"
 	pipelineStateNamespace   = "valhalla"
 )
@@ -286,10 +286,6 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		log.Printf("webhook: review skipped for PR #%d on %s: ci branch %s", pr.Number, pr.Repo, pr.Head)
 		return
 	}
-	if pr.User == "warband" && strings.HasPrefix(pr.Head, "freya/") {
-		log.Printf("webhook: review skipped for PR #%d on %s: self-review blocked for %s", pr.Number, pr.Repo, pr.Head)
-		return
-	}
 	owner, repoName, ok := splitFullRepoName(pr.Repo)
 	if !ok {
 		owner = ""
@@ -308,8 +304,13 @@ func (g *gateway) handleAgentPROpened(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	if _, err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, reviewMsg, "webhook_review"); err != nil {
-		log.Printf("webhook: review dispatch failed for PR #%d on %s via freya: %v", pr.Number, pr.Repo, err)
+	reviewer, ok := g.selectNonDevelopReviewer(g.builderFromBranch(pr.Head))
+	if !ok {
+		log.Printf("webhook: review skipped for PR #%d on %s: no healthy reviewer or builder available", pr.Number, pr.Repo)
+		return
+	}
+	if _, err := g.dispatchReviewToAgent(reviewer.Name, reviewer.URL, pr, reviewMsg, "webhook_review"); err != nil {
+		log.Printf("webhook: review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, reviewer.Name, err)
 	}
 }
 
@@ -907,20 +908,65 @@ func (g *gateway) createPipelineStateConfigMap(stateJSON string) error {
 	return nil
 }
 
-func (g *gateway) selectPeerReviewer(author string) (*Agent, bool) {
+func (g *gateway) selectPeerReviewer(author string, excluded ...string) (*Agent, bool) {
 	author = strings.TrimSpace(author)
+	excludedSet := map[string]bool{}
+	for _, name := range excluded {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			excludedSet[trimmed] = true
+		}
+	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	for _, name := range g.order {
-		if name == "" || name == author || name == "freya" || name == "ragnar" || name == "codex" || name == "sindri" || name == "jeeves" || name == "leif" {
+		if name == "" || name == author || excludedSet[name] {
 			continue
 		}
 		agent, ok := g.agents[name]
-		if !ok || agent == nil || !agent.Healthy {
+		if !ok || agent == nil || !agent.Healthy || agent.Role != "builder" {
 			continue
 		}
 		cp := *agent
 		return &cp, true
+	}
+	return nil, false
+}
+
+func (g *gateway) selectSecondPassReviewer(peerAgent string) (*Agent, bool) {
+	g.mu.RLock()
+	eligible := make([]*Agent, 0, len(g.order))
+	for _, name := range g.order {
+		agent, ok := g.agents[name]
+		if !ok || agent == nil || !agent.Healthy || name == strings.TrimSpace(peerAgent) {
+			continue
+		}
+		if agent.Role != "builder" && agent.Role != "reviewer" {
+			continue
+		}
+		cp := *agent
+		eligible = append(eligible, &cp)
+	}
+	g.mu.RUnlock()
+	if len(eligible) == 0 {
+		return nil, false
+	}
+	idx := int(atomic.AddUint64(&g.secondPassCounter, 1)-1) % len(eligible)
+	return eligible[idx], true
+}
+
+func (g *gateway) selectNonDevelopReviewer(author string) (*Agent, bool) {
+	author = strings.TrimSpace(author)
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	for _, role := range []string{"reviewer", "builder"} {
+		for _, name := range g.order {
+			agent, ok := g.agents[name]
+			if !ok || agent == nil || !agent.Healthy || agent.Role != role || name == author {
+				continue
+			}
+			cp := *agent
+			return &cp, true
+		}
 	}
 	return nil, false
 }
@@ -1004,7 +1050,7 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 	}
 	if err != nil {
 		log.Printf("webhook: peer review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, peer.Name, err)
-		retryPeer, retryOK := g.selectPeerReviewer(peer.Name)
+		retryPeer, retryOK := g.selectPeerReviewer(author, peer.Name)
 		if !retryOK {
 			g.clearPRReviewState(key)
 			return
@@ -1038,12 +1084,23 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 		}
 		state.PeerReviewed = true
 		g.setPRReviewState(key, state)
-		log.Printf("webhook: peer review text signaled approval for PR #%d on %s; dispatching freya without waiting for review webhook", pr.Number, pr.Repo)
-		g.dispatchFreyaApprovalReview(pr)
+		log.Printf("webhook: peer review text signaled approval for PR #%d on %s; dispatching second-pass without waiting for review webhook", pr.Number, pr.Repo)
+		g.dispatchSecondPassReview(pr)
 	}
 }
 
-func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
+func (g *gateway) dispatchSecondPassReview(pr webhookPR) {
+	key := g.prReviewKey(pr.Repo, pr.Number)
+	state, ok := g.getPRReviewState(key)
+	if !ok {
+		log.Printf("webhook: second-pass review skipped for PR #%d on %s: no pipeline state", pr.Number, pr.Repo)
+		return
+	}
+	reviewer, ok := g.selectSecondPassReviewer(state.PeerAgent)
+	if !ok {
+		log.Printf("webhook: second-pass review skipped for PR #%d on %s: no healthy builder/reviewer available", pr.Number, pr.Repo)
+		return
+	}
 	owner, repoName, ok := splitFullRepoName(pr.Repo)
 	if !ok {
 		owner = ""
@@ -1062,23 +1119,23 @@ func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
 		repoName,
 		pr.Number,
 	)
-	reviewText, err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review")
+	reviewText, err := g.dispatchReviewToAgent(reviewer.Name, reviewer.URL, pr, prompt, "webhook_second_pass_review")
 	if strings.Contains(strings.ToLower(reviewText), "429") {
-		log.Printf("webhook: freya review hit 429 for PR #%d on %s; retrying once after 45s", pr.Number, pr.Repo)
+		log.Printf("webhook: second-pass review hit 429 for PR #%d on %s via %s; retrying once after 45s", pr.Number, pr.Repo, reviewer.Name)
 		time.Sleep(45 * time.Second)
-		reviewText, err = g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review")
+		reviewText, err = g.dispatchReviewToAgent(reviewer.Name, reviewer.URL, pr, prompt, "webhook_second_pass_review")
 		if strings.Contains(strings.ToLower(reviewText), "429") {
-			err = fmt.Errorf("freya review response contained 429 after retry")
+			err = fmt.Errorf("second-pass review response contained 429 after retry")
 		}
 	}
 	if err != nil {
-		log.Printf("webhook: freya review dispatch failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+		log.Printf("webhook: second-pass review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, reviewer.Name, err)
 		return
 	}
 	if looksApproved(reviewText) {
-		log.Printf("webhook: freya review text signaled approval for PR #%d on %s; merging without waiting for review webhook", pr.Number, pr.Repo)
+		log.Printf("webhook: second-pass review text signaled approval for PR #%d on %s via %s; merging without waiting for review webhook", pr.Number, pr.Repo, reviewer.Name)
 		if err := g.mergeDevelopPR(pr.Repo, pr.Number); err != nil {
-			log.Printf("webhook: direct merge after freya text approval failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
+			log.Printf("webhook: direct merge after second-pass text approval failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
 		}
 	}
 }
@@ -1113,13 +1170,13 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		}
 		state.PeerReviewed = true
 		g.setPRReviewState(key, state)
-		log.Printf("webhook: peer review approved for PR #%d on %s by %s; dispatching freya", review.PRNumber, review.Repo, review.Reviewer)
-		g.dispatchFreyaApprovalReview(pr)
+		log.Printf("webhook: peer review approved for PR #%d on %s by %s; dispatching second-pass", review.PRNumber, review.Repo, review.Reviewer)
+		g.dispatchSecondPassReview(pr)
 		return
 	}
 
 	if review.Reviewer != "warband_review" {
-		log.Printf("webhook: second approval ignored for PR #%d on %s: expected freya approval via warband_review, got %s", review.PRNumber, review.Repo, review.Reviewer)
+		log.Printf("webhook: second approval ignored for PR #%d on %s: expected second-pass approval via warband_review, got %s", review.PRNumber, review.Repo, review.Reviewer)
 		return
 	}
 
@@ -1127,8 +1184,8 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		log.Printf("webhook: merge failed for PR #%d on %s: %v", review.PRNumber, review.Repo, err)
 		return
 	}
-	log.Printf("webhook: merged PR #%d on %s after peer and freya approvals", review.PRNumber, review.Repo)
-	g.addEvent("webhook_pr_merged", "freya", fmt.Sprintf("Merged PR #%d on %s", review.PRNumber, review.Repo))
+	log.Printf("webhook: merged PR #%d on %s after peer and second-pass approvals", review.PRNumber, review.Repo)
+	g.addEvent("webhook_pr_merged", "second-pass", fmt.Sprintf("Merged PR #%d on %s", review.PRNumber, review.Repo))
 }
 
 func (g *gateway) mergeDevelopPR(repo string, prNumber int64) error {
@@ -1216,7 +1273,7 @@ func (g *gateway) handleReviewChangesRequested(review webhookPRReview) {
 	phase := "peer"
 	if hasState {
 		if state.PeerReviewed {
-			phase = "freya"
+			phase = "second-pass"
 		}
 	} else {
 		phase = "unknown"
@@ -1472,11 +1529,11 @@ func (g *gateway) selectAgentForTaskExcluding(task *dispatchedTask, failed []str
 		return agentName, reason
 	}
 	for _, candidate := range g.order {
-		if excluded[candidate] || bifrostExcluded[candidate] {
+		if excluded[candidate] {
 			continue
 		}
 		agent, ok := g.getAgent(candidate)
-		if ok && agent.Healthy {
+		if ok && agent.Healthy && agent.Role == "builder" {
 			return candidate, "rotation fallback: healthy agent not in failed set"
 		}
 	}
@@ -1777,12 +1834,12 @@ func (g *gateway) pickHealthyTaskAgent(tierName, preferred string) (string, bool
 	if strings.TrimSpace(tierName) != "autonomous" {
 		return "", false
 	}
-	for _, candidate := range []string{"val", "leif", "chuck", "freya"} {
+	for _, candidate := range g.order {
 		if candidate == strings.TrimSpace(preferred) {
 			continue
 		}
 		agent, ok := g.getAgent(candidate)
-		if ok && agent.Healthy {
+		if ok && agent.Healthy && agent.Role == "builder" {
 			return candidate, true
 		}
 	}

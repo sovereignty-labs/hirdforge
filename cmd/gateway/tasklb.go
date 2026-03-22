@@ -25,15 +25,6 @@ type bifrostResult struct {
 	Reason string
 }
 
-var bifrostExcluded = map[string]bool{
-	"orm":    true,
-	"knut":   true,
-	"ragnar": true,
-	"jeeves": true,
-	"sindri": true,
-	"codex":  true,
-}
-
 func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResult {
 	labelAgent := ""
 	tierName := ""
@@ -65,8 +56,8 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResul
 		if name == "" {
 			continue
 		}
-		if bifrostExcluded[name] {
-			log.Printf("bifrost: excluded %s from routing", name)
+		if agent.Role != "builder" {
+			log.Printf("bifrost: excluded %s from routing due to role %q", name, agent.Role)
 			continue
 		}
 		if !agent.Healthy {
