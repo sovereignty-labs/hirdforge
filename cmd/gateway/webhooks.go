@@ -186,6 +186,12 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		User:    strings.TrimSpace(payload.PullRequest.User.Login),
 		Merged:  payload.PullRequest.Merged,
 	}
+	dedupKey := fmt.Sprintf("%s:%s:%s:%d", giteaEvent, strings.TrimSpace(payload.Action), repo, pr.Number)
+	if g.shouldSkipWebhookEvent(dedupKey) {
+		log.Printf("webhook: dedup skipped %s", dedupKey)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+		return
+	}
 
 	if giteaEvent == "pull_request" {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
@@ -987,6 +993,14 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 		pr.Number,
 	)
 	reviewText, err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review")
+	if strings.Contains(strings.ToLower(reviewText), "429") {
+		log.Printf("webhook: peer review hit 429 for PR #%d on %s via %s; retrying once after 30s", pr.Number, pr.Repo, peer.Name)
+		time.Sleep(30 * time.Second)
+		reviewText, err = g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review")
+		if strings.Contains(strings.ToLower(reviewText), "429") {
+			err = fmt.Errorf("peer review response contained 429 after retry")
+		}
+	}
 	if err != nil {
 		log.Printf("webhook: peer review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, peer.Name, err)
 		retryPeer, retryOK := g.selectPeerReviewer(peer.Name)
@@ -1000,6 +1014,14 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 			g.setPRReviewState(key, state)
 		}
 		reviewText, err = g.dispatchReviewToAgent(retryPeer.Name, retryPeer.URL, pr, prompt, "webhook_peer_review")
+		if strings.Contains(strings.ToLower(reviewText), "429") {
+			log.Printf("webhook: peer review retry hit 429 for PR #%d on %s via %s; retrying once after 30s", pr.Number, pr.Repo, retryPeer.Name)
+			time.Sleep(30 * time.Second)
+			reviewText, err = g.dispatchReviewToAgent(retryPeer.Name, retryPeer.URL, pr, prompt, "webhook_peer_review")
+			if strings.Contains(strings.ToLower(reviewText), "429") {
+				err = fmt.Errorf("peer review retry response contained 429 after retry")
+			}
+		}
 		if err != nil {
 			g.clearPRReviewState(key)
 			log.Printf("webhook: peer review retry failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, retryPeer.Name, err)
@@ -1040,6 +1062,14 @@ func (g *gateway) dispatchFreyaApprovalReview(pr webhookPR) {
 		pr.Number,
 	)
 	reviewText, err := g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review")
+	if strings.Contains(strings.ToLower(reviewText), "429") {
+		log.Printf("webhook: freya review hit 429 for PR #%d on %s; retrying once after 45s", pr.Number, pr.Repo)
+		time.Sleep(45 * time.Second)
+		reviewText, err = g.dispatchReviewToAgent("freya", freyaAgentURL, pr, prompt, "webhook_freya_review")
+		if strings.Contains(strings.ToLower(reviewText), "429") {
+			err = fmt.Errorf("freya review response contained 429 after retry")
+		}
+	}
 	if err != nil {
 		log.Printf("webhook: freya review dispatch failed for PR #%d on %s: %v", pr.Number, pr.Repo, err)
 		return
@@ -1295,6 +1325,35 @@ func (g *gateway) runTaskCompletionGuard() {
 	defer ticker.Stop()
 	for range ticker.C {
 		g.checkDispatchedTasks()
+	}
+}
+
+func (g *gateway) shouldSkipWebhookEvent(key string) bool {
+	if key == "" {
+		return false
+	}
+	now := time.Now()
+	if existing, ok := g.webhookDedup.Load(key); ok {
+		if ts, ok := existing.(time.Time); ok && now.Sub(ts) < 2*time.Minute {
+			return true
+		}
+	}
+	g.webhookDedup.Store(key, now)
+	return false
+}
+
+func (g *gateway) runWebhookDedupCleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		cutoff := time.Now().Add(-2 * time.Minute)
+		g.webhookDedup.Range(func(key, value interface{}) bool {
+			ts, ok := value.(time.Time)
+			if !ok || ts.Before(cutoff) {
+				g.webhookDedup.Delete(key)
+			}
+			return true
+		})
 	}
 }
 
