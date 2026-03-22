@@ -906,7 +906,7 @@ func (g *gateway) selectPeerReviewer(author string) (*Agent, bool) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	for _, name := range g.order {
-		if name == "" || name == author || name == "freya" || name == "ragnar" {
+		if name == "" || name == author || name == "freya" || name == "ragnar" || name == "codex" || name == "sindri" || name == "jeeves" || name == "leif" {
 			continue
 		}
 		agent, ok := g.agents[name]
@@ -988,9 +988,24 @@ func (g *gateway) dispatchPeerReview(pr webhookPR) {
 	)
 	reviewText, err := g.dispatchReviewToAgent(peer.Name, peer.URL, pr, prompt, "webhook_peer_review")
 	if err != nil {
-		g.clearPRReviewState(key)
 		log.Printf("webhook: peer review dispatch failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, peer.Name, err)
-		return
+		retryPeer, retryOK := g.selectPeerReviewer(peer.Name)
+		if !retryOK {
+			g.clearPRReviewState(key)
+			return
+		}
+		state, stateOK := g.getPRReviewState(key)
+		if stateOK {
+			state.PeerAgent = retryPeer.Name
+			g.setPRReviewState(key, state)
+		}
+		reviewText, err = g.dispatchReviewToAgent(retryPeer.Name, retryPeer.URL, pr, prompt, "webhook_peer_review")
+		if err != nil {
+			g.clearPRReviewState(key)
+			log.Printf("webhook: peer review retry failed for PR #%d on %s via %s: %v", pr.Number, pr.Repo, retryPeer.Name, err)
+			return
+		}
+		peer = retryPeer
 	}
 	log.Printf("webhook: queued peer review for PR #%d on %s via %s", pr.Number, pr.Repo, peer.Name)
 	if looksApproved(reviewText) {
