@@ -1,5 +1,7 @@
 package main
 
+// TaskLB — intelligent agent selection for autonomous task dispatch.
+
 import (
 	"bytes"
 	"encoding/json"
