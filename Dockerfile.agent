@@ -1,12 +1,31 @@
 # Build stage
 FROM golang:1.23-alpine AS build
 WORKDIR /src
+RUN apk add --no-cache curl tar
+# Pinned tool versions as of 2026-03-23:
+# kubectl v1.35.3, helm v4.1.3, kubeseal v0.36.1, talosctl v1.12.6
+ARG KUBECTL_VERSION=v1.35.3
+ARG HELM_VERSION=v4.1.3
+ARG KUBESEAL_VERSION=v0.36.1
+ARG TALOSCTL_VERSION=v1.12.6
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY pkg/ pkg/
 RUN go vet ./...
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-agent ./cmd/agent/
+RUN set -eux; \
+    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl; \
+    chmod +x /usr/local/bin/kubectl; \
+    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tar.gz; \
+    tar -xzf /tmp/helm.tar.gz -C /tmp; \
+    install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm; \
+    curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION#v}-linux-amd64.tar.gz" -o /tmp/kubeseal.tar.gz; \
+    tar -xzf /tmp/kubeseal.tar.gz -C /tmp kubeseal; \
+    install -m 0755 /tmp/kubeseal /usr/local/bin/kubeseal; \
+    curl -fsSL "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-amd64" -o /usr/local/bin/talosctl; \
+    chmod +x /usr/local/bin/talosctl; \
+    rm -rf /tmp/helm.tar.gz /tmp/kubeseal.tar.gz /tmp/linux-amd64 /tmp/kubeseal
 
 # Runtime stage
 FROM golang:1.23-alpine
@@ -14,6 +33,10 @@ RUN apk add --no-cache git curl jq python3 && adduser -D -u 1000 warrior
 COPY scripts/apply_patch.py /usr/local/bin/apply_patch
 RUN chmod +x /usr/local/bin/apply_patch
 COPY --from=build /valhalla-agent /usr/local/bin/valhalla-agent
+COPY --from=build /usr/local/bin/kubectl /usr/local/bin/kubectl
+COPY --from=build /usr/local/bin/helm /usr/local/bin/helm
+COPY --from=build /usr/local/bin/kubeseal /usr/local/bin/kubeseal
+COPY --from=build /usr/local/bin/talosctl /usr/local/bin/talosctl
 USER warrior
 WORKDIR /workspace
 EXPOSE 8081
