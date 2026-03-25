@@ -887,7 +887,7 @@ func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr we
 }
 
 func (g *gateway) dispatchPeerReview(pr webhookPR) {
-	// dispatchPeerReview selects a healthy peer builder and requests code review for a develop-targeted PR.
+	// dispatchPeerReview selects a healthy peer builder and requests code review for a main-targeted PR.
 	author := g.builderFromBranch(pr.Head)
 	peer, ok := g.selectPeerReviewer(author)
 	if !ok {
@@ -1076,7 +1076,7 @@ func (g *gateway) handlePRReviewApproved(review webhookPRReview) {
 		Title:  review.PRTitle,
 		Repo:   review.Repo,
 		Head:   review.PRHead,
-		Base:   "develop",
+		Base:   "main",
 	}
 
 	if !state.PeerReviewed {
