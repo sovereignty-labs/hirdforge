@@ -68,6 +68,15 @@ type taskSocketEvent struct {
 	Timestamp   string `json:"timestamp"`
 }
 
+type delegateResult struct {
+	Agent     string    `json:"agent"`
+	SessionID string    `json:"session_id"`
+	Content   string    `json:"content"`
+	Done      bool      `json:"done"`
+	Error     string    `json:"error,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type Notification struct {
 	From      string `json:"from"`
 	TaskID    string `json:"task_id"`
@@ -307,6 +316,7 @@ type gateway struct {
 	arMu              sync.RWMutex
 	activeRequests    map[string]*ActiveRequest
 	webhookDedup      sync.Map
+	delegateResults   sync.Map
 	secondPassCounter uint64
 	injectionMu       sync.Mutex
 	injections        map[string][]InjectionMessage // keyed by agent name
@@ -2078,6 +2088,19 @@ func main() {
 	}()
 	go gw.runTaskCompletionGuard()
 	go gw.runWebhookDedupCleanup()
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			cutoff := time.Now().Add(-1 * time.Hour)
+			gw.delegateResults.Range(func(key, value interface{}) bool {
+				if r, ok := value.(*delegateResult); ok && r.CreatedAt.Before(cutoff) {
+					gw.delegateResults.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
 
 	if gw.k8s.enabled {
 		gw.addEvent("k8s_event", "cluster", "Kubernetes integration enabled")
@@ -3660,8 +3683,34 @@ func main() {
 					return
 				}
 				defer uResp.Body.Close()
-				// Drain and discard the response body
-				io.Copy(io.Discard, uResp.Body)
+				// Parse SSE response and cache content for MCP retrieval
+				var contentBuf strings.Builder
+				scanner := bufio.NewScanner(uResp.Body)
+				for scanner.Scan() {
+					line := strings.TrimSpace(scanner.Text())
+					if strings.HasPrefix(line, "data:") {
+						payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+						var evt map[string]interface{}
+						if json.Unmarshal([]byte(payload), &evt) == nil {
+							typ, _ := evt["type"].(string)
+							if typ == "content" {
+								if c, ok := evt["content"].(string); ok {
+									contentBuf.WriteString(c)
+								}
+							}
+							if typ == "done" {
+								cleaned := thinkTagRE.ReplaceAllString(contentBuf.String(), "")
+								gw.delegateResults.Store(sessionID, &delegateResult{
+									Agent:     agentName,
+									SessionID: sessionID,
+									Content:   cleaned,
+									Done:      true,
+									CreatedAt: time.Now(),
+								})
+							}
+						}
+					}
+				}
 			}(in.Agent, in.Content, sessionID)
 
 			writeJSON(w, http.StatusOK, map[string]string{"status": "queued", "session_id": sessionID, "agent": in.Agent})

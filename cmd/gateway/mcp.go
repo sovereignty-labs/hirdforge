@@ -516,6 +516,32 @@ func (s *gatewayMCPServer) registerTools() {
 			return s.callGiteaJSON(ctx, http.MethodPut, path, payload)
 		},
 	}
+	s.tools["get_delegate_result"] = mcpToolHandler{
+		Name:        "get_delegate_result",
+		Description: "Retrieve the response from a previously delegated agent task by session_id.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"session_id": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"session_id"},
+		},
+		WriteTier: "read",
+		Handler: func(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+			sessionID, err := strParam(params, "session_id", true)
+			if err != nil {
+				return nil, err
+			}
+			if raw, ok := s.gateway.delegateResults.Load(sessionID); ok {
+				return raw, nil
+			}
+			return map[string]interface{}{
+				"session_id": sessionID,
+				"done":       false,
+				"content":    "",
+			}, nil
+		},
+	}
 }
 
 func (s *gatewayMCPServer) handle(w http.ResponseWriter, r *http.Request) {
