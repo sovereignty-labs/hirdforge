@@ -3711,6 +3711,30 @@ func main() {
 						}
 					}
 				}
+				// FIX 1: Check scanner error
+				if err := scanner.Err(); err != nil {
+					cleaned := thinkTagRE.ReplaceAllString(contentBuf.String(), "")
+					gw.delegateResults.Store(sessionID, &delegateResult{
+						Agent:     agentName,
+						SessionID: sessionID,
+						Content:   cleaned,
+						Done:      true,
+						Error:     err.Error(),
+						CreatedAt: time.Now(),
+					})
+				}
+				// FIX 2: Fallback for early stream termination
+				if _, loaded := gw.delegateResults.Load(sessionID); !loaded {
+					cleaned := thinkTagRE.ReplaceAllString(contentBuf.String(), "")
+					gw.delegateResults.Store(sessionID, &delegateResult{
+						Agent:     agentName,
+						SessionID: sessionID,
+						Content:   cleaned,
+						Done:      true,
+						Error:     "stream terminated before completion",
+						CreatedAt: time.Now(),
+					})
+				}
 			}(in.Agent, in.Content, sessionID)
 
 			writeJSON(w, http.StatusOK, map[string]string{"status": "queued", "session_id": sessionID, "agent": in.Agent})
