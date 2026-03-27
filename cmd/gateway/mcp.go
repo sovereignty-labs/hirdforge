@@ -473,6 +473,160 @@ func (s *gatewayMCPServer) registerTools() {
 			}, nil
 		},
 	}
+	s.tools["gitea_file_write"] = mcpToolHandler{
+		Name:        "gitea_file_write",
+		Description: "Create or update a file in a Gitea repository. For updates, provide the sha of the existing file.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"owner":    map[string]interface{}{"type": "string"},
+				"repo":     map[string]interface{}{"type": "string"},
+				"filepath": map[string]interface{}{"type": "string"},
+				"content":  map[string]interface{}{"type": "string"},
+				"message":  map[string]interface{}{"type": "string"},
+				"branch":   map[string]interface{}{"type": "string"},
+				"sha":      map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"owner", "repo", "filepath", "content", "message", "branch"},
+		},
+		WriteTier: "safe_write",
+		Handler: func(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+			owner, err := strParam(params, "owner", true)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := strParam(params, "repo", true)
+			if err != nil {
+				return nil, err
+			}
+			filepath, err := strParam(params, "filepath", true)
+			if err != nil {
+				return nil, err
+			}
+			content, err := strParam(params, "content", true)
+			if err != nil {
+				return nil, err
+			}
+			message, err := strParam(params, "message", true)
+			if err != nil {
+				return nil, err
+			}
+			branch, err := strParam(params, "branch", true)
+			if err != nil {
+				return nil, err
+			}
+			sha, err := strParam(params, "sha", false)
+			if err != nil {
+				return nil, err
+			}
+			payload := map[string]interface{}{
+				"content": base64.StdEncoding.EncodeToString([]byte(content)),
+				"message": message,
+				"branch":  branch,
+			}
+			if strings.TrimSpace(sha) != "" {
+				payload["sha"] = sha
+			}
+			path := fmt.Sprintf("/api/v1/repos/%s/%s/contents/%s", url.PathEscape(owner), url.PathEscape(repo), filepath)
+			return s.callGiteaJSON(ctx, http.MethodPost, path, payload)
+		},
+	}
+	s.tools["gitea_create_branch"] = mcpToolHandler{
+		Name:        "gitea_create_branch",
+		Description: "Create a new branch in a Gitea repository.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"owner":           map[string]interface{}{"type": "string"},
+				"repo":            map[string]interface{}{"type": "string"},
+				"branch_name":     map[string]interface{}{"type": "string"},
+				"old_branch_name": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"owner", "repo", "branch_name"},
+		},
+		WriteTier: "safe_write",
+		Handler: func(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+			owner, err := strParam(params, "owner", true)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := strParam(params, "repo", true)
+			if err != nil {
+				return nil, err
+			}
+			branchName, err := strParam(params, "branch_name", true)
+			if err != nil {
+				return nil, err
+			}
+			oldBranchName, err := strParam(params, "old_branch_name", false)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(oldBranchName) == "" {
+				oldBranchName = "main"
+			}
+			payload := map[string]interface{}{
+				"new_branch_name": branchName,
+				"old_branch_name": oldBranchName,
+			}
+			path := fmt.Sprintf("/api/v1/repos/%s/%s/branches", url.PathEscape(owner), url.PathEscape(repo))
+			return s.callGiteaJSON(ctx, http.MethodPost, path, payload)
+		},
+	}
+	s.tools["gitea_create_pr"] = mcpToolHandler{
+		Name:        "gitea_create_pr",
+		Description: "Create a pull request in a Gitea repository.",
+		InputSchema: map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"owner": map[string]interface{}{"type": "string"},
+				"repo":  map[string]interface{}{"type": "string"},
+				"title": map[string]interface{}{"type": "string"},
+				"body":  map[string]interface{}{"type": "string"},
+				"head":  map[string]interface{}{"type": "string"},
+				"base":  map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"owner", "repo", "title", "head"},
+		},
+		WriteTier: "safe_write",
+		Handler: func(ctx context.Context, params map[string]interface{}) (interface{}, error) {
+			owner, err := strParam(params, "owner", true)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := strParam(params, "repo", true)
+			if err != nil {
+				return nil, err
+			}
+			title, err := strParam(params, "title", true)
+			if err != nil {
+				return nil, err
+			}
+			body, err := strParam(params, "body", false)
+			if err != nil {
+				return nil, err
+			}
+			head, err := strParam(params, "head", true)
+			if err != nil {
+				return nil, err
+			}
+			base, err := strParam(params, "base", false)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(base) == "" {
+				base = "main"
+			}
+			payload := map[string]interface{}{
+				"title": title,
+				"body":  body,
+				"head":  head,
+				"base":  base,
+			}
+			path := fmt.Sprintf("/api/v1/repos/%s/%s/pulls", url.PathEscape(owner), url.PathEscape(repo))
+			return s.callGiteaJSON(ctx, http.MethodPost, path, payload)
+		},
+	}
 	s.tools["update_issue"] = mcpToolHandler{
 		Name:        "update_issue",
 		Description: "Update labels on a Gitea issue. Replaces all existing labels with the provided list.",
