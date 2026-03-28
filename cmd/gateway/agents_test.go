@@ -318,7 +318,7 @@ func TestEventStructMarshalUnmarshal(t *testing.T) {
 // TestCreateGitOpsAgentConfigPRURLGeneration tests URL generation
 func TestCreateGitOpsAgentConfigPRURLGeneration(t *testing.T) {
 	// Compile-time signature check only; network behavior belongs in integration tests.
-	var fn func(*http.Client, string, string, string, agentConfigureRequest) (string, error)
+	var fn func(*http.Client, string, string, string, string, agentConfigureRequest) (string, error)
 	fn = createGitOpsAgentConfigPR
 	if fn == nil {
 		t.Fatal("expected function assignment to succeed")
