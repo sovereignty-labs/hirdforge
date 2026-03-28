@@ -269,7 +269,12 @@ spec:
     spec:
       containers:
       - name: val
-        image: val:latest`
+        image: val:latest
+        args:
+        - --model=default-model
+        - --inference-url=http://default.valhalla.svc:8081
+        - --tools=exec,read
+        - --peers=val=http://val.valhalla.svc:8081`
 
 	result, lines, err := updateAgentDeploymentArgs(content, req)
 	if err != nil {
@@ -283,7 +288,7 @@ spec:
 	if !strings.Contains(result, "--inference-url='http://val.valhalla.svc:8081'") {
 		t.Fatalf("result should contain updated inference URL")
 	}
-	if !strings.Contains(result, "gpt-4o") {
+	if !strings.Contains(result, "--model='gpt-4o'") {
 		t.Fatalf("result should contain model name")
 	}
 }
