@@ -230,7 +230,7 @@ jobs:
                   continue
               text = path.read_text(encoding="utf-8")
               if text.lstrip().startswith("{"):
-                  # JSON-formatted manifests are handled by jq below.
+                  # JSON-formatted manifests should not appear in asgard-infra.
                   continue
 
               def replace(m):
@@ -244,20 +244,6 @@ jobs:
           for file in updated:
               print(f"updated: {file}")
           PY
-          # For JSON-formatted deployment files, update only the image field via jq
-          # so manually-added env vars/volumes are preserved.
-          for file in infrastructure/asgard/deployment-*.yaml infrastructure/asgard/deployment-codex.yaml; do
-            [ -f "$file" ] || continue
-            if jq empty "$file" 2>/dev/null; then
-              current_image=$(jq -r '.spec.template.spec.containers[0].image // empty' "$file")
-              if [ -n "$current_image" ] && echo "$current_image" | grep -q "valhalla-" ; then
-                img_name=$(basename "${current_image%:*}")
-                new_image="git.hirdforge.com/kit/hirdforge/$img_name:sha-$SHA_SHORT"
-                tmp_file="${file}.tmp"
-                jq --arg img "$new_image" '.spec.template.spec.containers[0].image = $img' "$file" > "$tmp_file" && mv "$tmp_file" "$file"
-              fi
-            fi
-          done
           git config user.name "CI Bot" && git config user.email "ci@valhalla.local"
           BRANCH_NAME="ci/update-images-$SHA_SHORT"
           git checkout -b $BRANCH_NAME
