@@ -19,7 +19,7 @@ var delegationHeaderRE = regexp.MustCompile(`(?im)^(TASK|ISSUE|STEPS|DONE WHEN)\
 func ValidateDelegation(input string) (DelegationFormat, error) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
-		return DelegationFormat{}, fmt.Errorf("missing TASK")
+		return DelegationFormat{}, fmt.Errorf("empty delegation content")
 	}
 
 	sections := parseDelegationSections(input)
