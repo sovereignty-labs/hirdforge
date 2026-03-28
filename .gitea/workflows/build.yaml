@@ -7,7 +7,7 @@ env:
   REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
   REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
   DOCKER_HOST: tcp://localhost:2375
-  REGISTRY: 203.0.113.26:30637/gitea_admin
+  REGISTRY: gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge
 jobs:
   build-agent:
     runs-on: ubuntu-latest
@@ -15,9 +15,9 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: rm -rf /src-agent && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-agent
+        run: rm -rf /src-agent && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-agent
       - name: Build and push agent
         run: |
           cd /src-agent
@@ -37,9 +37,9 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-gateway
+        run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-gateway
       - name: Build and push gateway
         run: |
           cd /src-gateway
@@ -59,9 +59,9 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: rm -rf /src-seidr && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-seidr
+        run: rm -rf /src-seidr && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-seidr
       - name: Build and push seidr
         run: |
           cd /src-seidr
@@ -81,9 +81,9 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: rm -rf /src-codex && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-codex
+        run: rm -rf /src-codex && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-codex
       - name: Build and push codex
         run: |
           cd /src-codex
@@ -103,9 +103,9 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: rm -rf /src-lockbox && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-lockbox
+        run: rm -rf /src-lockbox && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-lockbox
       - name: Build and push lockbox
         run: |
           cd /src-lockbox
@@ -127,9 +127,9 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: rm -rf /src-hirdforge && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-hirdforge
+        run: rm -rf /src-hirdforge && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-hirdforge
       - name: Build and push hirdforge
         run: |
           cd /src-hirdforge
@@ -153,9 +153,9 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login 203.0.113.26:30637 -u "$REGISTRY_USER" --password-stdin
+        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
       - name: Clone repository
-        run: rm -rf /src-astgraph && git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-astgraph
+        run: rm -rf /src-astgraph && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-astgraph
       - name: Build and push astgraph
         run: |
           cd /src-astgraph
@@ -183,8 +183,8 @@ jobs:
       - name: Clone repos
         run: |
           rm -rf /src-code /src-infra
-          git clone http://gitea-http.gitea.svc:3000/gitea_admin/project_valhalla.git /src-code
-          git clone http://kit:$REGISTRY_PASSWORD@gitea-http.gitea.svc:3000/kit/valhalla-infra.git /src-infra
+          git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-code
+          git clone http://kit:$REGISTRY_PASSWORD@gitea-http.gitea.svc.cluster.local:3000/kit/asgard-infra.git /src-infra
       - name: Update manifests and create PR
         run: |
           cd /src-code
@@ -200,7 +200,7 @@ jobs:
           new_tag = sys.argv[1].strip()
           root = pathlib.Path("infrastructure")
           image_re = re.compile(
-              r'^(\s*image:\s*)"?10\.0\.60\.26:30637/gitea_admin/(valhalla-[^:"\'\s]+):[^\s"\']*"?(\s*(?:#.*)?)$',
+              r'^(\s*image:\s*)"?gitea-http\.gitea\.svc\.cluster\.local:3000/kit/hirdforge/(valhalla-[^:"\'\s]+):[^\s"\']*"?(\s*(?:#.*)?)$',
               re.MULTILINE,
           )
 
@@ -226,11 +226,11 @@ jobs:
           PY
           # For JSON-formatted deployment files, update only the image field via jq
           # so manually-added env vars/volumes are preserved.
-          for file in infrastructure/valhalla/deployment-*.yaml infrastructure/valhalla/deployment-codex.yaml; do
+          for file in infrastructure/asgard/deployment-*.yaml infrastructure/asgard/deployment-codex.yaml; do
             [ -f "$file" ] || continue
             if jq empty "$file" 2>/dev/null; then
               current_image=$(jq -r '.spec.template.spec.containers[0].image // empty' "$file")
-              if [ -n "$current_image" ] && echo "$current_image" | grep -q "gitea_admin/valhalla-"; then
+              if [ -n "$current_image" ] && echo "$current_image" | grep -q "kit/hirdforge/valhalla-" ; then
                 base_image="${current_image%:*}"
                 new_image="$base_image:sha-$SHA_SHORT"
                 tmp_file="${file}.tmp"
@@ -246,4 +246,4 @@ jobs:
           # Create PR via Gitea API
           curl -s -X POST -H "Authorization: token $REGISTRY_PASSWORD" -H "Content-Type: application/json" \
             -d "{\"title\":\"ci: update container images to sha-$SHA_SHORT\",\"body\":\"Automated PR to update container image tags to latest builds\",\"head\":\"$BRANCH_NAME\",\"base\":\"main\"}" \
-            http://gitea-http.gitea.svc:3000/api/v1/repos/kit/valhalla-infra/pulls
+            http://gitea-http.gitea.svc.cluster.local:3000/api/v1/repos/kit/asgard-infra/pulls
