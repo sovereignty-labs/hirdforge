@@ -1481,6 +1481,7 @@ func updateAgentModel(k8s *k8sState, agentName, model string) error {
 	if k8s == nil || !k8s.enabled {
 		return fmt.Errorf("kubernetes integration disabled")
 	}
+	agentLabelSelector := fmt.Sprintf("%s.io/agent=%s", k8s.podNS, agentName)
 	deployPath := fmt.Sprintf("/apis/apps/v1/namespaces/%s/deployments/%s", url.PathEscape(k8s.podNS), url.PathEscape(agentName))
 	status, deploy, _, err := k8s.getJSONWithStatus(deployPath)
 	if err != nil {
@@ -1565,7 +1566,7 @@ func updateAgentModel(k8s *k8sState, agentName, model string) error {
 		}
 	}
 	podName := ""
-	if podStatus, podBody, _, err := k8s.getJSONWithStatus(fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s", url.PathEscape(k8s.podNS), url.QueryEscape("valhalla.io/agent="+agentName))); err == nil && podStatus >= 200 && podStatus < 300 {
+	if podStatus, podBody, _, err := k8s.getJSONWithStatus(fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s", url.PathEscape(k8s.podNS), url.QueryEscape(agentLabelSelector))); err == nil && podStatus >= 200 && podStatus < 300 {
 		items := asSlice(podBody["items"])
 		if len(items) > 0 {
 			podName = asString(asMap(asMap(items[0])["metadata"])["name"])
@@ -1662,9 +1663,9 @@ func updateAgentDeploymentArgs(content string, req agentConfigureRequest) (strin
 	return updated, fields, nil
 }
 
-func createGitOpsAgentConfigPR(client *http.Client, baseURL, token, agentName string, req agentConfigureRequest) (string, error) {
+func createGitOpsAgentConfigPR(client *http.Client, baseURL, token, namespace, agentName string, req agentConfigureRequest) (string, error) {
 	const repoFullName = "kit/valhalla-infra"
-	manifestPath := fmt.Sprintf("infrastructure/valhalla/deployment-%s.yaml", agentName)
+	manifestPath := fmt.Sprintf("infrastructure/%s/deployment-%s.yaml", namespace, agentName)
 
 	var contentResp giteaContentResponse
 	status, body, err := giteaGetJSONWithStatus(client, baseURL, token, fmt.Sprintf("/api/v1/repos/%s/contents/%s?ref=main", repoFullName, url.PathEscape(manifestPath)), &contentResp)
@@ -1768,7 +1769,7 @@ func truncateRunes(s string, n int) string {
 }
 
 func (k *k8sState) refreshPods() error {
-	path := "/api/v1/namespaces/valhalla/pods"
+	path := fmt.Sprintf("/api/v1/namespaces/%s/pods", url.PathEscape(k.podNS))
 	body, err := k.get(path)
 	if err != nil {
 		k.setPods(nil)
@@ -2367,7 +2368,7 @@ func main() {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "missing Gitea token"})
 				return
 			}
-			prURL, err := createGitOpsAgentConfigPR(giteaClient, *giteaURL, token, name, in)
+			prURL, err := createGitOpsAgentConfigPR(giteaClient, *giteaURL, token, gw.k8s.podNS, name, in)
 			if err != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 				return
@@ -2819,7 +2820,7 @@ func main() {
 			}
 			namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
 			if namespace == "" {
-				namespace = "valhalla"
+				namespace = gw.k8s.podNS
 			}
 			path := fmt.Sprintf(
 				"/api/v1/namespaces/%s/pods/%s/log?tailLines=%d&timestamps=true",
@@ -2890,7 +2891,7 @@ func main() {
 				http.NotFound(w, r)
 				return
 			}
-			path := fmt.Sprintf("/api/v1/namespaces/valhalla/pods/%s", url.PathEscape(podName))
+			path := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(gw.k8s.podNS), url.PathEscape(podName))
 			resp, err := gw.k8s.do(http.MethodDelete, path, nil)
 			if err != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "kubernetes request failed"})
@@ -2932,7 +2933,7 @@ func main() {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJSON(w, http.StatusOK, listCertExpiries(gw.k8s, "valhalla"))
+		writeJSON(w, http.StatusOK, listCertExpiries(gw.k8s, gw.k8s.podNS))
 	})
 	mux.HandleFunc("/api/v1/gitops/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2980,7 +2981,7 @@ func main() {
 			writeJSON(w, http.StatusOK, []K8sEventInfo{})
 			return
 		}
-		body, err := gw.k8s.get("/api/v1/namespaces/valhalla/events")
+		body, err := gw.k8s.get(fmt.Sprintf("/api/v1/namespaces/%s/events", url.PathEscape(gw.k8s.podNS)))
 		if err != nil {
 			writeJSON(w, http.StatusOK, []K8sEventInfo{})
 			return
@@ -2996,7 +2997,7 @@ func main() {
 			writeJSON(w, http.StatusOK, []PodResourceInfo{})
 			return
 		}
-		body, err := gw.k8s.get("/api/v1/namespaces/valhalla/pods")
+		body, err := gw.k8s.get(fmt.Sprintf("/api/v1/namespaces/%s/pods", url.PathEscape(gw.k8s.podNS)))
 		if err != nil {
 			writeJSON(w, http.StatusOK, []PodResourceInfo{})
 			return
