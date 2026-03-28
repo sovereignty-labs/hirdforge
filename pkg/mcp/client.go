@@ -132,7 +132,7 @@ func (c *Client) Initialize() error {
 			"protocolVersion": "2025-03-26",
 			"capabilities":    map[string]interface{}{},
 			"clientInfo": map[string]interface{}{
-				"name":    "valhalla-agent",
+				"name":    "hirdforge-agent",
 				"version": "0.1.0",
 			},
 		},

@@ -86,7 +86,7 @@ func (gw *gateway) registerHealthEndpoints(mux *http.ServeMux) {
 			return
 		}
 		client := &http.Client{Timeout: 10 * time.Second}
-		repos := []string{"gitea_admin/project_valhalla", "kit/valhalla-infra", "kit/hirdforge-personas", "kit/hirdforge-tasks"}
+		repos := []string{"gitea_admin/project_valhalla", "kit/asgard-infra", "kit/hirdforge-personas", "kit/hirdforge-tasks"}
 		out := prsHealthResponse{Repos: make([]repoPRHealth, 0, len(repos))}
 		for _, repo := range repos {
 			var openPRs []map[string]interface{}
@@ -200,7 +200,7 @@ func (gw *gateway) registerHealthEndpoints(mux *http.ServeMux) {
 			return
 		}
 		client := &http.Client{Timeout: 10 * time.Second}
-		repos := []string{"gitea_admin/project_valhalla", "kit/valhalla-infra", "kit/hirdforge-personas", "kit/hirdforge-tasks"}
+		repos := []string{"gitea_admin/project_valhalla", "kit/asgard-infra", "kit/hirdforge-personas", "kit/hirdforge-tasks"}
 		out := branchesHealthResponse{Repos: make([]branchesHealthRepo, 0, len(repos))}
 		for _, repo := range repos {
 			path := "/api/v1/repos/" + repo + "/branches?limit=250"
