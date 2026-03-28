@@ -808,18 +808,18 @@ func initK8s() *k8sState {
 	ns, nsErr := os.ReadFile(nsPath)
 	if tokErr != nil || caErr != nil || nsErr != nil {
 		log.Printf("k8s integration disabled (serviceaccount files not found)")
-		return &k8sState{enabled: false, podNS: "valhalla"}
+		return &k8sState{enabled: false, podNS: "asgard"}
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(ca) {
 		log.Printf("k8s integration disabled (invalid CA cert)")
-		return &k8sState{enabled: false, podNS: "valhalla"}
+		return &k8sState{enabled: false, podNS: "asgard"}
 	}
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
 	client := &http.Client{Timeout: 5 * time.Second, Transport: tr}
 	namespace := strings.TrimSpace(string(ns))
 	if namespace == "" {
-		namespace = "valhalla"
+		namespace = "asgard"
 	}
 	return &k8sState{enabled: true, client: client, token: strings.TrimSpace(string(tok)), podNS: namespace}
 }
@@ -2022,7 +2022,7 @@ func main() {
 	discordWebhookURL := flag.String("discord-webhook-url", "", "Discord webhook URL for new approval notifications")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for Gitea webhook validation (optional)")
 	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
-	seidrURLFlag := flag.String("seidr-url", "http://seidr.valhalla.svc:8082", "Seidr memory service URL")
+	seidrURLFlag := flag.String("seidr-url", "http://seidr.asgard.svc:8082", "Seidr memory service URL")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
