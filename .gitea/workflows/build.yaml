@@ -24,8 +24,12 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
           if ! echo "$CHANGED" | grep -Eq '^(cmd/agent/|pkg/|go\.mod$|go\.sum$|Dockerfile\.agent$)'; then
-            docker pull $REGISTRY/valhalla-agent:latest
-            docker tag $REGISTRY/valhalla-agent:latest $REGISTRY/valhalla-agent:sha-$SHA_SHORT
+            if docker pull $REGISTRY/valhalla-agent:latest 2>/dev/null; then
+              docker tag $REGISTRY/valhalla-agent:latest $REGISTRY/valhalla-agent:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-agent:latest
+            fi
           else
             docker build -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-agent:latest
@@ -46,8 +50,12 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
           if ! echo "$CHANGED" | grep -Eq '^(cmd/gateway/|pkg/|go\.mod$|go\.sum$|Dockerfile\.gateway$|ui/)'; then
-            docker pull $REGISTRY/valhalla-gateway:latest
-            docker tag $REGISTRY/valhalla-gateway:latest $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+            if docker pull $REGISTRY/valhalla-gateway:latest 2>/dev/null; then
+              docker tag $REGISTRY/valhalla-gateway:latest $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-gateway:latest
+            fi
           else
             docker build -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-gateway:latest
@@ -68,8 +76,12 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
           if ! echo "$CHANGED" | grep -Eq '^(seidr/|Dockerfile\.seidr$)'; then
-            docker pull $REGISTRY/valhalla-seidr:latest
-            docker tag $REGISTRY/valhalla-seidr:latest $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
+            if docker pull $REGISTRY/valhalla-seidr:latest 2>/dev/null; then
+              docker tag $REGISTRY/valhalla-seidr:latest $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-seidr:latest
+            fi
           else
             docker build -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-seidr:latest
@@ -90,8 +102,12 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
           if ! echo "$CHANGED" | grep -Eq '^(cmd/agent/|pkg/|Dockerfile\.codex$)'; then
-            docker pull $REGISTRY/valhalla-codex:latest
-            docker tag $REGISTRY/valhalla-codex:latest $REGISTRY/valhalla-codex:sha-$SHA_SHORT
+            if docker pull $REGISTRY/valhalla-codex:latest 2>/dev/null; then
+              docker tag $REGISTRY/valhalla-codex:latest $REGISTRY/valhalla-codex:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.codex -t $REGISTRY/valhalla-codex:latest -t $REGISTRY/valhalla-codex:sha-$SHA_SHORT .
+              docker push $REGISTRY/valhalla-codex:latest
+            fi
           else
             docker build -f Dockerfile.codex -t $REGISTRY/valhalla-codex:latest -t $REGISTRY/valhalla-codex:sha-$SHA_SHORT .
             docker push $REGISTRY/valhalla-codex:latest
@@ -113,8 +129,12 @@ jobs:
             SHA_SHORT=$(git rev-parse --short HEAD)
             CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
             if ! echo "$CHANGED" | grep -Eq '^(cmd/lockbox/|pkg/|go\.mod$|go\.sum$|Dockerfile\.lockbox$)'; then
-              docker pull $REGISTRY/valhalla-lockbox:latest
-              docker tag $REGISTRY/valhalla-lockbox:latest $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
+              if docker pull $REGISTRY/valhalla-lockbox:latest 2>/dev/null; then
+                docker tag $REGISTRY/valhalla-lockbox:latest $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
+              else
+                docker build -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
+                docker push $REGISTRY/valhalla-lockbox:latest
+              fi
             else
               docker build -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
               docker push $REGISTRY/valhalla-lockbox:latest
