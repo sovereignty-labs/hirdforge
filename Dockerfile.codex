@@ -21,3 +21,4 @@ USER agent
 WORKDIR /workspace
 EXPOSE 8081
 ENTRYPOINT ["valhalla-agent"]
+

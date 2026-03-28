@@ -14,3 +14,4 @@ USER warrior
 WORKDIR /workspace
 EXPOSE 8083
 ENTRYPOINT ["/usr/local/bin/valhalla-lockbox"]
+

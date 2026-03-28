@@ -13,3 +13,4 @@ COPY --from=build /valhalla-gateway /usr/local/bin/valhalla-gateway
 USER gateway
 EXPOSE 8080
 ENTRYPOINT ["valhalla-gateway"]
+
