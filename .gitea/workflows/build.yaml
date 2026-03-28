@@ -200,7 +200,7 @@ jobs:
           new_tag = sys.argv[1].strip()
           root = pathlib.Path("infrastructure")
           image_re = re.compile(
-              r'^(\s*image:\s*)"?gitea-http\.gitea\.svc\.cluster\.local:3000/kit/hirdforge/(valhalla-[^:"\'\s]+):[^\s"\']*"?(\s*(?:#.*)?)$',
+              r'^(\s*image:\s*)"?[^\s"\']*/(valhalla-[^:"\'\s]+):[^\s"\']*"?(\s*(?:#.*)?)$',
               re.MULTILINE,
           )
 
@@ -214,7 +214,7 @@ jobs:
                   continue
 
               def replace(m):
-                  return f'{m.group(1)}"203.0.113.26:30637/gitea_admin/{m.group(2)}:{new_tag}"{m.group(3)}'
+                  return f'{m.group(1)}"git.hirdforge.com/kit/hirdforge/{m.group(2)}:{new_tag}"{m.group(3)}'
 
               new_text = image_re.sub(replace, text)
               if new_text != text:
@@ -230,9 +230,9 @@ jobs:
             [ -f "$file" ] || continue
             if jq empty "$file" 2>/dev/null; then
               current_image=$(jq -r '.spec.template.spec.containers[0].image // empty' "$file")
-              if [ -n "$current_image" ] && echo "$current_image" | grep -q "kit/hirdforge/valhalla-" ; then
-                base_image="${current_image%:*}"
-                new_image="$base_image:sha-$SHA_SHORT"
+              if [ -n "$current_image" ] && echo "$current_image" | grep -q "valhalla-" ; then
+                img_name=$(basename "${current_image%:*}")
+                new_image="git.hirdforge.com/kit/hirdforge/$img_name:sha-$SHA_SHORT"
                 tmp_file="${file}.tmp"
                 jq --arg img "$new_image" '.spec.template.spec.containers[0].image = $img' "$file" > "$tmp_file" && mv "$tmp_file" "$file"
               fi
