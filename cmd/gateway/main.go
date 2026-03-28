@@ -3687,6 +3687,7 @@ func main() {
 				// Parse SSE response and cache content for MCP retrieval
 				var contentBuf strings.Builder
 				scanner := bufio.NewScanner(uResp.Body)
+				scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 				for scanner.Scan() {
 					line := strings.TrimSpace(scanner.Text())
 					if strings.HasPrefix(line, "data:") {
@@ -3874,6 +3875,7 @@ func main() {
 
 				var fullResp strings.Builder
 				scanner := bufio.NewScanner(resp.Body)
+				scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 				for scanner.Scan() {
 					line := scanner.Text()
 					if strings.HasPrefix(line, "data: ") {
