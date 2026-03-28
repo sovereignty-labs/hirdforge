@@ -21,7 +21,6 @@ import (
 
 const (
 	gatewayMCPGiteaBaseURL = "http://gitea-http.gitea.svc.cluster.local:3000"
-	gatewayMCPSeidrURL     = "http://seidr.valhalla.svc:8082/query"
 )
 
 type jsonRPCRequest struct {
@@ -425,7 +424,7 @@ func (s *gatewayMCPServer) registerTools() {
 				"query":      query,
 				"n_results":  nResults,
 			}
-			return s.postJSON(ctx, gatewayMCPSeidrURL, payload, nil)
+			return s.postJSON(ctx, strings.TrimRight(s.gateway.seidrURL, "/")+"/query", payload, nil)
 		},
 	}
 	s.tools["gitea_file_read"] = mcpToolHandler{

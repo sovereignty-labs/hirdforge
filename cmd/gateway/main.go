@@ -1399,7 +1399,7 @@ func fetchDeploymentHistory(client *http.Client, baseURL, token string, limit in
 	if strings.TrimSpace(baseURL) == "" {
 		return out
 	}
-	path := fmt.Sprintf("/api/v1/repos/kit/valhalla-infra/commits?sha=main&limit=%d", clampInt(limit, 20, 100))
+	path := fmt.Sprintf("/api/v1/repos/kit/asgard-infra/commits?sha=main&limit=%d", clampInt(limit, 20, 100))
 	var commits []map[string]interface{}
 	status, _, err := giteaGetJSONWithStatus(client, baseURL, token, path, &commits)
 	if err != nil || status < 200 || status >= 300 {
@@ -1408,7 +1408,7 @@ func fetchDeploymentHistory(client *http.Client, baseURL, token string, limit in
 	for _, commit := range commits {
 		sha := asString(commit["sha"])
 		include := false
-		detailPath := fmt.Sprintf("/api/v1/repos/kit/valhalla-infra/git/commits/%s", url.PathEscape(sha))
+		detailPath := fmt.Sprintf("/api/v1/repos/kit/asgard-infra/git/commits/%s", url.PathEscape(sha))
 		var detail map[string]interface{}
 		if detailStatus, _, detailErr := giteaGetJSONWithStatus(client, baseURL, token, detailPath, &detail); detailErr == nil && detailStatus >= 200 && detailStatus < 300 {
 			for _, file := range asSlice(detail["files"]) {
@@ -1664,7 +1664,7 @@ func updateAgentDeploymentArgs(content string, req agentConfigureRequest) (strin
 }
 
 func createGitOpsAgentConfigPR(client *http.Client, baseURL, token, namespace, agentName string, req agentConfigureRequest) (string, error) {
-	const repoFullName = "kit/valhalla-infra"
+	const repoFullName = "kit/asgard-infra"
 	manifestPath := fmt.Sprintf("infrastructure/%s/deployment-%s.yaml", namespace, agentName)
 
 	var contentResp giteaContentResponse
