@@ -1893,7 +1893,7 @@ func (g *gateway) refreshRepos() {
 	all := make([]map[string]interface{}, 0, 100)
 	for _, path := range []string{
 		"/api/v1/user/repos?limit=50",
-		"/api/v1/orgs/gitea_admin/repos?limit=50",
+		"/api/v1/orgs/warband/repos?limit=50",
 	} {
 		var repos []map[string]interface{}
 		status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, path, &repos)
@@ -2017,7 +2017,7 @@ func main() {
 	agentsFlag := flag.String("agents", "", "comma-separated name=url[:role] agent list")
 	giteaURL := flag.String("gitea-url", "", "Gitea base URL")
 	giteaToken := flag.String("gitea-token", "", "Gitea API token (optional)")
-	giteaRepo := flag.String("gitea-repo", "gitea_admin/project_valhalla", "Gitea repo in owner/name format")
+	giteaRepo := flag.String("gitea-repo", "kit/hirdforge", "Gitea repo in owner/name format")
 	lockboxURL := flag.String("lockbox-url", "", "Lockbox base URL for approval queue proxy")
 	discordWebhookURL := flag.String("discord-webhook-url", "", "Discord webhook URL for new approval notifications")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for Gitea webhook validation (optional)")
@@ -3430,7 +3430,7 @@ func main() {
 		}
 		{
 			var repos []map[string]interface{}
-			status, _, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, "/api/v1/orgs/gitea_admin/repos?limit=20", &repos)
+			status, _, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, "/api/v1/orgs/warband/repos?limit=20", &repos)
 			if err != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
 				return
