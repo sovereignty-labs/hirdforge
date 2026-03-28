@@ -7,7 +7,7 @@ env:
   REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
   REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
   DOCKER_HOST: tcp://localhost:2375
-  REGISTRY: gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge
+  REGISTRY: registry-proxy.gitea.svc:5000/kit/hirdforge
 jobs:
   build-agent:
     runs-on: ubuntu-latest
@@ -15,7 +15,7 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
+        run: "true"
       - name: Clone repository
         run: rm -rf /src-agent && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-agent
       - name: Build and push agent
@@ -37,7 +37,7 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
+        run: "true"
       - name: Clone repository
         run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-gateway
       - name: Build and push gateway
@@ -59,7 +59,7 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
+        run: "true"
       - name: Clone repository
         run: rm -rf /src-seidr && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-seidr
       - name: Build and push seidr
@@ -81,7 +81,7 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
+        run: "true"
       - name: Clone repository
         run: rm -rf /src-codex && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-codex
       - name: Build and push codex
@@ -103,7 +103,7 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
+        run: "true"
       - name: Clone repository
         run: rm -rf /src-lockbox && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-lockbox
       - name: Build and push lockbox
@@ -127,7 +127,7 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
+        run: "true"
       - name: Clone repository
         run: rm -rf /src-hirdforge && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-hirdforge
       - name: Build and push hirdforge
@@ -153,7 +153,7 @@ jobs:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
       - name: Registry login
-        run: echo "$REGISTRY_PASSWORD" | docker login gitea-http.gitea.svc.cluster.local:3000 -u "$REGISTRY_USER" --password-stdin
+        run: "true"
       - name: Clone repository
         run: rm -rf /src-astgraph && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-astgraph
       - name: Build and push astgraph
