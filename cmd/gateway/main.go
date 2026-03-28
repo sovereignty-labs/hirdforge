@@ -2417,6 +2417,55 @@ func main() {
 			}
 			stopped := gw.stopAgent(name)
 			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "stopped", "agent": name, "active": stopped})
+		case strings.HasSuffix(path, "/restart"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/restart")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			if gw.k8s == nil || !gw.k8s.enabled {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "kubernetes integration disabled"})
+				return
+			}
+			labelSelector := fmt.Sprintf("%s.io/agent=%s", gw.k8s.podNS, name)
+			podListPath := fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s", url.PathEscape(gw.k8s.podNS), url.QueryEscape(labelSelector))
+			_, podBody, _, err := gw.k8s.getJSONWithStatus(podListPath)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to query pods"})
+				return
+			}
+			items := asSlice(podBody["items"])
+			if len(items) == 0 {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "no pod found for agent"})
+				return
+			}
+			podName := asString(asMap(asMap(items[0])["metadata"])["name"])
+			deletePath := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(gw.k8s.podNS), url.PathEscape(podName))
+			resp, err := gw.k8s.do(http.MethodDelete, deletePath, nil)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "kubernetes request failed"})
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode == http.StatusNotFound {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "pod not found"})
+				return
+			}
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": strings.TrimSpace(string(b))})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"restarted": "true", "agent": name, "pod": podName})
 		default:
 			http.NotFound(w, r)
 		}
