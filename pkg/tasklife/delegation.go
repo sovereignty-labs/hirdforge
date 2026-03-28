@@ -17,6 +17,11 @@ type DelegationFormat struct {
 var delegationHeaderRE = regexp.MustCompile(`(?im)^(TASK|ISSUE|STEPS|DONE WHEN)\s*:\s*`)
 
 func ValidateDelegation(input string) (DelegationFormat, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return DelegationFormat{}, fmt.Errorf("missing TASK")
+	}
+
 	sections := parseDelegationSections(input)
 	out := DelegationFormat{
 		Task:     strings.TrimSpace(sections["TASK"]),
@@ -24,15 +29,12 @@ func ValidateDelegation(input string) (DelegationFormat, error) {
 		Steps:    parseSteps(sections["STEPS"]),
 		DoneWhen: strings.TrimSpace(sections["DONE WHEN"]),
 	}
+
+	// If no TASK: header was found, use the full input as the task.
 	if out.Task == "" {
-		return DelegationFormat{}, fmt.Errorf("missing TASK")
+		out.Task = trimmed
 	}
-	if len(out.Steps) == 0 {
-		return DelegationFormat{}, fmt.Errorf("missing STEPS")
-	}
-	if out.DoneWhen == "" {
-		return DelegationFormat{}, fmt.Errorf("missing DONE WHEN")
-	}
+
 	return out, nil
 }
 
