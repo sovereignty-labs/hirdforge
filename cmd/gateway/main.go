@@ -2436,7 +2436,8 @@ func main() {
 				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "kubernetes integration disabled"})
 				return
 			}
-			labelSelector := fmt.Sprintf("%s.io/agent=%s", gw.k8s.podNS, name)
+			// Hardcode label selector key — all agent pods use "asgard.io/agent"
+			labelSelector := fmt.Sprintf("asgard.io/agent=%s", name)
 			podListPath := fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s", url.PathEscape(gw.k8s.podNS), url.QueryEscape(labelSelector))
 			_, podBody, _, err := gw.k8s.getJSONWithStatus(podListPath)
 			if err != nil {
@@ -2448,24 +2449,24 @@ func main() {
 				writeJSON(w, http.StatusNotFound, map[string]string{"error": "no pod found for agent"})
 				return
 			}
-			podName := asString(asMap(asMap(items[0])["metadata"])["name"])
-			deletePath := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(gw.k8s.podNS), url.PathEscape(podName))
-			resp, err := gw.k8s.do(http.MethodDelete, deletePath, nil)
-			if err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "kubernetes request failed"})
-				return
+			// Delete all matching pods (they are replicas; K8s recreates them)
+			var deletedPods []string
+			for _, item := range items {
+				podName := asString(asMap(asMap(item)["metadata"])["name"])
+				deletePath := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(gw.k8s.podNS), url.PathEscape(podName))
+				resp, err := gw.k8s.do(http.MethodDelete, deletePath, nil)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "kubernetes request failed"})
+					return
+				}
+				resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					deletedPods = append(deletedPods, podName)
+				}
 			}
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusNotFound {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "pod not found"})
-				return
-			}
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": strings.TrimSpace(string(b))})
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]string{"restarted": "true", "agent": name, "pod": podName})
+			// Audit log for privileged operation
+			log.Printf("pod restart: agent=%s pods=%v triggered_by=%s", name, deletedPods, r.Host)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"restarted": "true", "agent": name, "pods": deletedPods})
 		default:
 			http.NotFound(w, r)
 		}
