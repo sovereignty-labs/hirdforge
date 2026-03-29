@@ -85,7 +85,7 @@ jobs:
         run: |
           cd /src-gateway
           # Start gateway in background (path must match build output above)
-          /tmp/valhalla-gateway &
+          /tmp/valhalla-gateway --agents=http://localhost:9999 &
           GATEWAY_PID=$!
           # Wait for server to start (max 10s)
           for i in $(seq 1 20); do
