@@ -3847,6 +3847,59 @@ func verifyPRExists(giteaURL, giteaToken, prURL string) (bool, error) {
 	return state == "open" || state == "closed", nil
 }
 
+// checkForAgentPR queries Gitea for open PRs in the target repo from the agent's branch.
+// This is used by the completion gate to avoid false negatives when the agent's response
+// text doesn't contain a PR URL but a PR was actually created.
+func checkForAgentPR(giteaURL, giteaToken, branch, owner, repo string) (string, bool, error) {
+	giteaURL = strings.TrimSpace(giteaURL)
+	owner = strings.TrimSpace(owner)
+	repo = strings.TrimSpace(repo)
+	branch = strings.TrimSpace(branch)
+	if giteaURL == "" || owner == "" || repo == "" || branch == "" {
+		return "", false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		strings.TrimRight(giteaURL, "/")+"/api/v1/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo)+"/pulls?state=open&head="+url.PathEscape(owner)+":"+url.PathEscape(branch),
+		nil,
+	)
+	if err != nil {
+		return "", false, err
+	}
+	if strings.TrimSpace(giteaToken) != "" {
+		req.Header.Set("Authorization", "token "+strings.TrimSpace(giteaToken))
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false, nil
+	}
+	var prs []struct {
+		Number int    `json:"number"`
+		URL    string `json:"html_url"`
+		State  string `json:"state"`
+		Head   struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&prs); err != nil {
+		return "", false, err
+	}
+	for _, pr := range prs {
+		if strings.TrimSpace(strings.ToLower(pr.State)) == "open" {
+			return pr.URL, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 func statusPayload() map[string]interface{} {
 	return map[string]interface{}{
 		"status":          "ready",
@@ -5160,6 +5213,25 @@ func main() {
 					break
 				}
 				if taskNudgeCount(record) >= *completionMaxNudges {
+					// Before declaring failure, check if a PR exists in Gitea from the agent's branch
+					prFound := false
+					prURL := ""
+					tracked, hasTracking := trackedTasks[taskID]
+					if hasTracking && strings.TrimSpace(*giteaURL) != "" && tracked != nil && tracked.BranchName != "" {
+						if pr, found, checkErr := checkForAgentPR(*giteaURL, giteaToken, tracked.BranchName, tracked.IssueOwner, tracked.IssueRepo); checkErr == nil && found {
+							prFound = true
+							prURL = pr
+							log.Printf("Found existing PR via Gitea check: %s", prURL)
+						}
+					}
+					if prFound {
+						// PR exists - mark as completed instead of failed
+						completeResult := fmt.Sprintf("PR found via Gitea check: %s", prURL)
+						if record, completeErr := taskTracker.Complete(trackerKey, completeResult, true); completeErr == nil {
+							reportTrackedState(record)
+						}
+						break
+					}
 					if failedRecord, completeErr := taskTracker.Complete(trackerKey, "no_pr_url", false); completeErr == nil {
 						reportTrackedState(failedRecord)
 					}
