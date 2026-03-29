@@ -2417,6 +2417,56 @@ func main() {
 			}
 			stopped := gw.stopAgent(name)
 			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "stopped", "agent": name, "active": stopped})
+		case strings.HasSuffix(path, "/restart"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/restart")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
+				return
+			}
+			if gw.k8s == nil || !gw.k8s.enabled {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "kubernetes integration disabled"})
+				return
+			}
+			// Hardcode label selector key — all agent pods use "asgard.io/agent"
+			labelSelector := fmt.Sprintf("asgard.io/agent=%s", name)
+			podListPath := fmt.Sprintf("/api/v1/namespaces/%s/pods?labelSelector=%s", url.PathEscape(gw.k8s.podNS), url.QueryEscape(labelSelector))
+			_, podBody, _, err := gw.k8s.getJSONWithStatus(podListPath)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to query pods"})
+				return
+			}
+			items := asSlice(podBody["items"])
+			if len(items) == 0 {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "no pod found for agent"})
+				return
+			}
+			// Delete all matching pods (they are replicas; K8s recreates them)
+			var deletedPods []string
+			for _, item := range items {
+				podName := asString(asMap(asMap(item)["metadata"])["name"])
+				deletePath := fmt.Sprintf("/api/v1/namespaces/%s/pods/%s", url.PathEscape(gw.k8s.podNS), url.PathEscape(podName))
+				resp, err := gw.k8s.do(http.MethodDelete, deletePath, nil)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "kubernetes request failed"})
+					return
+				}
+				resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					deletedPods = append(deletedPods, podName)
+				}
+			}
+			// Audit log for privileged operation
+			log.Printf("pod restart: agent=%s pods=%v triggered_by=%s", name, deletedPods, r.RemoteAddr)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"restarted": true, "agent": name, "pods": deletedPods})
 		default:
 			http.NotFound(w, r)
 		}
