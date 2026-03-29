@@ -3172,7 +3172,7 @@ func main() {
 				continue
 			}
 			if status < 200 || status >= 300 {
-				log.Printf("gitea prs: skipping %s (%s): status %d", q.repo, q.state, status)
+				log.Printf("gitea prs: skipping %s (%s): status %d: %s", q.repo, q.state, status, strings.TrimSpace(string(body)))
 				continue
 			}
 			for _, pr := range prs {
