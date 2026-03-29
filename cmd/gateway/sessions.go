@@ -19,13 +19,14 @@ type ChatMessage struct {
 }
 
 type Session struct {
-	ID        string        `json:"id"`
-	Agent     string        `json:"agent"`
-	Source    string        `json:"source"`   // "comms", "cronjob", "delegation"
-	TaskRef   string        `json:"task_ref"` // Gitea issue ref if detected, e.g. "#24"
-	Messages  []ChatMessage `json:"messages"`
-	CreatedAt int64         `json:"created_at"`
-	UpdatedAt int64         `json:"updated_at"`
+	ID          string        `json:"id"`
+	Agent       string        `json:"agent"`
+	Source      string        `json:"source"`   // "comms", "cronjob", "delegation"
+	TaskRef     string        `json:"task_ref"` // Gitea issue ref if detected, e.g. "#24"
+	TaskSummary string        `json:"task_summary"` // First line of task content, truncated to ~60 chars
+	Messages    []ChatMessage `json:"messages"`
+	CreatedAt   int64         `json:"created_at"`
+	UpdatedAt   int64         `json:"updated_at"`
 }
 
 type SessionSummary struct {
@@ -33,6 +34,7 @@ type SessionSummary struct {
 	Agent        string `json:"agent"`
 	Source       string `json:"source"`
 	TaskRef      string `json:"task_ref"`
+	TaskSummary  string `json:"task_summary"`
 	MessageCount int    `json:"message_count"`
 	UpdatedAt    int64  `json:"updated_at"`
 	LastPreview  string `json:"last_preview"`
@@ -77,6 +79,21 @@ func extractTaskRef(content string) string {
 	return ""
 }
 
+func extractTaskSummary(content string) string {
+	if content == "" {
+		return ""
+	}
+	// Get the first line, stripping leading/trailing whitespace
+	lines := strings.SplitN(content, "\n", 2)
+	firstLine := strings.TrimSpace(lines[0])
+	// Truncate to ~60 chars with "..." if longer
+	const maxLen = 60
+	if len(firstLine) > maxLen {
+		return firstLine[:maxLen] + "..."
+	}
+	return firstLine
+}
+
 func (s *sessionStore) ensureSession(id, agent string) *Session {
 	now := time.Now().Unix()
 	id = strings.TrimSpace(id)
@@ -116,6 +133,9 @@ func (s *sessionStore) appendConversation(id, agent, userContent, assistantConte
 	if sess.TaskRef == "" {
 		sess.TaskRef = extractTaskRef(userContent)
 	}
+	if sess.TaskSummary == "" {
+		sess.TaskSummary = extractTaskSummary(userContent)
+	}
 	sess.UpdatedAt = now
 	return sess.ID
 }
@@ -143,13 +163,14 @@ func (s *sessionStore) get(id string) (*Session, bool) {
 		return nil, false
 	}
 	out := &Session{
-		ID:        sess.ID,
-		Agent:     sess.Agent,
-		Source:    sess.Source,
-		TaskRef:   sess.TaskRef,
-		Messages:  append([]ChatMessage(nil), sess.Messages...),
-		CreatedAt: sess.CreatedAt,
-		UpdatedAt: sess.UpdatedAt,
+		ID:          sess.ID,
+		Agent:       sess.Agent,
+		Source:      sess.Source,
+		TaskRef:     sess.TaskRef,
+		TaskSummary: sess.TaskSummary,
+		Messages:    append([]ChatMessage(nil), sess.Messages...),
+		CreatedAt:  sess.CreatedAt,
+		UpdatedAt:  sess.UpdatedAt,
 	}
 	return out, true
 }
@@ -187,6 +208,7 @@ func (s *sessionStore) list(agent string, source string) []SessionSummary {
 			Agent:        sess.Agent,
 			Source:       sess.Source,
 			TaskRef:      sess.TaskRef,
+			TaskSummary:  sess.TaskSummary,
 			MessageCount: len(sess.Messages),
 			UpdatedAt:    sess.UpdatedAt,
 			LastPreview:  preview,
