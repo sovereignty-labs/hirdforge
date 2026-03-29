@@ -911,7 +911,7 @@ const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMs
   const ta=agents.find(a=>a.id===target)||FA[0];const tc=C[target]||"#818cf8";
   const userName=auth?.user||'Sovereign';const userRole=auth?.role||'sovereign';
   const targetState=(fleetState||[]).find(s=>s.name===target)||{};
-  const isAutonomousSession=["cronjob","mcp"].includes(sessionMeta?.source||"");
+  const isAutonomousSession=["cronjob","mcp","delegation"].includes(sessionMeta?.source||"");
   const activeSession=(targetState.active&&targetState.session_id&&targetState.session_id===sessionId);
   const feedItems=useMemo(()=>[...(events||[])].slice(0,50).reverse(),[events]);
   const scrollB=useCallback(()=>{if(mRef.current)mRef.current.scrollTop=mRef.current.scrollHeight;},[]);
@@ -975,9 +975,9 @@ const CommsView=({agents,events,wsConnected,chatHistory,setChatHistory,msg,setMs
           <div style={{display:"flex",gap:3}}><Btn label="New" icon="＋" color={tc} small onClick={onNewConversation}/><Btn label="Stop All" icon="■" color="#ef4444" small onClick={onEmergencyStop}/></div>
         </div>
         <div className="session-tabs">
-          {[{k:"all",l:"All"},{k:"comms",l:"Comms"},{k:"cronjob",l:"Autonomous"}].map(f=><button key={f.k} className={`session-tab${sessionFilter===f.k?" active":""}`} onClick={()=>setSessionFilter(f.k)}>{f.l}</button>)}
+          {[{k:"all",l:"All"},{k:"comms",l:"Comms"},{k:"autonomous",l:"Autonomous"}].map(f=><button key={f.k} className={`session-tab${sessionFilter===f.k?" active":""}`} onClick={()=>setSessionFilter(f.k)}>{f.l}</button>)}
         </div>
-        <div className="session-list">{sessionItems.map(s=><div key={s.id} className={`session-item${sessionId===s.id?" active":""}`} onClick={()=>onLoadSession(s.id,s)}><div style={{display:"flex",justifyContent:"space-between",gap:4}}><span style={{fontSize:10,color:sessionId===s.id?tc:"rgba(255,255,255,0.3)",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.id}{(s.source==="cronjob"||s.source==="mcp")&&<span className="source-badge">AUTO</span>}</span><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",flexShrink:0}}>{fAgo((s.updated_at||0)*1000)}</span></div><div style={{fontSize:10,color:"rgba(255,255,255,0.2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{s.last_preview||"…"}</div></div>)}{sessionItems.length===0&&<div style={{fontSize:10,color:"rgba(255,255,255,0.12)",padding:4}}>No sessions</div>}</div>
+        <div className="session-list">{sessionItems.map(s=><div key={s.id} className={`session-item${sessionId===s.id?" active":""}`} onClick={()=>onLoadSession(s.id,s)}><div style={{display:"flex",justifyContent:"space-between",gap:4}}><span style={{fontSize:10,color:sessionId===s.id?tc:"rgba(255,255,255,0.3)",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.id}{(s.source==="cronjob"||s.source==="mcp"||s.source==="delegation")&&<span className="source-badge">AUTO</span>}</span><span style={{fontSize:9,color:"rgba(255,255,255,0.12)",flexShrink:0}}>{fAgo((s.updated_at||0)*1000)}</span></div><div style={{fontSize:10,color:"rgba(255,255,255,0.2)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>{s.last_preview||"…"}</div></div>)}{sessionItems.length===0&&<div style={{fontSize:10,color:"rgba(255,255,255,0.12)",padding:4}}>No sessions</div>}</div>
       </div>
       {isAutonomousSession&&<div className="autonomous-banner">
         <span>Autonomous Session — {target}{sessionMeta?.task_ref?` — ${sessionMeta.task_ref}`:""}</span>
@@ -1458,7 +1458,7 @@ const HealthView=({agents,fleetState})=>{
 // ═══════════ APP ═══════════
 const lck=(u,a)=>`hirdforge-chat-${u}-${a}`;const lsk=(u,a)=>`hirdforge-session-${u}-${a}`;
 const u2s=m=>({role:m.from==="kit"?"user":"assistant",content:m.text||"",timestamp:m.timestamp||Date.now(),kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent});
-const s2u=(a,m,uname,source)=>{const u=m.role==="user";const aid=u?"kit":(m.noticeAgent||a);const auto=(source||"")==="cronjob"||(source||"")==="mcp";
+const s2u=(a,m,uname,source)=>{const u=m.role==="user";const aid=u?"kit":(m.noticeAgent||a);const auto=(source||"")==="cronjob"||(source||"")==="mcp"||(source||"")==="delegation";
   return{from:u?"kit":a,agent:u?{id:"kit",name:auto?"CronJob":`${uname||'Sovereign'}`,initial:auto?"C":((uname||'S')[0]?.toUpperCase()||"S"),status:"online"}:{id:aid,name:aid,initial:(aid||"?")[0]?.toUpperCase()||"?",status:"online"},text:m.content||"",time:new Date(m.timestamp||Date.now()).toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit'}),timestamp:m.timestamp||Date.now(),streaming:false,toolCalls:[],toolResults:[],kind:m.kind,noticeLevel:m.noticeLevel,noticeAgent:m.noticeAgent};};
 const eventColor=type=>{
   const t=(type||"").toLowerCase();
@@ -1501,7 +1501,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
         progress:progressFromEventType(latest?.type),
         since:item.since,
         toolCalls,
-        isAutonomous:(item.source||"")==="cronjob"||(item.source||"")==="mcp"
+        isAutonomous:(item.source||"")==="cronjob"||(item.source||"")==="mcp"||(item.source||"")==="delegation"
       });
     });
     return Object.values(byTask);
@@ -2095,7 +2095,7 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
       </div>
       <div className="session-list-compact">
         <div className="inline-list">
-          {[{key:"all",label:"all"},{key:"comms",label:"comms"},{key:"cronjob",label:"autonomous"}].map(item=><button key={item.key} className={`toggle-chip ${sessionFilter===item.key?"active":""}`} onClick={()=>setSessionFilter(item.key)}>{item.label}</button>)}
+          {[{key:"all",label:"all"},{key:"comms",label:"comms"},{key:"autonomous",label:"autonomous"}].map(item=><button key={item.key} className={`toggle-chip ${sessionFilter===item.key?"active":""}`} onClick={()=>setSessionFilter(item.key)}>{item.label}</button>)}
         </div>
         {sessionItems.map(item=><button key={item.id} className={`session-item ${sessionId===item.id?"active":""}`} onClick={()=>onLoadSession(item.id,item)}>
           <div style={{display:"flex",justifyContent:"space-between",gap:8}}><span>{item.id}</span><span className="subtle">{fAgo((item.updated_at||0)*1000)}</span></div>
@@ -2264,7 +2264,7 @@ function App(){
   },[tgt,auth.user]);
   useEffect(()=>{if(tgt)localStorage.setItem(lck(auth.user,tgt),JSON.stringify(ch.map(u2s)));},[ch,tgt,auth.user]);
   useEffect(()=>{if(tgt&&sidByA[tgt])localStorage.setItem(lsk(auth.user,tgt),sidByA[tgt]);},[sidByA,tgt,auth.user]);
-  useEffect(()=>{let live=true;const go=async()=>{let data=[];if(sessionFilter==="cronjob"){const[d1,d2]=await Promise.all([api(`/api/v1/sessions?agent=${encodeURIComponent(tgt)}&source=cronjob`,[]),api(`/api/v1/sessions?agent=${encodeURIComponent(tgt)}&source=mcp`,[])]);data=[...(Array.isArray(d1)?d1:[]),...(Array.isArray(d2)?d2:[])];}else{const src=sessionFilter==="all"?"":sessionFilter;const qp=`/api/v1/sessions?agent=${encodeURIComponent(tgt)}${src?`&source=${encodeURIComponent(src)}`:""}`;data=await api(qp,[]);}if(live&&Array.isArray(data))setSItems(data);};go();const id=setInterval(go,5000);return()=>{live=false;clearInterval(id);};},[tgt,busy,sessionFilter]);
+  useEffect(()=>{let live=true;const go=async()=>{let data=[];if(sessionFilter==="autonomous"){const[d1,d2,d3]=await Promise.all([api(`/api/v1/sessions?agent=${encodeURIComponent(tgt)}&source=cronjob`,[]),api(`/api/v1/sessions?agent=${encodeURIComponent(tgt)}&source=mcp`,[]),api(`/api/v1/sessions?agent=${encodeURIComponent(tgt)}&source=delegation`,[])]);data=[...(Array.isArray(d1)?d1:[]),...(Array.isArray(d2)?d2:[]),...(Array.isArray(d3)?d3:[])];}else{const src=sessionFilter==="all"?"":sessionFilter;const qp=`/api/v1/sessions?agent=${encodeURIComponent(tgt)}${src?`&source=${encodeURIComponent(src)}`:""}`;data=await api(qp,[]);}if(live&&Array.isArray(data))setSItems(data);};go();const id=setInterval(go,5000);return()=>{live=false;clearInterval(id);};},[tgt,busy,sessionFilter]);
   useEffect(()=>{const event=events[0];if(!event||!event.delegated_by)return;if(event.type!=="task_complete"&&event.type!=="task_failed")return;
     const owner=event.delegated_by;const completing=(event.agent||"system").toLowerCase();const ts=Date.parse(event.timestamp||"")||Date.now();
     const cap=completing.charAt(0).toUpperCase()+completing.slice(1);
