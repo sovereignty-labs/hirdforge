@@ -1474,7 +1474,13 @@ const extractFileName=text=>{const m=(text||"").match(/([A-Za-z0-9_./-]+\.[A-Za-
 const summarizeEvent=e=>e?.summary||e?.message||e?.result||e?.error||e?.type||"event";
 const progressFromEventType=type=>({recon_started:18,recon_reading:28,tool_call:55,message:62,injection_sent:66,webhook_peer_review:78,webhook_freya_review:88,pr_created:100,task_complete:100,task_failed:100})[(type||"").toLowerCase()]||45;
 
-function MissionControlView({agents,fleetState,approvals,approvalStatus,approvalBusy,onApproval,prs,prActionBusy,onPRAction,events,feedCollapsed,onToggleFeed,onOpenChat}){
+function MissionControlView({agents,fleetState,approvals,approvalStatus,approvalBusy,onApproval,prs,prActionBusy,onPRAction,events,feedCollapsed,onToggleFeed,onOpenChat,onRestartAgent,onStopAgent}){
+  const[feedWidth,setFeedWidth]=useState(240);
+  const[isResizingFeed,setIsResizingFeed]=useState(false);
+  const feedResizeStart=useRef(null);
+  const onFeedResizeMouseDown=e=>{e.preventDefault();setIsResizingFeed(true);feedResizeStart.current={x:e.clientX,w:feedWidth};document.body.style.cursor="ew-resize";document.body.style.userSelect="none";};
+  useEffect(()=>{if(!isResizingFeed)return;const onMove=e=>{if(!feedResizeStart.current)return;const delta=feedResizeStart.current.x-e.clientX;setFeedWidth(Math.max(32,Math.min(360,feedResizeStart.current.w+delta)));};const onUp=()=>{setIsResizingFeed(false);feedResizeStart.current=null;document.body.style.cursor="";document.body.style.userSelect="";localStorage.setItem("hirdforge-feed-width",feedWidth);};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};},[isResizingFeed,feedWidth]);
+  useEffect(()=>{const saved=localStorage.getItem("hirdforge-feed-width");if(saved)setFeedWidth(Number(saved)||240);},[]);
   const openPRs=useMemo(()=>prs.filter(pr=>pr.state==="open"),[prs]);
   const[ciStatusByPR,setCiStatusByPR]=useState({});
   const[openToolCalls,setOpenToolCalls]=useState({});
@@ -1491,7 +1497,8 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
         file:extractFileName(summarizeEvent(latest)),
         progress:progressFromEventType(latest?.type),
         since:item.since,
-        toolCalls
+        toolCalls,
+        isAutonomous:(item.source||"")==="cronjob"
       });
     });
     return Object.values(byTask);
@@ -1526,13 +1533,16 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
         {agents.map(agent=>{
           const state=(fleetState||[]).find(item=>item.name===agent.id)||{};
           const isActive=!!state.active;
-          return <button key={agent.id} className="agent-row" onClick={()=>onOpenChat(agent.id)}>
-            <span className={`status-dot ${agent.status==="online"?"green":"red"} ${isActive?"pulse":""}`}/>
-            <span>
-              <div className="agent-row-name">{agent.id}</div>
-              <div className="agent-row-task">{state.task_ref||state.source||agent.last_action||"idle"}</div>
-            </span>
-          </button>;
+          return <div key={agent.id} className="agent-row" style={{display:"flex",alignItems:"center",gap:4}}>
+            <button className="agent-row" onClick={()=>onOpenChat(agent.id)} style={{flex:1,textAlign:"left"}}>
+              <span className={`status-dot ${agent.status==="online"?"green":"red"} ${isActive?"pulse":""}`}/>
+              <span>
+                <div className="agent-row-name">{agent.id}</div>
+                <div className="agent-row-task">{state.task_ref||state.source||agent.last_action||"idle"}</div>
+              </span>
+            </button>
+            <button onClick={e=>{e.stopPropagation();onRestartAgent(agent.id);}} title={`Restart ${agent.id}`} style={{padding:"4px 6px",fontSize:10,background:"rgba(251,191,36,0.12)",border:"1px solid rgba(251,191,36,0.3)",color:"#fbbf24",borderRadius:3,flexShrink:0}}>↻</button>
+          </div>;
         })}
       </div>
     </aside>
@@ -1594,8 +1604,12 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
           </div>
           <div className="subtle">{activeGroups.length} active task{activeGroups.length===1?"":"s"}</div>
         </div>
+        {(()=>{const[opsFilter,setOpsFilter]=useState("all");const filteredGroups=opsFilter==="all"?activeGroups:activeGroups.filter(g=>g.agents.some(a=>a.isAutonomous===(opsFilter==="autonomous")));return<>
+        <div style={{display:"flex",gap:6,padding:"10px 16px",borderBottom:"1px solid var(--line)"}}>
+          {[["all","All"],["sovereign","Sovereign"],["autonomous","Autonomous"]].map(f=><button key={f[0]} className={`toggle-chip ${opsFilter===f[0]?"active":""}`} onClick={()=>setOpsFilter(f[0])}>{f[1]}</button>)}
+        </div>
         <div className="operations-list">
-          {activeGroups.map(group=><div key={group.key} className="operation-group">
+          {filteredGroups.map(group=><div key={group.key} className="operation-group">
             <div className="operation-head">
               <div>
                 <div className="operation-title">{group.title}</div>
@@ -1605,7 +1619,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
             {group.agents.map(row=><div key={`${group.key}-${row.name}`}>
               <div className="operation-row">
               <div>
-                <div className="operation-agent">{row.name}</div>
+                <div className="operation-agent">{row.name}{row.isAutonomous&&<span style={{marginLeft:6,fontSize:9,padding:"1px 4px",background:"rgba(251,191,36,0.12)",border:"1px solid rgba(251,191,36,0.25)",color:"#fbbf24",borderRadius:2}}>AUTO</span>}</div>
                 <div className="subtle">{row.since?fAgo(new Date(row.since*1000).toISOString()):"active now"}</div>
               </div>
               <div>
@@ -1616,6 +1630,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
                 <div>{row.progress}%</div>
                 {!!row.toolCalls.length&&<button className="toggle-chip" style={{marginTop:6}} onClick={()=>setOpenToolCalls(prev=>({...prev,[row.name]:!prev[row.name]}))}>{openToolCalls[row.name]?"Hide tools":"Show tools"}</button>}
               </div>
+              <button onClick={()=>onStopAgent(row.name)} title={`Stop ${row.name}`} style={{padding:"4px 8px",fontSize:11,background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.3)",color:"#ef4444",borderRadius:3,flexShrink:0}}>■</button>
             </div>
             {openToolCalls[row.name]&&!!row.toolCalls.length&&<div className="tool-call-list">
               {row.toolCalls.map((call,index)=><div key={`${row.name}-${index}-${call.timestamp||index}`} className="tool-call-item">
@@ -1628,11 +1643,12 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
             </div>}
             </div>)}
           </div>)}
-          {!activeGroups.length&&<div className="empty-state">No active operations are running right now.</div>}
-        </div>
+          {!filteredGroups.length&&<div className="empty-state">No active operations are running right now.</div>}
+        </div></>;}
       </section>
     </main>
-    <aside className={`activity-feed ${feedCollapsed?"collapsed":""}`}>
+    <aside className={`activity-feed ${feedCollapsed?"collapsed":""}`} style={feedCollapsed?undefined:{width:isResizingFeed?"auto":`${feedWidth}px`}}>
+      <div style={{position:"absolute",left:0,top:0,bottom:0,width:6,cursor:"ew-resize",zIndex:10}} onMouseDown={onFeedResizeMouseDown}/>
       <div className="feed-head">
         {feedCollapsed?<div/>:<div><div className="section-kicker">Feed</div><div className="panel-subtitle">Last 200 events</div></div>}
         <button className="feed-toggle" onClick={onToggleFeed}>{feedCollapsed?"‹":"›"}</button>
@@ -2019,6 +2035,18 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
   const agent=agents.find(item=>item.id===target)||agents[0]||FA[0];
   const scrollBottom=()=>{if(listRef.current)listRef.current.scrollTop=listRef.current.scrollHeight;};
   useEffect(()=>{requestAnimationFrame(scrollBottom);},[chatHistory]);
+  // #19 Fix: Resizable ChatPanel state
+  const[panelWidth,setPanelWidth]=useState(420);
+  const[isResizing,setIsResizing]=useState(false);
+  const resizeStart=useRef(null);
+  const onResizeMouseDown=e=>{e.preventDefault();setIsResizing(true);resizeStart.current={x:e.clientX,w:panelWidth};document.body.style.cursor="ew-resize";document.body.style.userSelect="none";};
+  useEffect(()=>{if(!isResizing)return;const onMove=e=>{if(!resizeStart.current)return;const delta=e.clientX-resizeStart.current.x;setPanelWidth(Math.max(300,Math.min(800,resizeStart.current.w+delta)));};const onUp=()=>{setIsResizing(false);resizeStart.current=null;document.body.style.cursor="";document.body.style.userSelect="";localStorage.setItem("hirdforge-chatpanel-width",panelWidth);};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};},[isResizing,panelWidth]);
+  useEffect(()=>{const saved=localStorage.getItem("hirdforge-chatpanel-width");if(saved)setPanelWidth(Number(saved)||420);},[]);
+  // #18 Fix: Multi-agent tabs
+  const[openTabs,setOpenTabs]=useState([{id:target,name:agent.name||target}]);
+  const activeTab=target;
+  const addTab=(agentId,agentName)=>{if(!openTabs.find(t=>t.id===agentId))setOpenTabs(p=>[...p,{id:agentId,name:agentName||agentId}]);};
+  useEffect(()=>{if(!openTabs.find(t=>t.id===target))addTab(target,agent.name||target);},[target]);
   const stopCurrent=async()=>{
     if(ctrlRef.current){ctrlRef.current.abort();ctrlRef.current=null;}
     setChatHistory(prev=>{if(!prev.length)return prev;const next=prev.slice();const last={...next[next.length-1]};if(last.from===target&&last.streaming){last.streaming=false;last.text=`${last.text?`${last.text}\n`:""}[Stopped by Sovereign]`;next[next.length-1]=last;}return next;});
@@ -2044,9 +2072,13 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
       err=>{setChatHistory(prev=>{const next=prev.slice();const last={...next[next.length-1]};last.streaming=false;if(err!=="[Stopped by Sovereign]")last.text=err;next[next.length-1]=last;return next;});setSending(false);ctrlRef.current=null;}
     );
   };
-  return <aside className={`chat-panel ${open?"open":""}`}>
+  return <aside className={`chat-panel ${open?"open":""}`} style={{width:isResizing?"auto":`${panelWidth}px`}}>
+    <div style={{position:"absolute",left:0,top:0,bottom:0,width:6,cursor:"ew-resize",zIndex:10}} onMouseDown={onResizeMouseDown}/>
     <div className="chat-panel-head">
-      <select value={target} onChange={e=>setTarget(e.target.value)}>{agents.map(item=><option key={item.id} value={item.id}>{item.id}</option>)}</select>
+      <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
+        {openTabs.map(tab=>{const ag=agents.find(a=>a.id===tab.id)||{};return<span key={tab.id} onClick={()=>setTarget(tab.id)} style={{padding:"3px 8px",border:"1px solid",borderColor:tab.id===activeTab?"#818cf8":"rgba(255,255,255,0.1)",background:tab.id===activeTab?"rgba(129,140,248,0.12)":"transparent",borderRadius:4,fontSize:10,fontWeight:700,cursor:"pointer",color:tab.id===activeTab?"#818cf8":"rgba(255,255,255,0.4)"}}>{tab.id}</span>;})}
+      </div>
+      <select value={target} onChange={e=>{const v=e.target.value;const ag=agents.find(a=>a.id===v);if(ag)addTab(v,ag.name||v);setTarget(v);}}>{agents.map(item=><option key={item.id} value={item.id}>{item.id}</option>)}</select>
       <button className="flat-btn" onClick={onClose}>Close</button>
     </div>
     <div className="chat-panel-body">
@@ -2216,7 +2248,7 @@ function App(){
   const{data:gitops,status:gitopsStatus,refresh:refreshGitops}=useSimplePoll('/api/v1/gitops/status',{},15000);
   const{data:taskHistory,status:taskHistoryStatus}=useSimplePoll('/api/v1/history/tasks',[],15000);
   const{data:deployHistory,status:deployHistoryStatus}=useSimplePoll('/api/v1/history/deployments',[],15000);
-  const{events,ok:wsOk}=useBufferedWS(tab==="mission"&&!feedCollapsed);
+  const{events,ok:wsOk}=useBufferedWS(tab==="mission");
   const online=agents.filter(agent=>agent.status==="online").length;
   const pendingApprovals=(approvals||[]).filter(item=>item&&item.status==="pending");
   const curSid=sidByA[tgt]||localStorage.getItem(lsk(auth.user,tgt))||`hirdforge-${tgt}-${Date.now()}`;
@@ -2272,7 +2304,7 @@ function App(){
       </div>
     </header>
     <div className="main-shell">
-      {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalStatus={approvalStatus} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} prActionBusy={prActionBusy} onPRAction={handlePRAction} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}}/>}
+      {tab==="mission"&&<MissionControlView agents={agents} fleetState={fleetState} approvals={approvals} approvalStatus={approvalStatus} approvalBusy={approvalBusy} onApproval={decideApproval} prs={prs} prActionBusy={prActionBusy} onPRAction={handlePRAction} events={events} feedCollapsed={feedCollapsed} onToggleFeed={()=>setFeedCollapsed(!feedCollapsed)} onOpenChat={agentName=>{setTgt(agentName);setChatOpen(true);}} onRestartAgent={async agentId=>{await apiPost(`/api/v1/agents/${agentId}/restart`);showToast(`Restart triggered for ${agentId}`);} onStopAgent={async agentId=>{await apiPost(`/api/v1/agents/${agentId}/stop`);showToast(`Stop triggered for ${agentId}`);}}/>}
       {tab==="metrics"&&<MetricsView/>}
       {tab==="cluster"&&<ClusterView nodes={nodes} pods={pods} gitops={gitops} gitopsStatus={gitopsStatus} onRefreshGitops={refreshGitops} toast={showToast}/>}
       {tab==="history"&&<HistoryView tasks={taskHistory} taskStatus={taskHistoryStatus} deployments={deployHistory} deployStatus={deployHistoryStatus} agents={agents}/>}
