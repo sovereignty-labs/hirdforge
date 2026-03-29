@@ -1718,12 +1718,11 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,onRefreshGitops,toast}){
   };
   return <div className="cluster-view">
     <div className="node-grid-mc">
-      {["node-cp-1","node-worker-1","node-worker-2"].map(name=>{
-        const node=(nodes||[]).find(item=>(item.name||"").toLowerCase().includes(name.toLowerCase()))||{name,status:"Unknown",cpu_percent:0,memory_percent:0};
+      {(nodes||[]).map(node=>{
         const podCount=(pods||[]).filter(p=>(p.node||"").toLowerCase()===(node.name||"").toLowerCase()).length;
-        return <div key={name} className="node-card">
+        return <div key={node.name} className="node-card">
           <div className="node-title">
-            <div className="node-name">{node.name||name}</div>
+            <div className="node-name">{node.name}</div>
             <span className={`status-dot ${String(node.status).toLowerCase()==="ready"?"green":"amber"}`}/>
           </div>
           <div className="node-bars">
