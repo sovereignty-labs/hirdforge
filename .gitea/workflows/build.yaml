@@ -61,6 +61,54 @@ jobs:
             docker push $REGISTRY/valhalla-gateway:latest
           fi
           docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+  smoke-gateway:
+    runs-on: ubuntu-latest
+    needs: [build-gateway]
+    steps:
+      - name: Clone repository
+        run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-gateway
+      - name: Build gateway binary
+        run: |
+          cd /src-gateway
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          # Only run smoke test if gateway source changed
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(cmd/gateway/|pkg/|go\.mod$|go\.sum$|Dockerfile\.gateway$|ui/)'; then
+            echo "No gateway source changes, skipping smoke test"
+            exit 0
+          fi
+          # Build binary locally
+          go build -ldflags="-s -w" -o /tmp/valhalla-gateway ./cmd/gateway/
+      - name: Run UI render smoke test
+        run: |
+          cd /src-gateway
+          # Start gateway in background
+          /tmp/valhalla-gateway &
+          GATEWAY_PID=$!
+          # Wait for server to start (max 10s)
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8080/ > /dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+          # Smoke test: verify React UI rendered
+          RESPONSE=$(curl -sf http://localhost:8080/)
+          if ! echo "$RESPONSE" | grep -q 'class="mc-app'; then
+            echo "ERROR: mc-app class not found in response — React UI failed to render"
+            echo "Response preview:"
+            echo "$RESPONSE" | head -20
+            kill $GATEWAY_PID 2>/dev/null
+            exit 1
+          fi
+          if ! echo "$RESPONSE" | grep -q 'id="root"'; then
+            echo "ERROR: id=root not found in response"
+            kill $GATEWAY_PID 2>/dev/null
+            exit 1
+          fi
+          echo "SUCCESS: React UI rendered correctly (mc-app class found)"
+          kill $GATEWAY_PID 2>/dev/null
+          exit 0
   build-seidr:
     runs-on: ubuntu-latest
     steps:
