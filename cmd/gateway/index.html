@@ -341,6 +341,7 @@
   .feed-strip span{writing-mode:vertical-rl;transform:rotate(180deg);font-size:9px;color:var(--text-dim);letter-spacing:.12em;text-transform:uppercase}
   .chat-panel{position:fixed;top:64px;right:0;bottom:0;width:420px;background:var(--bg-panel);border-left:1px solid var(--line-strong);transform:translateX(100%);transition:transform .22s ease;z-index:50;display:flex;flex-direction:column}
   .chat-panel.open{transform:translateX(0)}
+  .chat-panel.fullscreen{width:100vw !important;top:0;z-index:200}
   .chat-panel-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)}
   .chat-panel-head select,.chat-panel-head button,.chat-panel-head input,.chat-panel-head textarea{font-family:'IBM Plex Mono',monospace}
   .chat-panel-head select{height:34px;background:var(--bg);border:1px solid var(--line-strong);color:var(--text);padding:0 10px;flex:1}
@@ -2040,6 +2041,7 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
   // #19 Fix: Resizable ChatPanel state
   const[panelWidth,setPanelWidth]=useState(420);
   const[isResizing,setIsResizing]=useState(false);
+  const[isFullscreen,setIsFullscreen]=useState(false);
   const resizeStart=useRef(null);
   const panelWidthRef=useRef(420);
   const onResizeMouseDown=e=>{e.preventDefault();setIsResizing(true);resizeStart.current={x:e.clientX,w:panelWidth};panelWidthRef.current=panelWidth;document.body.style.cursor="ew-resize";document.body.style.userSelect="none";};
@@ -2075,13 +2077,14 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
       err=>{setChatHistory(prev=>{const next=prev.slice();const last={...next[next.length-1]};last.streaming=false;if(err!=="[Stopped by Sovereign]")last.text=err;next[next.length-1]=last;return next;});setSending(false);ctrlRef.current=null;}
     );
   };
-  return <aside className={`chat-panel ${open?"open":""}`} style={{width:isResizing?"auto":`${panelWidth}px`}}>
+  return <aside className={`chat-panel ${open?"open":""} ${isFullscreen?"fullscreen":""}`} style={{width:isResizing?"auto":(isFullscreen?"100vw":`${panelWidth}px`)}}>
     <div style={{position:"absolute",left:0,top:0,bottom:0,width:6,cursor:"ew-resize",zIndex:10}} onMouseDown={onResizeMouseDown}/>
     <div className="chat-panel-head">
       <div style={{display:"flex",gap:4,flexWrap:"wrap",marginBottom:6}}>
         {openTabs.map(tab=>{const ag=agents.find(a=>a.id===tab.id)||{};return<span key={tab.id} onClick={()=>setTarget(tab.id)} style={{padding:"3px 8px",border:"1px solid",borderColor:tab.id===activeTab?"#818cf8":"rgba(255,255,255,0.1)",background:tab.id===activeTab?"rgba(129,140,248,0.12)":"transparent",borderRadius:4,fontSize:10,fontWeight:700,cursor:"pointer",color:tab.id===activeTab?"#818cf8":"rgba(255,255,255,0.4)"}}>{ag.name||tab.name||tab.id}</span>;})}
       </div>
       <select value={target} onChange={e=>{const v=e.target.value;const ag=agents.find(a=>a.id===v);if(ag)addTab(v,ag.name||v);setTarget(v);}}>{agents.map(item=><option key={item.id} value={item.id}>{item.id}</option>)}</select>
+      <button className="flat-btn" onClick={()=>setIsFullscreen(!isFullscreen)} title={isFullscreen?"Exit fullscreen":"Enter fullscreen"} style={{minWidth:32,padding:"0 8px",fontSize:11}}>{isFullscreen?"⛶":"⛶"}</button>
       <button className="flat-btn" onClick={onClose}>Close</button>
     </div>
     <div className="chat-panel-body">
