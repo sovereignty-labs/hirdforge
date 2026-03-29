@@ -67,6 +67,10 @@ jobs:
     steps:
       - name: Clone repository
         run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-gateway
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
       - name: Build gateway binary
         run: |
           cd /src-gateway
