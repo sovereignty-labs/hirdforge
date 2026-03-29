@@ -79,12 +79,12 @@ jobs:
             echo "No gateway source changes, skipping smoke test"
             exit 0
           fi
-          # Build binary locally
+          # Build binary locally (path must match smoke test step below)
           go build -ldflags="-s -w" -o /tmp/valhalla-gateway ./cmd/gateway/
       - name: Run UI render smoke test
         run: |
           cd /src-gateway
-          # Start gateway in background
+          # Start gateway in background (path must match build output above)
           /tmp/valhalla-gateway &
           GATEWAY_PID=$!
           # Wait for server to start (max 10s)
