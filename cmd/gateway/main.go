@@ -3168,12 +3168,12 @@ func main() {
 			var prs []map[string]interface{}
 			status, body, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, path, &prs)
 			if err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
-				return
+				log.Printf("gitea prs: skipping %s: %v", q.repo, err)
+				continue
 			}
 			if status < 200 || status >= 300 {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(body))})
-				return
+				log.Printf("gitea prs: skipping %s (%s): status %d", q.repo, q.state, status)
+				continue
 			}
 			for _, pr := range prs {
 				number := asInt64(pr["number"])
