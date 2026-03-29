@@ -3743,6 +3743,7 @@ func main() {
 				if explicitSource != "" {
 					sess := gw.sessionStore.ensureSession(sessionID, agentName)
 					sess.Source = explicitSource
+					sess.TaskSummary = extractTaskSummary(content)
 				}
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
 				defer agentCancel()
