@@ -512,7 +512,7 @@ function useRepos(){
     if(!r.ok)throw new Error(r.status);const d=await r.json();if(m)setRepos(Array.isArray(d)?d:[]);
   }catch{if(m)setRepos([
     {name:'hirdforge',owner:'kit',description:'Go source — agent, gateway, lockbox',open_prs:0,language:'Go'},
-    {name:'valhalla-infra',owner:'kit',description:'K8s manifests — ArgoCD source of truth',open_prs:0,language:'YAML'},
+    {name:'asgard-infra',owner:'kit',description:'K8s manifests — ArgoCD source of truth',open_prs:0,language:'YAML'},
     {name:'hirdforge-personas',owner:'kit',description:'Agent SOULs, docs, swarm protocol',open_prs:0,language:'Markdown'},
     {name:'hirdforge-discord',owner:'kit',description:'Discord bot — Gateway bridge',open_prs:0,language:'Python'},
   ]);}};go();const id=setInterval(go,30000);return()=>{m=false;clearInterval(id);};},[]);
@@ -743,7 +743,7 @@ function ForgeTerminal({agents,pods,nodes,commits,k8sEvents,target}){
 
   const exec=async(raw)=>{
     const cmd=raw.trim();if(!cmd)return;
-    addLine('cmd',`forge@valhalla:~$ ${cmd}`);
+    addLine('cmd',`forge@asgard:~$ ${cmd}`);
 
     if(cmd==='clear'){setLines([]);return;}
     if(cmd==='help'){addLine('','HELP');addHtml('',`<pre style="color:rgba(255,255,255,0.5);margin:0">${HELP}</pre>`);return;}
@@ -861,7 +861,7 @@ function ForgeTerminal({agents,pods,nodes,commits,k8sEvents,target}){
       {lines.map((l,i)=>l.html?<div key={i} className="term-line" dangerouslySetInnerHTML={{__html:l.html}}/>:<div key={i} className={`term-line ${l.t||''}`}>{l.text}</div>)}
     </div></div>
     <div className="term-input-row">
-      <span className="term-prompt">forge@valhalla:~$</span>
+      <span className="term-prompt">forge@asgard:~$</span>
       <input ref={inputRef} className="term-input" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!busy){exec(input);setInput('');}}} placeholder={busy?"processing...":"enter command"} disabled={busy} autoFocus={false}/>
     </div>
   </div>;
@@ -1318,11 +1318,11 @@ const RealmView=({agents,nodes,pods,commits,k8sEvents,prs,repos})=>{
             <div style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{r.description||"—"}</div>
             <div style={{display:"flex",gap:10,marginTop:6,fontSize:9,color:"rgba(255,255,255,0.12)"}}>
               <span>↗ <span style={{color:"rgba(255,255,255,0.2)",cursor:"pointer"}} onClick={()=>window.open(`http://203.0.113.26:30637/${r.owner}/${r.name}`,'_blank')}>Open in Gitea</span></span>
-              {r.name==='project_valhalla'&&<span>CI: <span style={{color:"#34d399"}}>active</span></span>}
-              {r.name==='valhalla-infra'&&<span>ArgoCD: <span style={{color:"#34d399"}}>watching</span></span>}
+              {r.name==='hirdforge'&&<span>CI: <span style={{color:"#34d399"}}>active</span></span>}
+              {r.name==='asgard-infra'&&<span>ArgoCD: <span style={{color:"#34d399"}}>watching</span></span>}
             </div>
           </div>)}
-          <div className="glass" style={{padding:8,marginTop:6,fontSize:10,color:"rgba(255,255,255,0.15)"}}><strong style={{color:"rgba(255,255,255,0.25)"}}>Flow:</strong> project_valhalla (source) → CI → Docker images → valhalla-infra (manifests) → ArgoCD → cluster</div>
+          <div className="glass" style={{padding:8,marginTop:6,fontSize:10,color:"rgba(255,255,255,0.15)"}}><strong style={{color:"rgba(255,255,255,0.25)"}}>Flow:</strong> hirdforge (source) → CI → Docker images → asgard-infra (manifests) → ArgoCD → cluster</div>
         </div>}
         {section==='commits'&&<div><div className="metric-label" style={{marginBottom:8}}>Recent Commits</div>{(commits||[]).map((c,i)=><div key={i} style={{display:"flex",gap:8,padding:"5px 0",borderBottom:"1px solid rgba(255,255,255,0.02)"}}><span style={{fontSize:11,color:"#34d399",fontWeight:600,fontFamily:"'IBM Plex Mono',monospace",flexShrink:0}}>{(c.sha||'').slice(0,7)}</span><span style={{fontSize:11,color:"rgba(255,255,255,0.5)",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.message}</span><span style={{fontSize:10,color:"rgba(255,255,255,0.12)",flexShrink:0}}>{c.author} · {fAgo(c.date)}</span></div>)}</div>}
         {section==='pipeline'&&<div><div className="metric-label" style={{marginBottom:8}}>GitOps Pipeline</div><div className="glass" style={{padding:"12px 14px"}}><div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>{["PUSH","CI","PR","REVIEW","MERGE","SYNC"].map((s,i)=><div key={s} style={{display:"flex",alignItems:"center"}}><div style={{padding:"4px 8px",fontSize:8,fontWeight:700,letterSpacing:".06em",color:s==="REVIEW"?"#fbbf24":"#34d399",background:s==="REVIEW"?"rgba(251,191,36,0.05)":"rgba(52,211,153,0.03)",border:`1px solid ${s==="REVIEW"?"rgba(251,191,36,0.1)":"rgba(52,211,153,0.06)"}`,borderRadius:2}}>{s}</div>{i<5&&<div style={{width:8,height:1,background:"rgba(255,255,255,0.04)"}}/>}</div>)}</div><div style={{fontSize:9,color:"rgba(255,255,255,0.15)",marginTop:8}}>Agent → Gitea → CI Build → SHA-tagged Images → Infra PR → Sovereign Merge → ArgoCD Auto-Sync</div></div><div className="glass" style={{padding:10,marginTop:8}}><div className="metric-label" style={{marginBottom:4}}>Proven Chain</div><div style={{fontSize:11,color:"rgba(255,255,255,0.4)",lineHeight:1.6}}>Code PR merge → CI builds 3 images → CI creates infra PR → Sovereign merges → Gitea webhook → ArgoCD syncs. <strong style={{color:"#34d399"}}>Zero kubectl. Zero manual intervention beyond PR approvals.</strong></div></div></div>}
@@ -1676,12 +1676,12 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,onRefreshGitops,toast}){
   const[syncing,setSyncing]=useState(false);
   useEffect(()=>{
     const next={};
-    (pods||[]).filter(p=>(p.namespace||"valhalla")==="valhalla"&&(p.restarts||0)>=3).forEach(p=>{next[p.name]=true;});
+    (pods||[]).filter(p=>(p.namespace||"asgard")==="asgard"&&(p.restarts||0)>=3).forEach(p=>{next[p.name]=true;});
     setExpanded(prev=>Object.keys(prev).length?prev:next);
   },[pods]);
   const loadLogs=async podName=>{
     setLoadingLogs(prev=>({...prev,[podName]:true}));
-    const res=await fetch(`/api/v1/cluster/pods/valhalla/${encodeURIComponent(podName)}/logs?tail=50`).catch(()=>null);
+    const res=await fetch(`/api/v1/cluster/pods/asgard/${encodeURIComponent(podName)}/logs?tail=50`).catch(()=>null);
     if(!res){setLogsByPod(prev=>({...prev,[podName]:"Gateway could not reach the log endpoint."}));setLoadingLogs(prev=>({...prev,[podName]:false}));return;}
     if(res.status===404){setLogsByPod(prev=>({...prev,[podName]:"Log endpoint not available yet on this gateway build."}));setLoadingLogs(prev=>({...prev,[podName]:false}));return;}
     const text=await res.text();
@@ -1702,7 +1702,7 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,onRefreshGitops,toast}){
       setTimeout(()=>setRestartArmed(prev=>{const out={...prev};delete out[podName];return out;}),3000);
       return;
     }
-    const res=await apiDelete(`/api/v1/cluster/pods/valhalla/${encodeURIComponent(podName)}`);
+    const res=await apiDelete(`/api/v1/cluster/pods/asgard/${encodeURIComponent(podName)}`);
     if(res.status===404){toast("Pod restart endpoint not available yet.");}
     else if(!res.ok){toast(res.data?.error||"Pod restart failed");}
     else{toast(res.data?.message||`Restart requested for ${podName}`);}
@@ -1750,7 +1750,7 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,onRefreshGitops,toast}){
         </div>
         <div className="pod-table">
           <div className="pod-head"><span/><span>Name</span><span>Restarts</span><span>Age</span><span>Status</span></div>
-          {(pods||[]).filter(p=>(p.namespace||"valhalla")==="valhalla").map(pod=><React.Fragment key={pod.name}>
+          {(pods||[]).filter(p=>(p.namespace||"asgard")==="asgard").map(pod=><React.Fragment key={pod.name}>
             <div className="pod-line">
               <button className="pod-expand" onClick={()=>toggleExpand(pod.name)}>{expanded[pod.name]?"−":"+"}</button>
               <div className="pod-name"><span className={`status-dot ${pod.ready?"green":"amber"}`}/><span style={{whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{pod.name}</span></div>
