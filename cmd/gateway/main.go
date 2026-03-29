@@ -2465,8 +2465,8 @@ func main() {
 				}
 			}
 			// Audit log for privileged operation
-			log.Printf("pod restart: agent=%s pods=%v triggered_by=%s", name, deletedPods, r.Host)
-			writeJSON(w, http.StatusOK, map[string]interface{}{"restarted": "true", "agent": name, "pods": deletedPods})
+			log.Printf("pod restart: agent=%s pods=%v triggered_by=%s", name, deletedPods, r.RemoteAddr)
+			writeJSON(w, http.StatusOK, map[string]interface{}{"restarted": true, "agent": name, "pods": deletedPods})
 		default:
 			http.NotFound(w, r)
 		}
