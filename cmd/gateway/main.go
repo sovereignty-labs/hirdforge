@@ -1894,6 +1894,7 @@ func (g *gateway) refreshRepos() {
 	for _, path := range []string{
 		"/api/v1/user/repos?limit=50",
 		"/api/v1/orgs/warband/repos?limit=50",
+		"/api/v1/users/kit/repos?limit=50",
 	} {
 		var repos []map[string]interface{}
 		status, body, err := giteaGetJSONWithStatus(client, g.giteaURL, g.giteaToken, path, &repos)
@@ -3477,6 +3478,17 @@ func main() {
 				return
 			}
 			all = append(all, repos...)
+		}
+		{
+			var repos []map[string]interface{}
+			status, _, err := giteaGetJSONWithStatus(giteaClient, *giteaURL, *giteaToken, "/api/v1/users/kit/repos?limit=20", &repos)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			if status >= 200 && status < 300 {
+				all = append(all, repos...)
+			}
 		}
 		{
 			var repos []map[string]interface{}
