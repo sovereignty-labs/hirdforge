@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hirdforge — Valhalla Command</title>
+<title>Hirdforge — Asgard Command</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -449,7 +449,7 @@ const FA=[
   {id:"val",name:"Val Kyrie",role:"Operations",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"V"},
   {id:"freya",name:"Freya",role:"Oracle / Sage",model:"—",backend:"—",status:"offline",tools:[],uptime_seconds:0,tasks_completed:0,last_action:"—",ping_ms:null,cpu_percent:0,memory_percent:0,initial:"F"},
 ];
-const FN=[{name:"node-cp-1",ip:"203.0.113.26",role:"Control+Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},{name:"node-worker-1",ip:"203.0.113.27",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0},{name:"node-worker-2",ip:"203.0.113.28",role:"Worker",status:"Ready",pods:0,cpu_percent:0,memory_percent:0}];
+const FN=[];
 
 // ═══════════ API ═══════════
 async function api(path,fb){
@@ -770,7 +770,7 @@ function ForgeTerminal({agents,pods,nodes,commits,k8sEvents,target}){
     if(cmd==='status'){
       const ag=await api('/api/v1/agents',FA);const pd=await api('/api/v1/cluster/pods',[]);const nd=await api('/api/v1/cluster/nodes',FN);
       const on=ag.filter(a=>a.status==='online').length;const run=pd.filter(p=>p.status==='Running').length;const rdy=nd.filter(n=>n.status==='Ready').length;
-      addLine('header','═══ VALHALLA CLUSTER STATUS ═══');
+      addLine('header','═══ ASGARD CLUSTER STATUS ═══');
       addLine(on===ag.length?'info':'warn',`  Agents:  ${on}/${ag.length} online`);
       addLine(run===pd.length?'info':'warn',`  Pods:    ${run}/${pd.length} running`);
       addLine(rdy===nd.length?'info':'warn',`  Nodes:   ${rdy}/${nd.length} ready`);
@@ -790,7 +790,7 @@ function ForgeTerminal({agents,pods,nodes,commits,k8sEvents,target}){
         if(!open.length){addLine('info','  No open pull requests');return;}
         addLine('header',`  ${open.length} OPEN PULL REQUEST${open.length>1?'S':''}`);
         addHtml('',`<table class="term-table"><tr><th>#</th><th>TITLE</th><th>AUTHOR</th><th>REPO</th><th>AGE</th></tr>${open.map(p=>`<tr><td style="color:#34d399;font-weight:600">${p.number||'?'}</td><td style="color:#e2e8f0">${(p.title||'').slice(0,40)}</td><td style="color:${C[p.user?.toLowerCase()]||'#818cf8'}">${p.user||'?'}</td><td>${p.repo||'?'}</td><td>${fAgo(p.created_at)}</td></tr>`).join('')}</table>`);
-      }catch{addLine('warn','  PR endpoint not available — needs Gateway update');addLine('system','  Check Gitea directly: http://203.0.113.26:30637');}
+      }catch{addLine('warn','  PR endpoint not available — needs Gateway update');addLine('system','  Check Gitea directly: https://git.hirdforge.com');}
       return;
     }
 
@@ -1205,7 +1205,7 @@ const SettingsView=({agents})=>{
 const Topology=()=><svg viewBox="0 0 600 260" style={{width:"100%",maxWidth:600}}>
   {/* Cluster boundary */}
   <rect x="10" y="8" width="580" height="175" className="topo-box" stroke="#818cf8" fill="#818cf8"/>
-  <text x="24" y="26" className="topo-label" fill="#818cf8">VALHALLA CLUSTER</text>
+  <text x="24" y="26" className="topo-label" fill="#818cf8">ASGARD CLUSTER</text>
   {/* Agents */}
   <rect x="24" y="36" width="200" height="70" className="topo-box" stroke="#34d399" fill="#34d399"/>
   <text x="36" y="54" className="topo-label" fill="#34d399">WARBAND</text>
@@ -1317,7 +1317,7 @@ const RealmView=({agents,nodes,pods,commits,k8sEvents,prs,repos})=>{
             </div>
             <div style={{fontSize:10,color:"rgba(255,255,255,0.3)"}}>{r.description||"—"}</div>
             <div style={{display:"flex",gap:10,marginTop:6,fontSize:9,color:"rgba(255,255,255,0.12)"}}>
-              <span>↗ <span style={{color:"rgba(255,255,255,0.2)",cursor:"pointer"}} onClick={()=>window.open(`http://203.0.113.26:30637/${r.owner}/${r.name}`,'_blank')}>Open in Gitea</span></span>
+              <span>↗ <span style={{color:"rgba(255,255,255,0.2)",cursor:"pointer"}} onClick={()=>window.open(`https://git.hirdforge.com/${r.owner}/${r.name}`,'_blank')}>Open in Gitea</span></span>
               {r.name==='hirdforge'&&<span>CI: <span style={{color:"#34d399"}}>active</span></span>}
               {r.name==='asgard-infra'&&<span>ArgoCD: <span style={{color:"#34d399"}}>watching</span></span>}
             </div>
@@ -1745,7 +1745,7 @@ function ClusterView({nodes,pods,gitops,gitopsStatus,onRefreshGitops,toast}){
         <div className="panel-head">
           <div>
             <div className="panel-title">Workloads</div>
-            <div className="panel-subtitle">Valhalla namespace pods with inline logs and restart controls.</div>
+            <div className="panel-subtitle">Asgard namespace pods with inline logs and restart controls.</div>
           </div>
         </div>
         <div className="pod-table">
@@ -2297,7 +2297,7 @@ function App(){
         <div className="brand-mark"/>
         <div className="brand-copy">
           <div className="brand-title">Hirdforge</div>
-          <div className="brand-sub">Valhalla cluster</div>
+          <div className="brand-sub">Asgard cluster</div>
         </div>
       </div>
       <nav className="topnav">
