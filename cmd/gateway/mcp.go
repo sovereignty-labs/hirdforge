@@ -869,6 +869,7 @@ func (s *gatewayMCPServer) delegateViaGateway(ctx context.Context, agent, messag
 		"agent":      agent,
 		"content":    message,
 		"session_id": sessionID,
+		"source":     "mcp",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("delegate failed: %w", err)

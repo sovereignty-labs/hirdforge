@@ -262,6 +262,7 @@ type messageReq struct {
 	Agent     string `json:"agent"`
 	Content   string `json:"content"`
 	SessionID string `json:"session_id"`
+	Source    string `json:"source"`
 }
 
 type dispatchReq struct {
@@ -3727,7 +3728,16 @@ func main() {
 			gw.addEvent("message", in.Agent, fmt.Sprintf("Message sent to %s", in.Agent))
 
 			// Launch goroutine to send message asynchronously
-			go func(agentName string, content string, sessionID string) {
+			go func(agentName string, content string, rawSessionID string, explicitSource string) {
+				sessionID := strings.TrimSpace(rawSessionID)
+				if sessionID == "" {
+					sessionID = fmt.Sprintf("mcp-%s-%d", agentName, time.Now().UnixNano())
+				}
+				// If caller explicitly set a source, create the session with that source
+				if explicitSource != "" {
+					sess := gw.sessionStore.ensureSession(sessionID, agentName)
+					sess.Source = explicitSource
+				}
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
 				defer agentCancel()
 				gw.setActiveRequest(agentName, sessionID, agentCancel)
@@ -3799,7 +3809,7 @@ func main() {
 						CreatedAt: time.Now(),
 					})
 				}
-			}(in.Agent, in.Content, sessionID)
+			}(in.Agent, in.Content, sessionID, in.Source)
 
 			writeJSON(w, http.StatusOK, map[string]string{"status": "queued", "session_id": sessionID, "agent": in.Agent})
 			return
