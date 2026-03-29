@@ -2337,6 +2337,9 @@ func main() {
 				state.Since = ar.StartedAt.Unix()
 				if sess, ok := gw.sessionStore.get(ar.SessionID); ok {
 					state.TaskRef = sess.TaskRef
+					if sess.Source != "" {
+						state.Source = sess.Source
+					}
 				}
 			}
 			gw.arMu.RUnlock()
@@ -2519,6 +2522,9 @@ func main() {
 				state.Since = ar.StartedAt.Unix()
 				if sess, ok := gw.sessionStore.get(ar.SessionID); ok {
 					state.TaskRef = sess.TaskRef
+					if sess.Source != "" {
+						state.Source = sess.Source
+					}
 				}
 			}
 			states = append(states, state)
