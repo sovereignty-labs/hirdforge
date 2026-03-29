@@ -39,8 +39,22 @@ func TestFormatDelegationDropsIssueWhenOverTokenLimit(t *testing.T) {
 	}
 }
 
-func TestValidateDelegationRejectsMissingSections(t *testing.T) {
-	if _, err := ValidateDelegation("TASK: Only task\nDONE WHEN: Eventually"); err == nil {
-		t.Fatalf("expected validation error")
+func TestValidateDelegationAcceptsUnstructuredInput(t *testing.T) {
+	// ValidateDelegation now accepts any non-empty string.
+	// Missing TASK:/STEPS:/DONE WHEN: headers should NOT cause an error.
+	// The full input should be returned in the Task field.
+	input := "Do the thing and make sure it works"
+	got, err := ValidateDelegation(input)
+	if err != nil {
+		t.Fatalf("ValidateDelegation() unexpected error = %v", err)
+	}
+	if got.Task != input {
+		t.Fatalf("expected Task to be full input, got %q, want %q", got.Task, input)
+	}
+	if got.DoneWhen != "" {
+		t.Fatalf("expected empty DoneWhen, got %q", got.DoneWhen)
+	}
+	if len(got.Steps) != 0 {
+		t.Fatalf("expected empty Steps, got %v", got.Steps)
 	}
 }
