@@ -67,12 +67,10 @@ jobs:
     steps:
       - name: Clone repository
         run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-gateway
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
       - name: Build gateway binary
         run: |
+          curl -sL https://go.dev/dl/go1.23.0.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+          export PATH=$PATH:/usr/local/go/bin
           cd /src-gateway
           SHA_SHORT=$(git rev-parse --short HEAD)
           # Only run smoke test if gateway source changed
