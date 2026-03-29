@@ -1646,7 +1646,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
             </div>)}
           </div>)}
           {!filteredGroups.length&&<div className="empty-state">No active operations are running right now.</div>}
-        </div></>;}
+        </div></>})()}
       </section>
     </main>
     <aside className={`activity-feed ${feedCollapsed?"collapsed":""}`} style={feedCollapsed?undefined:{width:isResizingFeed?"auto":`${feedWidth}px`}}>
