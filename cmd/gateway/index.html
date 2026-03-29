@@ -1505,6 +1505,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
     });
     return Object.values(byTask);
   },[fleetState,events]);
+  const filteredGroups=useMemo(()=>opsFilter==="all"?activeGroups:activeGroups.filter(g=>g.agents.some(a=>{if(opsFilter==="autonomous")return a.isAutonomous===true;if(opsFilter==="sovereign")return a.isAutonomous===false;return false;})),[opsFilter,activeGroups]);
   useEffect(()=>{
     const activeAgents=new Set((fleetState||[]).filter(item=>item.active).map(item=>item.name));
     setOpenToolCalls(prev=>{
@@ -1606,7 +1607,6 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
           </div>
           <div className="subtle">{activeGroups.length} active task{activeGroups.length===1?"":"s"}</div>
         </div>
-        {(()=>{const filteredGroups=opsFilter==="all"?activeGroups:activeGroups.filter(g=>g.agents.some(a=>{if(opsFilter==="autonomous")return a.isAutonomous===true;if(opsFilter==="sovereign")return a.isAutonomous===false;return false;}));return<>
         <div style={{display:"flex",gap:6,padding:"10px 16px",borderBottom:"1px solid var(--line)"}}>
           {[["all","All"],["sovereign","Sovereign"],["autonomous","Autonomous"]].map(f=><button key={f[0]} className={`toggle-chip ${opsFilter===f[0]?"active":""}`} onClick={()=>setOpsFilter(f[0])}>{f[1]}</button>)}
         </div>
@@ -1646,7 +1646,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
             </div>)}
           </div>)}
           {!filteredGroups.length&&<div className="empty-state">No active operations are running right now.</div>}
-        </div></>})()}
+        </div>
       </section>
     </main>
     <aside className={`activity-feed ${feedCollapsed?"collapsed":""}`} style={feedCollapsed?undefined:{width:isResizingFeed?"auto":`${feedWidth}px`}}>
