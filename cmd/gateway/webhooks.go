@@ -23,9 +23,9 @@ import (
 const (
 	webhookReadyLabelID      = 3
 	webhookInProgressLabelID = 4
-	webhookEndpointURL       = "http://gateway.valhalla.svc:8080/api/v1/webhooks/gitea"
+	webhookEndpointURL       = "http://gateway.asgard.svc:8080/api/v1/webhooks/gitea"
 	pipelineStateConfigMap   = "gateway-pipeline-state"
-	pipelineStateNamespace   = "valhalla"
+	pipelineStateNamespace   = "asgard"
 )
 
 var webhookTaskRefRE = regexp.MustCompile(`(?i)(?:closes?\s+)?kit/hirdforge-tasks#(\d+)`)
