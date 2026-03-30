@@ -95,16 +95,16 @@ jobs:
             sleep 0.5
           done
           # Smoke test: verify React UI rendered
-          RESPONSE=$(curl -sf http://localhost:8080/)
-          if ! echo "$RESPONSE" | grep -q 'class="mc-app'; then
+          if ! curl -sf http://localhost:8080/ | grep -q 'class="mc-app"'; then
             echo "ERROR: mc-app class not found in response — React UI failed to render"
             echo "Response preview:"
-            echo "$RESPONSE" | head -20
+            curl -sf http://localhost:8080/ | head -20
             kill $GATEWAY_PID 2>/dev/null
             exit 1
           fi
-          if ! echo "$RESPONSE" | grep -q 'id="root"'; then
+          if ! curl -sf http://localhost:8080/ | grep -q 'id="root"'; then
             echo "ERROR: id=root not found in response"
+            curl -sf http://localhost:8080/ | head -20
             kill $GATEWAY_PID 2>/dev/null
             exit 1
           fi
