@@ -1483,7 +1483,7 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
   const feedResizeStart=useRef(null);
   const onFeedResizeMouseDown=e=>{e.preventDefault();setIsResizingFeed(true);feedResizeStart.current={x:e.clientX,w:feedWidth};feedWidthRef.current=feedWidth;document.body.style.cursor="ew-resize";document.body.style.userSelect="none";};
   useEffect(()=>{if(!isResizingFeed)return;let rafId=null;const onMove=e=>{if(!feedResizeStart.current)return;cancelAnimationFrame(rafId);rafId=requestAnimationFrame(()=>{if(!feedResizeStart.current)return;const delta=feedResizeStart.current.x-e.clientX;const newWidth=Math.max(32,Math.min(360,feedResizeStart.current.w+delta));setFeedWidth(newWidth);feedWidthRef.current=newWidth;});};const onUp=()=>{cancelAnimationFrame(rafId);setIsResizingFeed(false);feedResizeStart.current=null;document.body.style.cursor="";document.body.style.userSelect="";localStorage.setItem("hirdforge-feed-width",feedWidthRef.current);};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};},[isResizingFeed]);
-  useEffect(()=>{const saved=localStorage.getItem("hirdforge-feed-width");if(saved){const v=Number(saved);if(!isNaN(v)&&v>0){setFeedWidth(v);feedWidthRef.current=v;}},[]);
+  useEffect(()=>{const saved=localStorage.getItem("hirdforge-feed-width");if(saved){const v=Number(saved);if(!isNaN(v)&&v>0){setFeedWidth(v);feedWidthRef.current=v;}}},[]);
   const openPRs=useMemo(()=>prs.filter(pr=>pr.state==="open"),[prs]);
   const[ciStatusByPR,setCiStatusByPR]=useState({});
   const[openToolCalls,setOpenToolCalls]=useState({});
