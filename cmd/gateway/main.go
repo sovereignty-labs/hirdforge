@@ -77,6 +77,15 @@ type delegateResult struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// delegationTimelineEvent is a typed event stored in the delegation timeline,
+// indexed by session_id so callers can retrieve the full event chain for a session.
+type delegationTimelineEvent struct {
+	Type      string                 `json:"type"`
+	Agent     string                 `json:"agent"`
+	Metadata  map[string]interface{} `json:"metadata"`
+	Timestamp string                 `json:"timestamp"`
+}
+
 type Notification struct {
 	From      string `json:"from"`
 	TaskID    string `json:"task_id"`
@@ -329,6 +338,11 @@ type gateway struct {
 	giteaToken        string
 	seidrURL          string
 	discordWebhookURL string
+
+	// delegationTimelines stores typed events indexed by session_id.
+	// Access is protected by dtlMu.
+	dtlMu             sync.RWMutex
+	delegationTimelines map[string][]delegationTimelineEvent
 }
 
 type settingsStore struct {
@@ -702,6 +716,28 @@ func (g *gateway) notificationsNewest() []Notification {
 	for i := range g.notifications {
 		out[i] = g.notifications[len(g.notifications)-1-i]
 	}
+	return out
+}
+
+// addDelegationTimelineEvent appends a typed event to the timeline for the given
+// session_id. The slice grows without bound; callers that need pagination should
+// retrieve via delegationTimeline and slice as needed.
+func (g *gateway) addDelegationTimelineEvent(sessionID string, evt delegationTimelineEvent) {
+	g.dtlMu.Lock()
+	defer g.dtlMu.Unlock()
+	g.delegationTimelines[sessionID] = append(g.delegationTimelines[sessionID], evt)
+}
+
+// delegationTimeline returns the event chain for the given session_id in insertion order.
+func (g *gateway) delegationTimeline(sessionID string) []delegationTimelineEvent {
+	g.dtlMu.RLock()
+	defer g.dtlMu.RUnlock()
+	events, ok := g.delegationTimelines[sessionID]
+	if !ok {
+		return []delegationTimelineEvent{}
+	}
+	out := make([]delegationTimelineEvent, len(events))
+	copy(out, events)
 	return out
 }
 
@@ -2067,6 +2103,7 @@ func main() {
 		giteaToken:        resolveGatewayGiteaToken(*giteaToken),
 		seidrURL:          strings.TrimSpace(*seidrURLFlag),
 		discordWebhookURL: strings.TrimSpace(*discordWebhookURL),
+		delegationTimelines: make(map[string][]delegationTimelineEvent),
 	}
 	if err := gw.loadPipelineState(); err != nil {
 		log.Printf("webhook: failed to load pipeline state: %v", err)
@@ -2591,9 +2628,9 @@ func main() {
 			writeJSON(w, http.StatusOK, gw.eventsNewest())
 		case http.MethodPost:
 			var in struct {
-				Type    string `json:"type"`
-				Agent   string `json:"agent"`
-				Message string `json:"message"`
+				Type     string                 `json:"type"`
+				Agent    string                 `json:"agent"`
+				Metadata map[string]interface{} `json:"metadata"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
@@ -2602,11 +2639,43 @@ func main() {
 			if in.Type == "" {
 				in.Type = "task"
 			}
-			gw.addEvent(in.Type, in.Agent, in.Message)
+			// Also add to the legacy flat event feed.
+			msg, _ := in.Metadata["message"].(string)
+			gw.addEvent(in.Type, in.Agent, msg)
+			// Store in delegation timeline if session_id is present.
+			if sessionID, ok := in.Metadata["session_id"].(string); ok && sessionID != "" {
+				evt := delegationTimelineEvent{
+					Type:      in.Type,
+					Agent:     in.Agent,
+					Metadata:  in.Metadata,
+					Timestamp: time.Now().Format(time.RFC3339),
+				}
+				gw.addDelegationTimelineEvent(sessionID, evt)
+				// Broadcast the typed event over WebSocket so subscribed clients
+				// receive the full event payload (not just the legacy flat Event).
+				gw.broadcastPayload(evt)
+			}
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/api/v1/delegation-timeline", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+		if sessionID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id query parameter is required"})
+			return
+		}
+		events := gw.delegationTimeline(sessionID)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"session_id": sessionID,
+			"events":     events,
+			"count":      len(events),
+		})
 	})
 	mux.HandleFunc("/api/v1/notify", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
