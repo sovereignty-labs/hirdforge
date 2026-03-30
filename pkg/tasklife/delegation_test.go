@@ -58,3 +58,19 @@ func TestValidateDelegationAcceptsUnstructuredInput(t *testing.T) {
 		t.Fatalf("expected empty Steps, got %v", got.Steps)
 	}
 }
+
+func TestValidateDelegationHandlesDoubleEncodedNewlines(t *testing.T) {
+	// Simulates what happens when a multi-line message is JSON-encoded twice:
+	// the newlines become literal backslash-n sequences.
+	// This is the root cause of "invalid delegation format: missing DONE WHEN"
+	// errors on ~50% of dispatch attempts.
+	input := "TASK: Fix the delegate tool\nSTEPS:\n1. Investigate the issue\n2. Write a test\nDONE WHEN: Delegate no longer fails on multi-line messages."
+
+	got, err := ValidateDelegation(input)
+	if err != nil {
+		t.Fatalf("ValidateDelegation() error = %v", err)
+	}
+	if got.Task == "" || got.DoneWhen == "" || len(got.Steps) != 2 {
+		t.Fatalf("unexpected parsed delegation: %+v", got)
+	}
+}

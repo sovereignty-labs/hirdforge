@@ -17,12 +17,16 @@ type DelegationFormat struct {
 var delegationHeaderRE = regexp.MustCompile(`(?im)^(TASK|ISSUE|STEPS|DONE WHEN)\s*:\s*`)
 
 func ValidateDelegation(input string) (DelegationFormat, error) {
-	trimmed := strings.TrimSpace(input)
+	// Normalize input to handle JSON double-encoding (literal \n → actual newline).
+	// This prevents "missing DONE WHEN" errors when messages arrive as literal
+	// backslash-n sequences instead of actual newlines.
+	normalized := normalizeLineSeparators(input)
+	trimmed := strings.TrimSpace(normalized)
 	if trimmed == "" {
 		return DelegationFormat{}, fmt.Errorf("empty delegation content")
 	}
 
-	sections := parseDelegationSections(input)
+	sections := parseDelegationSections(normalized)
 	out := DelegationFormat{
 		Task:     strings.TrimSpace(sections["TASK"]),
 		Issue:    strings.TrimSpace(sections["ISSUE"]),
@@ -101,4 +105,14 @@ func formatDelegation(in DelegationFormat, includeIssue bool) string {
 
 func estimateTokenCount(text string) int {
 	return int(math.Ceil(float64(len(strings.Fields(text))) * 1.3))
+}
+
+// normalizeLineSeparators converts literal backslash-n sequences (from JSON
+// double-encoding) into actual newlines. This ensures the regex parser can
+// correctly identify section headers regardless of how the input was encoded.
+func normalizeLineSeparators(input string) string {
+	// Replace literal \n (backslash + n) with actual newline
+	// Only match backslash followed by n, not actual \n characters
+	re := regexp.MustCompile(`\\n`)
+	return re.ReplaceAllString(input, "\n")
 }
