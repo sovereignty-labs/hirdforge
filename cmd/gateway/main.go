@@ -1329,6 +1329,14 @@ func resolveGatewayGiteaToken(flagToken string) string {
 	return strings.TrimSpace(os.Getenv("GITEA_TOKEN"))
 }
 
+// envOrDefault returns the value of an environment variable, or a default if unset/empty.
+func envOrDefault(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
+}
+
 func fetchGitOpsStatus(k8s *k8sState) gitopsStatusResponse {
 	out := gitopsStatusResponse{App: "asgard", RecentDeployments: []gitopsDeploymentInfo{}}
 	if k8s == nil || !k8s.enabled {
@@ -2056,8 +2064,8 @@ func main() {
 	giteaURL := flag.String("gitea-url", "", "Gitea base URL")
 	giteaToken := flag.String("gitea-token", "", "Gitea API token (optional)")
 	giteaRepo := flag.String("gitea-repo", "kit/hirdforge", "Gitea repo in owner/name format")
-	lockboxURL := flag.String("lockbox-url", "", "Lockbox base URL for approval queue proxy")
-	discordWebhookURL := flag.String("discord-webhook-url", "", "Discord webhook URL for new approval notifications")
+	lockboxURL := flag.String("lockbox-url", envOrDefault("LOCKBOX_URL", ""), "Lockbox base URL for approval queue proxy")
+	discordWebhookURL := flag.String("discord-webhook-url", envOrDefault("DISCORD_WEBHOOK_URL", ""), "Discord webhook URL for new approval notifications")
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for Gitea webhook validation (optional)")
 	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
 	seidrURLFlag := flag.String("seidr-url", "http://seidr.asgard.svc:8082", "Seidr memory service URL")
