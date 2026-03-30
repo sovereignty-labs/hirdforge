@@ -1476,14 +1476,14 @@ const summarizeEvent=e=>e?.summary||e?.message||e?.result||e?.error||e?.type||"e
 const progressFromEventType=type=>({recon_started:18,recon_reading:28,tool_call:55,message:62,injection_sent:66,webhook_peer_review:78,webhook_freya_review:88,pr_created:100,task_complete:100,task_failed:100})[(type||"").toLowerCase()]||45;
 
 function MissionControlView({agents,fleetState,approvals,approvalStatus,approvalBusy,onApproval,prs,prActionBusy,onPRAction,events,feedCollapsed,onToggleFeed,onOpenChat,onRestartAgent,onStopAgent}){
-  const[feedWidth,setFeedWidth]=useState(240);
   const[isResizingFeed,setIsResizingFeed]=useState(false);
+  const[feedWidth,setFeedWidth]=useState(240);
+  const[feedWidthRef]=useState({current:240});
   const[opsFilter,setOpsFilter]=useState("all");
   const feedResizeStart=useRef(null);
-  const feedWidthRef=useRef(240);
   const onFeedResizeMouseDown=e=>{e.preventDefault();setIsResizingFeed(true);feedResizeStart.current={x:e.clientX,w:feedWidth};feedWidthRef.current=feedWidth;document.body.style.cursor="ew-resize";document.body.style.userSelect="none";};
-  useEffect(()=>{if(!isResizingFeed)return;const onMove=e=>{if(!feedResizeStart.current)return;const delta=feedResizeStart.current.x-e.clientX;const newWidth=Math.max(32,Math.min(360,feedResizeStart.current.w+delta));setFeedWidth(newWidth);feedWidthRef.current=newWidth;};const onUp=()=>{setIsResizingFeed(false);feedResizeStart.current=null;document.body.style.cursor="";document.body.style.userSelect="";localStorage.setItem("hirdforge-feed-width",feedWidthRef.current);};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};},[isResizingFeed]);
-  useEffect(()=>{const saved=localStorage.getItem("hirdforge-feed-width");if(saved)setFeedWidth(Number(saved)||240);},[]);
+  useEffect(()=>{if(!isResizingFeed)return;let rafId=null;const onMove=e=>{if(!feedResizeStart.current)return;cancelAnimationFrame(rafId);rafId=requestAnimationFrame(()=>{if(!feedResizeStart.current)return;const delta=feedResizeStart.current.x-e.clientX;const newWidth=Math.max(32,Math.min(360,feedResizeStart.current.w+delta));setFeedWidth(newWidth);feedWidthRef.current=newWidth;});};const onUp=()=>{cancelAnimationFrame(rafId);setIsResizingFeed(false);feedResizeStart.current=null;document.body.style.cursor="";document.body.style.userSelect="";localStorage.setItem("hirdforge-feed-width",feedWidthRef.current);};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};},[isResizingFeed]);
+  useEffect(()=>{const saved=localStorage.getItem("hirdforge-feed-width");if(saved){const v=Number(saved);if(!isNaN(v)&&v>0){setFeedWidth(v);feedWidthRef.current=v;}},[]);
   const openPRs=useMemo(()=>prs.filter(pr=>pr.state==="open"),[prs]);
   const[ciStatusByPR,setCiStatusByPR]=useState({});
   const[openToolCalls,setOpenToolCalls]=useState({});
@@ -1653,18 +1653,134 @@ function MissionControlView({agents,fleetState,approvals,approvalStatus,approval
     <aside className={`activity-feed ${feedCollapsed?"collapsed":""}`} style={feedCollapsed?undefined:{width:isResizingFeed?"auto":`${feedWidth}px`}}>
       <div style={{position:"absolute",left:0,top:0,bottom:0,width:6,cursor:"ew-resize",zIndex:10}} onMouseDown={onFeedResizeMouseDown}/>
       <div className="feed-head">
-        {feedCollapsed?<div/>:<div><div className="section-kicker">Feed</div><div className="panel-subtitle">Last 200 events</div></div>}
+        {feedCollapsed?<div/>:<div><div className="section-kicker">Delegation</div><div className="panel-subtitle">Timeline</div></div>}
         <button className="feed-toggle" onClick={onToggleFeed}>{feedCollapsed?"‹":"›"}</button>
       </div>
-      {feedCollapsed?<div className="feed-strip"><span>Activity</span></div>:<div className="feed-list">
-        {(events||[]).map((event,index)=><div key={`${event.timestamp||index}-${index}`} className="feed-item">
-          <div className="feed-time">{fT(event.timestamp)}</div>
-          <div className="feed-agent">{event.agent||"system"}</div>
-          <div className="feed-summary" style={{color:`var(--${eventColor(event.type)})`}}>{summarizeEvent(event)}</div>
-        </div>)}
-        {!(events||[]).length&&<div className="empty-state">Waiting for WebSocket events.</div>}
+      {feedCollapsed?<div className="feed-strip"><span>Timeline</span></div>:<div className="feed-list">
+        <DelegationTimelinePanel events={events} fleetState={fleetState} agents={agents}/>
       </div>}
     </aside>
+  </div>;
+}
+
+function DelegationTimelinePanel({events,fleetState,agents}){
+  const[viewMode,setViewMode]=useState('timeline');
+  const[timeline,setTimeline]=useState([]);
+  const[expandedCards,setExpandedCards]=useState({});
+
+  const PHASE_COLORS={DISPATCHED:"#818cf8",BUILDING:"#22d3ee",PR_CREATED:"#34d399",REVIEWING:"#fbbf24",MERGED:"#10b981"};
+  const PHASES=["DISPATCHED","BUILDING","PR_CREATED","REVIEWING","MERGED"];
+
+  const getPhase=useCallback((chain)=>{
+    if(chain.events.some(e=>e.type==="task_completed"))return"MERGED";
+    if(chain.events.some(e=>e.type==="pr_created")){
+      const prEv=chain.events.find(e=>e.type==="pr_created");
+      if(prEv?.pr_url)return"REVIEWING";
+      return"PR_CREATED";
+    }
+    if(chain.events.some(e=>e.type==="branch_created"||e.type==="repo_cloned"))return"BUILDING";
+    if(chain.events.some(e=>e.type==="task_dispatched"))return"DISPATCHED";
+    return"DISPATCHED";
+  },[]);
+
+  const buildTimeline=useCallback(()=>{
+    const chains={};
+    (events||[]).forEach(ev=>{
+      const sid=ev.session_id||ev.task_id||"unknown";
+      if(!chains[sid]){
+        chains[sid]={
+          id:sid,
+          task_summary:ev.task_summary||ev.content||`Session ${sid.slice(0,8)}`,
+          agent:ev.agent||"unknown",
+          events:[],
+          started_at:ev.timestamp,
+          pr_url:null
+        };
+      }
+      const chain=chains[sid];
+      chain.events.push(ev);
+      if(ev.pr_url&&!chain.pr_url)chain.pr_url=ev.pr_url;
+      if(ev.timestamp&&(!chain.started_at||new Date(ev.timestamp)<new Date(chain.started_at))){
+        chain.started_at=ev.timestamp;
+      }
+    });
+    return Object.values(chains).sort((a,b)=>{
+      const ta=a.events[0]?.timestamp||"";
+      const tb=b.events[0]?.timestamp||"";
+      return new Date(tb)-new Date(ta);
+    });
+  },[events]);
+
+  useEffect(()=>{setTimeline(buildTimeline());},[buildTimeline]);
+
+  const toggleCard=(id)=>setExpandedCards(prev=>({...prev,[id]:!prev[id]}));
+
+  const renderEventBadge=(ev)=>{
+    const colors={"task_dispatched":"#818cf8","repo_cloned":"#22d3ee","branch_created":"#34d399","pr_created":"#c084fc","task_completed":"#10b981","task_failed":"#ef4444"};
+    const c=colors[ev.type]||"#6b7280";
+    return <span style={{display:"inline-block",padding:"1px 5px",fontSize:8,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",borderRadius:2,color:c,background:`${c}15`,border:`1px solid ${c}22`}}>{ev.type.replace(/_/g," ")}</span>;
+  };
+
+  const elapsedTime=(start)=>{
+    if(!start)return"";
+    const s=Math.floor((Date.now()-new Date(start).getTime())/1000);
+    if(s<60)return`${s}s`;
+    if(s<3600)return`${Math.floor(s/60)}m`;
+    return`${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+  };
+
+  if(viewMode==='legacy'){
+    return <div>
+      <div style={{padding:"8px 10px",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
+        <button onClick={()=>setViewMode('timeline')} style={{padding:"3px 8px",fontSize:9,fontWeight:700,background:"rgba(129,140,248,0.1)",border:"1px solid rgba(129,140,248,0.25)",color:"#a5b4fc",borderRadius:3,cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",letterSpacing:".06em"}}>Timeline View</button>
+      </div>
+      {(events||[]).map((ev,i)=><div key={`${ev.timestamp||i}-${i}`} className="feed-item">
+        <div className="feed-time">{fT(ev.timestamp)}</div>
+        <div className="feed-agent">{ev.agent||"system"}</div>
+        <div className="feed-summary" style={{color:`var(--${eventColor(ev.type)})`}}>{summarizeEvent(ev)}</div>
+      </div>)}
+      {!(events||[]).length&&<div className="empty-state">Waiting for WebSocket events.</div>}
+    </div>;
+  }
+
+  return <div>
+    <div style={{padding:"8px 10px",borderBottom:"1px solid rgba(255,255,255,0.04)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+      <span style={{fontSize:9,color:"rgba(255,255,255,0.2)",fontFamily:"'IBM Plex Mono',monospace"}}>{timeline.length} chain{timeline.length!==1?"s":""}</span>
+      <button onClick={()=>setViewMode('legacy')} style={{padding:"3px 8px",fontSize:8,fontWeight:700,background:"rgba(255,255,255,0.03)",border:"1px solid rgba(255,255,255,0.08)",color:"rgba(255,255,255,0.3)",borderRadius:3,cursor:"pointer",fontFamily:"'IBM Plex Mono',monospace",textTransform:"uppercase",letterSpacing:".06em"}}>Raw</button>
+    </div>
+    {timeline.length===0&&<div className="empty-state" style={{padding:"16px 10px"}}>No delegation chains yet.</div>}
+    {timeline.map(chain=>{
+      const agentColor=C[chain.agent]||"#818cf8";
+      const phase=getPhase(chain);
+      const phaseColor=PHASE_COLORS[phase]||"#6b7280";
+      const isExpanded=!!expandedCards[chain.id];
+      const elapsed=elapsedTime(chain.started_at);
+
+      return <div key={chain.id} style={{borderBottom:"1px solid rgba(255,255,255,0.03)"}}>
+        <div onClick={()=>toggleCard(chain.id)} style={{padding:"8px 10px",cursor:"pointer",background:isExpanded?"rgba(129,140,248,0.04)":"transparent",borderLeft:`2px solid ${isExpanded?agentColor:"transparent"}`}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
+            <span style={{width:8,height:8,borderRadius:"50%",background:agentColor,flexShrink:0}}/>
+            <span style={{fontSize:11,fontWeight:700,color:"#e2e8f0",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{chain.task_summary}</span>
+            <span style={{fontSize:9,color:"rgba(255,255,255,0.3)",flexShrink:0}}>{elapsed}</span>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <span style={{fontSize:9,fontWeight:700,color:agentColor,textTransform:"uppercase"}}>{chain.agent}</span>
+            <span style={{padding:"1px 5px",fontSize:8,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",borderRadius:2,color:phaseColor,background:`${phaseColor}15`,border:`1px solid ${phaseColor}22`}}>{phase.replace(/_/g," ")}</span>
+            {chain.pr_url&&<a href={chain.pr_url} target="_blank" rel="noreferrer" style={{fontSize:9,color:"#818cf8"}}>PR ↗</a>}
+            <span style={{marginLeft:"auto",fontSize:9,color:"rgba(255,255,255,0.2)"}}>{isExpanded?"▼":"▶"}</span>
+          </div>
+        </div>
+        {isExpanded&&<div style={{padding:"6px 10px 10px 20px",borderLeft:"2px solid rgba(129,140,248,0.15)",marginLeft:0}}>
+          {chain.events.slice().reverse().map((ev,i)=><div key={`${ev.timestamp||i}-${i}`} style={{display:"flex",flexDirection:"column",gap:3,padding:"4px 0",borderBottom:i<chain.events.length-1?"1px solid rgba(255,255,255,0.03)":"none"}}>
+            <div style={{display:"flex",alignItems:"center",gap:6}}>
+              <span style={{fontSize:9,color:"rgba(255,255,255,0.25)",minWidth:44,flexShrink:0}}>{fT(ev.timestamp)}</span>
+              {renderEventBadge(ev)}
+            </div>
+            {ev.pr_url&&<a href={ev.pr_url} target="_blank" rel="noreferrer" style={{fontSize:9,color:"#818cf8",marginLeft:50}}>PR: {ev.pr_url}</a>}
+          </div>)}
+        </div>}
+      </div>;
+    })}
   </div>;
 }
 
@@ -2040,12 +2156,15 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
   // #19 Fix: Resizable ChatPanel state
   const[panelWidth,setPanelWidth]=useState(420);
   const[isResizing,setIsResizing]=useState(false);
-  const[isFullscreen,setIsFullscreen]=useState(false);
+  const[isFullscreen,setIsFullscreen]=useState(()=>localStorage.getItem("hirdforge-chatpanel-fullscreen")==="1");
+  const toggleFullscreen=useCallback(()=>{
+    setIsFullscreen(prev=>{const next=!prev;localStorage.setItem("hirdforge-chatpanel-fullscreen",next?"1":"");return next;});
+  },[]);
+  const[panelWidthRef]=useState({current:420});
   const resizeStart=useRef(null);
-  const panelWidthRef=useRef(420);
   const onResizeMouseDown=e=>{e.preventDefault();setIsResizing(true);resizeStart.current={x:e.clientX,w:panelWidth};panelWidthRef.current=panelWidth;document.body.style.cursor="ew-resize";document.body.style.userSelect="none";};
-  useEffect(()=>{if(!isResizing)return;const onMove=e=>{if(!resizeStart.current)return;const delta=resizeStart.current.x-e.clientX;const newWidth=Math.max(300,Math.min(800,resizeStart.current.w+delta));setPanelWidth(newWidth);panelWidthRef.current=newWidth;};const onUp=()=>{setIsResizing(false);resizeStart.current=null;document.body.style.cursor="";document.body.style.userSelect="";localStorage.setItem("hirdforge-chatpanel-width",panelWidthRef.current);};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};},[isResizing]);
-  useEffect(()=>{const saved=localStorage.getItem("hirdforge-chatpanel-width");if(saved)setPanelWidth(Number(saved)||420);},[]);
+  useEffect(()=>{if(!isResizing)return;let rafId=null;const onMove=e=>{if(!resizeStart.current)return;cancelAnimationFrame(rafId);rafId=requestAnimationFrame(()=>{if(!resizeStart.current)return;const delta=resizeStart.current.x-e.clientX;const newWidth=Math.max(300,Math.min(800,resizeStart.current.w+delta));setPanelWidth(newWidth);panelWidthRef.current=newWidth;});};const onUp=()=>{cancelAnimationFrame(rafId);setIsResizing(false);resizeStart.current=null;document.body.style.cursor="";document.body.style.userSelect="";localStorage.setItem("hirdforge-chatpanel-width",panelWidthRef.current);};document.addEventListener("mousemove",onMove);document.addEventListener("mouseup",onUp);return()=>{document.removeEventListener("mousemove",onMove);document.removeEventListener("mouseup",onUp);};},[isResizing]);
+  useEffect(()=>{const saved=localStorage.getItem("hirdforge-chatpanel-width");if(saved){const v=Number(saved);if(!isNaN(v)&&v>0){setPanelWidth(v);panelWidthRef.current=v;}}},[]);
   // #18 Fix: Multi-agent tabs
   const[openTabs,setOpenTabs]=useState([{id:target,name:agent.name||target}]);
   const activeTab=target;
@@ -2083,7 +2202,7 @@ function ChatPanel({open,onClose,agents,target,setTarget,chatHistory,setChatHist
         {openTabs.map(tab=>{const ag=agents.find(a=>a.id===tab.id)||{};return<span key={tab.id} onClick={()=>setTarget(tab.id)} style={{padding:"3px 8px",border:"1px solid",borderColor:tab.id===activeTab?"#818cf8":"rgba(255,255,255,0.1)",background:tab.id===activeTab?"rgba(129,140,248,0.12)":"transparent",borderRadius:4,fontSize:10,fontWeight:700,cursor:"pointer",color:tab.id===activeTab?"#818cf8":"rgba(255,255,255,0.4)"}}>{ag.name||tab.name||tab.id}</span>;})}
       </div>
       <select value={target} onChange={e=>{const v=e.target.value;const ag=agents.find(a=>a.id===v);if(ag)addTab(v,ag.name||v);setTarget(v);}}>{agents.map(item=><option key={item.id} value={item.id}>{item.id}</option>)}</select>
-      <button className="flat-btn" onClick={()=>setIsFullscreen(!isFullscreen)} title={isFullscreen?"Exit fullscreen":"Enter fullscreen"} style={{minWidth:32,padding:"0 8px",fontSize:11}}>{isFullscreen?"⛶":"⛶"}</button>
+      <button className="flat-btn" onClick={toggleFullscreen} title={isFullscreen?"Exit fullscreen":"Enter fullscreen"} style={{minWidth:32,padding:"0 8px",fontSize:11}}>{isFullscreen?"⛶":"⛶"}</button>
       <button className="flat-btn" onClick={onClose}>Close</button>
     </div>
     <div className="chat-panel-body">
