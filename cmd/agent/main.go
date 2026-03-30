@@ -3776,16 +3776,17 @@ func sovereignStateEnabled(enabled map[string]bool, state tasklifepkg.TaskState)
 	}
 }
 
-func notifyGateway(gatewayURL, eventType, agentName, message string) {
+func notifyGateway(gatewayURL, eventType, agentName string, metadata map[string]interface{}) {
 	if gatewayURL == "" {
 		return
 	}
 	go func() {
-		body, _ := json.Marshal(map[string]string{
+		payload := map[string]interface{}{
 			"type":    eventType,
 			"agent":   agentName,
-			"message": message,
-		})
+			"metadata": metadata,
+		}
+		body, _ := json.Marshal(payload)
 		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/api/v1/events", bytes.NewReader(body))
 		if err != nil {
 			return
@@ -4522,6 +4523,40 @@ func main() {
 			} else {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": true})
 				validateContextMemoriesAsync(*memoryURL, sessionID, "success")
+
+				// Emit typed events after key tool completions
+				if tc.Function.Name == "delegate" {
+					targetAgent := strings.TrimSpace(fmt.Sprint(args["agent"]))
+					taskBrief := strings.TrimSpace(fmt.Sprint(args["task"]))
+					taskID := strings.TrimSpace(fmt.Sprint(args["_task_id"]))
+					notifyGateway(*gatewayURL, "task_dispatched", agentName, map[string]interface{}{
+						"target_agent": targetAgent,
+						"task_id":      taskID,
+						"summary":      truncateMemoryValue(taskBrief, 100),
+					})
+				}
+				if tc.Function.Name == "git-clone" {
+					repo := strings.TrimSpace(fmt.Sprint(args["repo"]))
+					if repo != "" && repo != "<nil>" {
+						notifyGateway(*gatewayURL, "repo_cloned", agentName, map[string]interface{}{
+							"repo": repo,
+						})
+					}
+				}
+				if tc.Function.Name == "gitea" {
+					action := strings.TrimSpace(fmt.Sprint(args["action"]))
+					if action == "create-pr" {
+						prHead := truncateMemoryValue(fmt.Sprint(args["head"]), 200)
+						prRepo := truncateMemoryValue(fmt.Sprint(args["repo"]), 200)
+						prURL := truncateMemoryValue(extractFirstURL(result.Output), 300)
+						notifyGateway(*gatewayURL, "pr_created", agentName, map[string]interface{}{
+							"repo":     prRepo,
+							"branch":   prHead,
+							"pr_url":   prURL,
+						})
+					}
+				}
+
 				if tc.Function.Name == "write" {
 					path := strings.TrimSpace(fmt.Sprint(args["path"]))
 					if path != "" && path != "<nil>" {
@@ -5134,13 +5169,17 @@ func main() {
 				current.Status = "failed"
 				current.Error = "completion_tracker_init_failed"
 				taskStore.Update(current)
-				notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("failed task %s (from %s): %s", current.ID, current.From, current.Error))
+				notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
+					"message": fmt.Sprintf("failed task %s (from %s): %s", current.ID, current.From, current.Error),
+				})
 				return
 			}
 			current.Status = "working"
 			current.Error = ""
 			taskStore.Update(current)
-			notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("started task %s (from %s)", current.ID, current.From))
+			notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
+				"message": fmt.Sprintf("started task %s (from %s)", current.ID, current.From),
+			})
 			reportTrackedState := func(record tasklifepkg.TaskRecord) {
 				if !sovereignStateEnabled(sovereignStates, record.State) {
 					return
@@ -5258,14 +5297,18 @@ func main() {
 				cur.Status = "failed"
 				cur.Error = "cancelled"
 				taskStore.Update(cur)
-				notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("cancelled task %s (from %s)", cur.ID, cur.From))
+				notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
+					"message": fmt.Sprintf("cancelled task %s (from %s)", cur.ID, cur.From),
+				})
 				return
 			}
 			if err != nil {
 				cur.Status = "failed"
 				cur.Error = err.Error()
 				taskStore.Update(cur)
-				notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("failed task %s (from %s): %s", cur.ID, cur.From, cur.Error))
+				notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
+					"message": fmt.Sprintf("failed task %s (from %s): %s", cur.ID, cur.From, cur.Error),
+				})
 				return
 			}
 			if len(completionGates) == 0 {
@@ -5281,7 +5324,11 @@ func main() {
 			if len(summary) > 200 {
 				summary = summary[:200] + "..."
 			}
-			notifyGateway(*gatewayURL, "task", agentName, fmt.Sprintf("completed task %s (from %s): %s", cur.ID, cur.From, summary))
+			notifyGateway(*gatewayURL, "task_completed", agentName, map[string]interface{}{
+				"task_id": cur.ID,
+				"from":    cur.From,
+				"summary": summary,
+			})
 		}(task.ID, req.Content)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": task.ID, "status": task.Status})
