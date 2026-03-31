@@ -1754,11 +1754,11 @@ func createGitOpsAgentConfigPR(client *http.Client, baseURL, token, namespace, a
 		"sha":     contentResp.SHA,
 		"author": map[string]string{
 			"name":  "Hirdforge Gateway",
-			"email": "gateway@valhalla.local",
+			"email": "gateway@asgard.local",
 		},
 		"committer": map[string]string{
 			"name":  "Hirdforge Gateway",
-			"email": "gateway@valhalla.local",
+			"email": "gateway@asgard.local",
 		},
 	})
 	resp, err = giteaRequest(client, http.MethodPut, baseURL, token, fmt.Sprintf("/api/v1/repos/%s/contents/%s", repoFullName, url.PathEscape(manifestPath)), bytes.NewReader(updateBody))
@@ -2029,7 +2029,7 @@ func sendDiscordApprovalWebhook(webhookURL string, item approvalQueueItem) error
 				{"name": "Details", "value": summarizeApprovalParams(item.Params), "inline": false},
 			},
 			"footer": map[string]string{
-				"text": "Valhalla Gateway • Approval required",
+				"text": "Hirdforge Gateway • Approval required",
 			},
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
 		}},
@@ -4314,7 +4314,7 @@ func main() {
 	}
 
 	addr := ":" + *port
-	log.Printf("Valhalla Gateway listening on %s", addr)
+	log.Printf("Hirdforge Gateway listening on %s", addr)
 	log.Printf("Agents: %s", strings.Join(order, ","))
 	die("gateway failed", http.ListenAndServe(addr, mux))
 }
