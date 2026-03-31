@@ -307,7 +307,7 @@ function PRPanel({prs,onMerge,onClose}){
         h('span',null,pr.user?.login||''),
       ),
       h('div',{className:'pr-actions'},
-        h('a',{className:'btn-sm',href:pr.html_url,target:'_blank',rel:'noopener noreferrer'},'Open in Gitea'),
+        h('a',{className:'btn-sm',style:{color:'var(--accent)'},href:pr.html_url,target:'_blank',rel:'noopener noreferrer'},'Open in Gitea'),
         h('button',{className:'btn-sm btn-close-pr',onClick:()=>onClose&&onClose(pr)},'Close'),
         h('button',{className:'btn-sm btn-merge',onClick:()=>onMerge&&onMerge(pr)},'Merge'),
       )
@@ -439,7 +439,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,onMergePR,onClos
 }
 
 /* ── RealmView ── */
-function RealmView({nodes,pods}){
+function RealmView({nodes,pods,gitops}){
   const[nsFilter,setNsFilter]=useState('asgard');
   const nodeList=nodes||[];
   const podList=(pods||[]).filter(p=>nsFilter==='all'||p.namespace===nsFilter);
@@ -462,6 +462,30 @@ function RealmView({nodes,pods}){
         );
       })
     ),
+    h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
+      h('div',{className:'section-title',style:{marginBottom:0}},'GitOps'),
+      h('button',{className:'btn-sm',style:{background:'var(--accent-dim)',border:'1px solid var(--accent-border)',color:'var(--accent)'},onClick:async()=>{await apiPost('/api/v1/gitops/sync')}},'Sync')
+    ),
+    gitops?h('div',{className:'node-grid',style:{marginBottom:24}},
+      (Array.isArray(gitops)?gitops:[gitops]).map(app=>{
+        const health=(app.health||'unknown').toLowerCase();
+        const sync=(app.sync||'unknown').toLowerCase();
+        const healthDot=health==='healthy'?'dot-green':(health==='progressing'?'dot-amber':'dot-red');
+        const syncDot=sync==='synced'?'dot-green':(sync==='outofsync'?'dot-amber':'dot-red');
+        return h('div',{key:app.name,className:'node-card'},
+          h('div',{className:'node-name'},
+            h('div',{className:`dot dot-sm ${healthDot}`}),
+            app.name),
+          h('div',{className:'node-stats'},
+            h('span',null,'Health: ',h('span',{className:'node-val'},health)),
+            h('span',null,'Sync: ',h('span',{className:'node-val'},sync)),
+          ),
+          h('div',{className:'node-stats',style:{marginTop:4}},
+            h('span',null,'Revision: ',h('span',{className:'node-val',style:{fontSize:10}},(app.revision||'—').slice(0,12)),
+            ' · ',h('span',null,'Last: ',h('span',{className:'node-val',style:{fontSize:10}},fmtAge(app.lastSync))))
+        ));
+      })
+    ):h('div',{style:{marginBottom:24,fontSize:12,color:'var(--text-dim)'}},'No GitOps data'),
     h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
       h('div',{className:'section-title',style:{marginBottom:0}},'Pods'),
       h('div',{className:'filter-bar',style:{marginBottom:0}},
@@ -527,6 +551,7 @@ function App(){
   const[fleetState]=usePoll('/api/v1/fleet/state',8000);
   const[nodes]=usePoll('/api/v1/cluster/nodes',30000);
   const[pods]=usePoll('/api/v1/cluster/pods',15000);
+  const[gitops]=usePoll('/api/v1/gitops/status',30000);
   const[prs]=usePoll('/api/v1/gitea/prs',15000);
   const[approvals]=usePoll('/api/v1/approvals',10000);
   const{events,ok:wsOk}=useWS();
@@ -571,7 +596,7 @@ function App(){
         const parts=pr.repository?.full_name?.split('/')||[];
         if(parts.length===2)await apiPost(`/api/v1/gitea/prs/${parts[0]}/${parts[1]}/${pr.number}/close`);
       },onApproval,onRestart}),
-    tab==='realm'&&h(RealmView,{nodes,pods}),
+    tab==='realm'&&h(RealmView,{nodes,pods,gitops}),
     tab==='settings'&&h(SettingsView,{agents,fleetState}),
     /* Global slide-overs (visible on any tab) */
     h(SlidePanel,{open:panel==='fleet',title:'Fleet',onClose:()=>setPanel(null)},
