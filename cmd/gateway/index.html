@@ -305,7 +305,7 @@ function PRPanel({prs,onMerge}){
 
 /* ── Approval Panel ── */
 function ApprovalPanel({approvals,onDecide}){
-  const pending=(approvals||[]).filter(a=>a&&a.status==='pending');
+  const pending=(Array.isArray(approvals)?approvals:[]).filter(a=>a&&a.status==='pending');
   if(!pending.length)return h('div',{className:'empty'},'No pending approvals');
   return pending.map(a=>h('div',{key:a.id,className:'approval-item'},
     h('div',{className:'approval-action'},a.tool_name||a.action||'Action requested'),
@@ -334,7 +334,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,onMergePR,onAppr
 
   const agentList=useMemo(()=>(agents||[]).filter(a=>a.status==='online').map(a=>a.name),[agents]);
   const online=useMemo(()=>(agents||[]).filter(a=>a.status==='online').length,[agents]);
-  const pendingApprovals=useMemo(()=>(approvals||[]).filter(a=>a&&a.status==='pending'),[approvals]);
+  const pendingApprovals=useMemo(()=>(Array.isArray(approvals)?approvals:[]).filter(a=>a&&a.status==='pending'),[approvals]);
 
   const switchAgent=(name)=>{
     setTarget(name);
@@ -522,7 +522,7 @@ function App(){
 
   const online=useMemo(()=>(agents||[]).filter(a=>a.status==='online').length,[agents]);
   const totalAgents=(agents||[]).length;
-  const pendingApprovals=useMemo(()=>(approvals||[]).filter(a=>a&&a.status==='pending').length,[approvals]);
+  const pendingApprovals=useMemo(()=>(Array.isArray(approvals)?approvals:[]).filter(a=>a&&a.status==='pending').length,[approvals]);
   const prCount=(prs||[]).length;
   const togglePanel=name=>setPanel(p=>p===name?null:name);
 
