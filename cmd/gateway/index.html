@@ -288,19 +288,31 @@ function FleetPanel({agents,fleetState,onRestart}){
 }
 
 /* ── PR Panel ── */
-function PRPanel({prs,onMerge}){
-  if(!prs||!prs.length)return h('div',{className:'empty'},'No open pull requests');
-  return prs.map(pr=>h('div',{key:pr.number,className:'pr-row'},
-    h('div',{className:'pr-title'},'#',pr.number,' ',pr.title),
-    h('div',{className:'pr-meta'},
-      h('span',null,pr.repository?.full_name||''),
-      h('span',null,'·'),
-      h('span',null,pr.user?.login||''),
-    ),
-    h('div',{className:'pr-actions'},
-      h('button',{className:'btn-sm btn-merge',onClick:()=>onMerge(pr)},'Merge'),
-    )
-  ));
+function PRPanel({prs,onMerge,onClose}){
+  const[filter,setFilter]=useState('open');
+  const filtered=useMemo(()=>{
+    if(filter==='open')return(prs||[]).filter(pr=>!pr.pull_request?.merged);
+    if(filter==='merged')return(prs||[]).filter(pr=>pr.pull_request?.merged);
+    return prs||[];
+  },[prs,filter]);
+  if(!filtered.length)return h('div',{className:'empty'},'No ',filter,' pull requests');
+  return [
+    h('div',{key:'chips',className:'filter-bar'},
+      ['open','merged','all'].map(f=>h('button',{key:f,className:`filter-chip${filter===f?' active':''}`,onClick:()=>setFilter(f)},f))),
+    ...filtered.map(pr=>h('div',{key:pr.number,className:'pr-row'},
+      h('div',{className:'pr-title'},'#',pr.number,' ',pr.title),
+      h('div',{className:'pr-meta'},
+        h('span',null,pr.repository?.full_name||''),
+        h('span',null,'·'),
+        h('span',null,pr.user?.login||''),
+      ),
+      h('div',{className:'pr-actions'},
+        h('a',{className:'btn-sm',href:pr.html_url,target:'_blank',rel:'noopener noreferrer'},'Open in Gitea'),
+        h('button',{className:'btn-sm btn-close-pr',onClick:()=>onClose&&onClose(pr)},'Close'),
+        h('button',{className:'btn-sm btn-merge',onClick:()=>onMerge&&onMerge(pr)},'Merge'),
+      )
+    ))
+  ];
 }
 
 /* ── Approval Panel ── */
@@ -318,7 +330,7 @@ function ApprovalPanel({approvals,onDecide}){
 }
 
 /* ── CommsView ── */
-function CommsView({agents,fleetState,prs,approvals,events,wsOk,onMergePR,onApproval,onRestart}){
+function CommsView({agents,fleetState,prs,approvals,events,wsOk,onMergePR,onClosePR,onApproval,onRestart}){
   const[target,setTarget]=useState('ragnar');
   const[msg,setMsg]=useState('');
   const[sending,setSending]=useState(false);
@@ -418,7 +430,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,onMergePR,onAppr
     h(SlidePanel,{open:panel==='fleet',title:'Fleet',onClose:()=>setPanel(null)},
       h(FleetPanel,{agents,fleetState,onRestart})),
     h(SlidePanel,{open:panel==='prs',title:'Pull requests',onClose:()=>setPanel(null)},
-      h(PRPanel,{prs,onMerge:mergePR})),
+      h(PRPanel,{prs,onMerge:mergePR,onClose:onClosePR})),
     h(SlidePanel,{open:panel==='approvals',title:'Approvals',onClose:()=>setPanel(null)},
       h(ApprovalPanel,{approvals,onDecide:onApproval})),
     /* Status pills rendered in parent header — panel toggle passed up */
@@ -555,7 +567,10 @@ function App(){
     ),
     /* Body */
     tab==='comms'&&h(CommsView,{agents,fleetState,prs,approvals,events,wsOk,
-      onMergePR:()=>{},onApproval,onRestart}),
+      onMergePR:()=>{},onClosePR:async(pr)=>{
+        const parts=pr.repository?.full_name?.split('/')||[];
+        if(parts.length===2)await apiPost(`/api/v1/gitea/prs/${parts[0]}/${parts[1]}/${pr.number}/close`);
+      },onApproval,onRestart}),
     tab==='realm'&&h(RealmView,{nodes,pods}),
     tab==='settings'&&h(SettingsView,{agents,fleetState}),
     /* Global slide-overs (visible on any tab) */
@@ -565,6 +580,9 @@ function App(){
       h(PRPanel,{prs:prs||[],onMerge:async(pr)=>{
         const parts=pr.repository?.full_name?.split('/')||[];
         if(parts.length===2)await apiPost(`/api/v1/gitea/prs/${parts[0]}/${parts[1]}/${pr.number}/merge`);
+      },onClose:async(pr)=>{
+        const parts=pr.repository?.full_name?.split('/')||[];
+        if(parts.length===2)await apiPost(`/api/v1/gitea/prs/${parts[0]}/${parts[1]}/${pr.number}/close`);
       }})),
     h(SlidePanel,{open:panel==='approvals',title:'Approvals',onClose:()=>setPanel(null)},
       h(ApprovalPanel,{approvals:approvals||[],onDecide:onApproval}))
