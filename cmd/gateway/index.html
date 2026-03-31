@@ -483,7 +483,7 @@ function RealmView({nodes,pods,gitops}){
           h('div',{className:'node-stats',style:{marginTop:4}},
             h('span',null,'Revision: ',h('span',{className:'node-val',style:{fontSize:10}},(app.revision||'—').slice(0,12)),
             ' · ',h('span',null,'Last: ',h('span',{className:'node-val',style:{fontSize:10}},fmtAge(app.lastSync))))
-        );
+        ));
       })
     ):h('div',{style:{marginBottom:24,fontSize:12,color:'var(--text-dim)'}},'No GitOps data'),
     h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}},
