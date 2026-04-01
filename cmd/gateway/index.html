@@ -295,23 +295,24 @@ function PRPanel({prs,onMerge,onClose}){
     if(filter==='merged')return(prs||[]).filter(pr=>pr.pull_request?.merged);
     return prs||[];
   },[prs,filter]);
-  if(!filtered.length)return h('div',{className:'empty'},'No ',filter,' pull requests');
   return [
     h('div',{key:'chips',className:'filter-bar'},
       ['open','merged','all'].map(f=>h('button',{key:f,className:`filter-chip${filter===f?' active':''}`,onClick:()=>setFilter(f)},f))),
-    ...filtered.map(pr=>h('div',{key:pr.number,className:'pr-row'},
-      h('div',{className:'pr-title'},'#',pr.number,' ',pr.title),
-      h('div',{className:'pr-meta'},
-        h('span',null,pr.repository?.full_name||''),
-        h('span',null,'·'),
-        h('span',null,pr.user?.login||''),
-      ),
-      h('div',{className:'pr-actions'},
-        h('a',{className:'btn-sm',style:{color:'var(--accent)'},href:pr.html_url,target:'_blank',rel:'noopener noreferrer'},'Open in Gitea'),
-        h('button',{className:'btn-sm btn-close-pr',onClick:()=>onClose&&onClose(pr)},'Close'),
-        h('button',{className:'btn-sm btn-merge',onClick:()=>onMerge&&onMerge(pr)},'Merge'),
-      )
-    ))
+    filtered.length===0
+      ? h('div',{key:'empty',className:'empty'},'No ',filter,' pull requests')
+      : filtered.map(pr=>h('div',{key:pr.number,className:'pr-row'},
+          h('div',{className:'pr-title'},'#',pr.number,' ',pr.title),
+          h('div',{className:'pr-meta'},
+            h('span',null,pr.repository?.full_name||''),
+            h('span',null,'·'),
+            h('span',null,pr.user?.login||''),
+          ),
+          h('div',{className:'pr-actions'},
+            h('a',{className:'btn-sm',style:{color:'var(--accent)'},href:pr.html_url,target:'_blank',rel:'noopener noreferrer'},'Open in Gitea'),
+            h('button',{className:'btn-sm btn-close-pr',onClick:()=>onClose&&onClose(pr)},'Close'),
+            h('button',{className:'btn-sm btn-merge',onClick:()=>onMerge&&onMerge(pr)},'Merge'),
+          )
+        ))
   ];
 }
 
@@ -341,6 +342,19 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   const[sessions,setSessions]=useState([]);
   const msgsEnd=useRef(null);
   const inputRef=useRef(null);
+  const initialPRs=useRef(null);
+
+  // Track initial PRs on mount — only show new PRs as notifications
+  useEffect(()=>{
+    if(initialPRs.current===null&&prs){
+      initialPRs.current=new Set((prs||[]).map(pr=>pr.number));
+    }
+  },[prs]);
+
+  const newPRs=useMemo(()=>{
+    if(!initialPRs.current||!prs)return[];
+    return(prs||[]).filter(pr=>!initialPRs.current.has(pr.number));
+  },[prs]);
 
   useEffect(()=>{if(msgsEnd.current)msgsEnd.current.scrollIntoView({behavior:'smooth'})},[history]);
 
@@ -432,6 +446,16 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
       ),
       h('div',{className:'messages'},
         history.length===0&&h('div',{className:'empty',style:{marginTop:60}},'Send a message to ',target,' to get started.'),
+        // Inline PR notification cards for new PRs
+        newPRs.length>0&&newPRs.map(pr=>h('div',{key:'pr-'+pr.number,className:'pr-card',style:{display:'flex',flexDirection:'column',gap:6}},
+          h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between'}},
+            h('span',{style:{fontWeight:600}},pr.repository?.full_name||'PR #',pr.number,' — ',pr.title),
+          ),
+          h('div',{style:{display:'flex',gap:6}},
+            h('a',{className:'btn-sm',style:{color:'var(--accent)'},href:pr.html_url,target:'_blank',rel:'noopener noreferrer'},'Open in Gitea'),
+            h('button',{className:'btn-sm btn-merge',onClick:()=>{mergePR(pr)}},pr.pull_request?.merged?'Merged':'Merge')
+          )
+        )),
         history.map((m,i)=>h('div',{key:i,className:'msg'},
           h('div',{className:`avatar ${m.role==='user'?'avatar-user':'avatar-agent'}`},
             m.role==='user'?'K':(m.agent||target)[0].toUpperCase()),
