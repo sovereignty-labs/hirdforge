@@ -489,7 +489,7 @@ function RealmView({nodes,pods,gitops}){
       h('div',{className:'section-title',style:{marginBottom:0}},'GitOps'),
       h('button',{className:'btn-sm',style:{background:'var(--accent-dim)',border:'1px solid var(--accent-border)',color:'var(--accent)'},onClick:async()=>{await apiPost('/api/v1/gitops/sync')}},'Sync')
     ),
-    gitops?h('div',{className:'node-grid',style:{marginBottom:24}},
+    gitops?h('div',{style:{display:'flex',flexDirection:'column',gap:10,marginBottom:24}},
       (Array.isArray(gitops)?gitops:[gitops]).map(app=>{
         const health=(app.health||'unknown').toLowerCase();
         const sync=(app.sync||'unknown').toLowerCase();
