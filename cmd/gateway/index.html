@@ -343,6 +343,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   const msgsEnd=useRef(null);
   const inputRef=useRef(null);
   const initialPRs=useRef(null);
+  const sessionCache=useRef({});
 
   // Track initial PRs on mount — only show new PRs as notifications
   useEffect(()=>{
@@ -365,14 +366,30 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
     return()=>{live=false};
   },[]);
 
-  const loadSession=async(sid)=>{
-    setSessionId(sid);
-    const msgs=await api(`/api/v1/sessions/${sid}/messages`);
-    if(msgs&&Array.isArray(msgs)){
-      setHistory(msgs.map(m=>({role:m.role||'user',content:m.content||'',ts:m.created_at?new Date(m.created_at).getTime():Date.now()})));
-    } else {
-      setHistory([]);
+  // Save current session to cache before switching
+  const saveAndSwitch=(newSid,newHistory,newTarget)=>{
+    if(sessionId&&sessionId!==newSid){
+      sessionCache.current[sessionId]={history:history,target:target};
     }
+    setSessionId(newSid);
+    setHistory(newHistory);
+    setTarget(newTarget);
+  };
+
+  const loadSession=async(sid)=>{
+    // Restore from cache if available
+    if(sessionCache.current[sid]){
+      const cached=sessionCache.current[sid];
+      saveAndSwitch(sid,cached.history,cached.target);
+      return;
+    }
+    // Otherwise fetch from API
+    const data=await api(`/api/v1/sessions/${sid}`);
+    const msgs=await api(`/api/v1/sessions/${sid}/messages`);
+    const hist=msgs&&Array.isArray(msgs)?msgs.map(m=>({role:m.role||'user',content:m.content||'',ts:m.created_at?new Date(m.created_at).getTime():Date.now()})):[];
+    // Extract agent name from session metadata
+    const agentName=data?.agent||data?.metadata?.agent||'ragnar';
+    saveAndSwitch(sid,hist,agentName);
   };
 
   const agentList=useMemo(()=>(agents||[]).filter(a=>a.status==='online').map(a=>a.name),[agents]);
@@ -380,10 +397,8 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   const pendingApprovals=useMemo(()=>(Array.isArray(approvals)?approvals:[]).filter(a=>a&&a.status==='pending'),[approvals]);
 
   const switchAgent=(name)=>{
-    setTarget(name);
     const sid=`hirdforge-${name}-${Date.now()}`;
-    setSessionId(sid);
-    setHistory([]);
+    saveAndSwitch(sid,[],name);
   };
 
   const send=()=>{
@@ -417,7 +432,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
       h('div',{className:'sidebar-hdr'},
         h('span',{className:'sidebar-title'},'Sessions')),
       h('div',{style:{padding:'6px'}},
-        h('button',{className:'new-chat-btn',onClick:()=>{const sid=`hirdforge-${target}-${Date.now()}`;setSessionId(sid);setHistory([])}},'+ New conversation')),
+        h('button',{className:'new-chat-btn',onClick:()=>{const sid=`hirdforge-${target}-${Date.now()}`;saveAndSwitch(sid,[],target)}},'+ New conversation')),
       h('div',{className:'agent-select'},
         agentList.map(name=>h('button',{key:name,className:`agent-chip${target===name?' active':''}`,onClick:()=>switchAgent(name)},name))
       ),
@@ -466,6 +481,17 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
             m.streaming&&h('div',{className:'streaming-indicator'},h('span'),h('span'),h('span'))
           )
         )),
+        // Thinking indicator: shows when sending and no streaming response yet
+        sending&&(!history.length||history[history.length-1]?.role!=='assistant'||!history[history.length-1]?.streaming)&&
+          h('div',{className:'msg'},
+            h('div',{className:'avatar avatar-agent'},(target||'?')[0].toUpperCase()),
+            h('div',{className:'msg-body'},
+              h('div',{className:'msg-name msg-name-agent'},target,' thinking...'),
+              h('div',{className:'msg-text'},
+                h('div',{className:'streaming-indicator'},h('span'),h('span'),h('span'))
+              )
+            )
+          ),
         h('div',{ref:msgsEnd})
       ),
       h('div',{className:'input-area'},
