@@ -4130,9 +4130,80 @@ func main() {
 							case toolName == "exec" && strings.Contains(evtBlob, "cat /tmp/valhalla-personas"):
 								gw.addEvent("skill_loaded", in.Agent, "Loaded skill file")
 							case toolName == "git-clone":
-								gw.addEvent("recon_started", in.Agent, "Cloning repository")
+								summary := "Cloning repository"
+								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+									var args map[string]interface{}
+									if a, ok := tc["arguments"].(map[string]interface{}); ok {
+										args = a
+									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+										_ = json.Unmarshal([]byte(aStr), &args)
+									}
+									if repo, ok := args["repo"].(string); ok && repo != "" {
+										parts := strings.Split(repo, "/")
+										if len(parts) >= 2 {
+											summary = "Cloning " + parts[len(parts)-2] + "/" + parts[len(parts)-1]
+										} else {
+											summary = "Cloning " + repo
+										}
+									}
+								}
+								gw.addEvent("recon_started", in.Agent, summary)
 							case toolName == "gitea" && strings.Contains(evtBlob, "create-pr"):
-								gw.addEvent("pr_created", in.Agent, "Pull request created")
+								summary := "Pull request created"
+								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+									var args map[string]interface{}
+									if a, ok := tc["arguments"].(map[string]interface{}); ok {
+										args = a
+									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+										_ = json.Unmarshal([]byte(aStr), &args)
+									}
+									if title, ok := args["title"].(string); ok && title != "" {
+										summary = "PR: " + title
+									}
+								}
+								gw.addEvent("pr_created", in.Agent, summary)
+							case toolName == "write":
+								summary := "Writing file"
+								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+									var args map[string]interface{}
+									if a, ok := tc["arguments"].(map[string]interface{}); ok {
+										args = a
+									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+										_ = json.Unmarshal([]byte(aStr), &args)
+									}
+									if path, ok := args["path"].(string); ok && path != "" {
+										summary = "Writing " + path
+									}
+								}
+								gw.addEvent("tool_call", in.Agent, summary)
+							case toolName == "edit":
+								summary := "Editing file"
+								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+									var args map[string]interface{}
+									if a, ok := tc["arguments"].(map[string]interface{}); ok {
+										args = a
+									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+										_ = json.Unmarshal([]byte(aStr), &args)
+									}
+									if path, ok := args["path"].(string); ok && path != "" {
+										summary = "Editing " + path
+									}
+								}
+								gw.addEvent("tool_call", in.Agent, summary)
+							case toolName == "delegate":
+								summary := "Delegating task"
+								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+									var args map[string]interface{}
+									if a, ok := tc["arguments"].(map[string]interface{}); ok {
+										args = a
+									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+										_ = json.Unmarshal([]byte(aStr), &args)
+									}
+									if agent, ok := args["agent"].(string); ok && agent != "" {
+										summary = "Delegating to " + agent
+									}
+								}
+								gw.addEvent("tool_call", in.Agent, summary)
 							case toolName == "read" && strings.Contains(strings.ToUpper(string(evtBytes)), "ARCHITECTURE"):
 								gw.addEvent("recon_reading", in.Agent, "Reading ARCHITECTURE.md")
 							}
