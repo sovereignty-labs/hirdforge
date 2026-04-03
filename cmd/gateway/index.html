@@ -466,7 +466,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
         )
       ),
       h('div',{className:'messages'},
-        history.length===0&&h('div',{className:'empty',style:{marginTop:60}},isAll?'Select an agent to start a conversation':'Send a message to ',target,' to get started.'),
+        history.length===0&&h('div',{className:'empty',style:{marginTop:60}},isAll?'Select an agent to start a conversation':['Send a message to ',target,' to get started.']),
         // Inline PR notification cards for new PRs
         newPRs.length>0&&newPRs.map(pr=>h('div',{key:'pr-'+pr.number,className:'pr-card',style:{display:'flex',flexDirection:'column',gap:6}},
           h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between'}},
