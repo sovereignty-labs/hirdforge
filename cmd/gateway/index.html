@@ -379,6 +379,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   };
 
   const loadSession=async(sid)=>{
+    if(sid===sessionId) return;
     // Restore from cache if available
     if(sessionCache.current[sid]){
       const cached=sessionCache.current[sid];
