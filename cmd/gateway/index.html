@@ -283,7 +283,7 @@ function FleetPanel({agents,fleetState,onRestart}){
   return (agents||[]).map(a=>{
     const fs=stateMap[a.name]||{};
     const isActive=fs.active;
-    const dotCls=isActive?'dot dot-green dot-sm':(a.status==='online'?'dot dot-idle dot-sm':'dot dot-idle dot-sm');
+    const dotCls=isActive?'dot dot-green dot-sm':'dot dot-idle dot-sm';
     return h('div',{key:a.name,className:'agent-row'},
       h('div',{className:dotCls}),
       h('div',{style:{flex:1}},
@@ -405,7 +405,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
 
   const stateMap=useMemo(()=>{const m={};(fleetState||[]).forEach(a=>m[a.name]=a);return m},[fleetState]);
   const agentRows=useMemo(()=>{
-    const onlineAgents=(agents||[]).filter(a=>a.status==='online');
+    const onlineAgents=(agents||[]).filter(a=>a.healthy===true);
     const rows=[{name:'All',isActive:false,status:'View all agents'}];
     return rows.concat(onlineAgents.map(a=>{
       const fs=stateMap[a.name]||{};
@@ -614,7 +614,7 @@ function SettingsView({agents,fleetState}){
       h('div',{className:'settings-section-title'},'Warband'),
       (agents||[]).map(a=>{
         const fs=stateMap[a.name]||{};
-        const isOnline=a.status==='online';
+        const isOnline=a.healthy===true;
         return h('div',{key:a.name,className:'agent-setting'},
           h('div',{className:`dot dot-sm ${isOnline?'dot-green':'dot-idle'}`}),
           h('div',{className:'agent-setting-name'},a.name),
@@ -683,7 +683,7 @@ function App(){
     setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)),3000);
   },[]);
 
-  const online=useMemo(()=>(agents||[]).filter(a=>a.status==='online').length,[agents]);
+  const online=useMemo(()=>(agents||[]).filter(a=>a.healthy===true).length,[agents]);
   const totalAgents=(agents||[]).length;
   const pendingApprovals=useMemo(()=>(Array.isArray(approvals)?approvals:[]).filter(a=>a&&a.status==='pending').length,[approvals]);
   const prCount=(prs||[]).length;
