@@ -364,8 +364,9 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   // Load previous sessions on mount
   useEffect(()=>{
     let live=true;
-    api('/api/v1/sessions').then(data=>{if(live&&data)setSessions(Array.isArray(data)?data:[])});
-    return()=>{live=false};
+    const go=()=>api('/api/v1/sessions').then(data=>{if(live&&data)setSessions(Array.isArray(data)?data:[])});
+    go();const t=setInterval(go,5000);
+    return()=>{live=false;clearInterval(t)};
   },[]);
 
   // Save current session to cache before switching
