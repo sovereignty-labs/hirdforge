@@ -180,6 +180,13 @@ a{color:inherit;text-decoration:none}
 .new-chat-btn{width:100%;padding:8px;border-radius:var(--radius);font-size:11px;color:var(--text-dim);border:1px dashed var(--border);transition:all 0.12s;margin-bottom:6px}
 .new-chat-btn:hover{color:var(--text-bright);border-color:var(--border-strong);background:rgba(255,255,255,0.02)}
 .agent-select{display:flex;gap:4px;padding:8px 14px;border-bottom:1px solid rgba(255,255,255,0.04);flex-wrap:wrap}
+.agent-list{flex:1;overflow-y:auto;padding:6px}
+.agent-row-new{padding:10px 12px;border-radius:var(--radius);cursor:pointer;margin-bottom:2px;transition:background 0.12s;display:flex;align-items:center;gap:8px}
+.agent-row-new:hover{background:rgba(255,255,255,0.04)}
+.agent-row-new.active{background:var(--accent-dim)}
+.agent-row-new .agent-info{flex:1;overflow:hidden}
+.agent-row-new .agent-info-name{font-size:12px;font-weight:600;color:var(--text-bright)}
+.agent-row-new .agent-info-status{font-size:11px;color:var(--text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
 .agent-chip{padding:4px 8px;border-radius:6px;font-size:11px;color:var(--text-dim);border:1px solid transparent;transition:all 0.12s}
 .agent-chip:hover{color:var(--text-bright);background:rgba(255,255,255,0.04)}
 .agent-chip.active{color:var(--accent);background:var(--accent-dim);border-color:var(--accent-border)}
@@ -396,8 +403,16 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
     saveAndSwitch(sid,hist,agentName);
   };
 
-  const agentList=useMemo(()=>(agents||[]).filter(a=>a.status==='online').map(a=>a.name),[agents]);
-  const online=useMemo(()=>(agents||[]).filter(a=>a.status==='online').length,[agents]);
+  const stateMap=useMemo(()=>{const m={};(fleetState||[]).forEach(a=>m[a.name]=a);return m},[fleetState]);
+  const agentRows=useMemo(()=>{
+    const onlineAgents=(agents||[]).filter(a=>a.status==='online');
+    const rows=[{name:'All',isActive:false,status:'View all agents'}];
+    return rows.concat(onlineAgents.map(a=>{
+      const fs=stateMap[a.name]||{};
+      const isActive=!!fs.active;
+      return{name:a.name,isActive,status:isActive?(fs.task||'active'):'idle'};
+    }));
+  },[agents,fleetState]);
   const pendingApprovals=useMemo(()=>(Array.isArray(approvals)?approvals:[]).filter(a=>a&&a.status==='pending'),[approvals]);
 
   const switchAgent=(name)=>{
@@ -439,21 +454,17 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
         h('span',{className:'sidebar-title'},'Sessions')),
       h('div',{style:{padding:'6px'}},
         h('button',{className:'new-chat-btn',onClick:()=>{const sid=`hirdforge-${target}-${Date.now()}`;saveAndSwitch(sid,[],target)}},'+ New conversation')),
-      h('div',{className:'agent-select'},
-        h('button',{key:'all',className:`agent-chip${target==='all'?' active':''}`,onClick:()=>switchAgent('all')},'All'),
-        agentList.map(name=>h('button',{key:name,className:`agent-chip${target===name?' active':''}`,onClick:()=>switchAgent(name)},name))
-      ),
-      h('div',{className:'sessions'},
-        history.length>0&&h('div',{className:'session active'},
-          h('div',{className:'session-agent'},h('div',{className:'dot dot-green dot-sm'}),target),
-          h('div',{className:'session-task'},history[0]?.content?.slice(0,60)||'Active session'),
-          h('div',{className:'session-time'},'now')
-        ),
-        sessions.filter(s=>s.id!==sessionId&&(isAll||s.agent===target)).map(s=>h('div',{key:s.id,className:'session',onClick:()=>loadSession(s.id)},
-          h('div',{className:'session-agent'},h('div',{className:'dot dot-idle dot-sm'}),s.agent||'Session'),
-          h('div',{className:'session-task'},s.summary||s.id),
-          h('div',{className:'session-time'},s.updated_at?ago(new Date(s.updated_at).getTime()):'')
-        ))
+      h('div',{className:'agent-list'},
+        agentRows.map(agent=>{
+          const isActive=(agent.name==='All'&&target==='all')||agent.name===target;
+          return h('div',{key:agent.name,className:`agent-row-new${isActive?' active':''}`,onClick:()=>switchAgent(agent.name==='All'?'all':agent.name)},
+            h('div',{className:`dot ${agent.name==='All'?'dot-idle':(agent.isActive?'dot-green':'dot-idle')} dot-sm`}),
+            h('div',{className:'agent-info'},
+              h('div',{className:'agent-info-name'},agent.name),
+              h('div',{className:'agent-info-status'},agent.name==='All'?'All agents':agent.status)
+            )
+          );
+        })
       )
     ),
     /* Chat Area */
