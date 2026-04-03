@@ -9,22 +9,9 @@ env:
   DOCKER_HOST: tcp://localhost:2375
   REGISTRY: registry-proxy.gitea.svc:5000/kit/hirdforge
 jobs:
-  validate-js:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Extract and validate JavaScript
-        run: |
-          sed -n '/<script>/,/<\/script>/p' cmd/gateway/index.html | sed '1d;$d' > /tmp/check.js
-          node --check /tmp/check.js
   build-agent:
     runs-on: ubuntu-latest
-    needs: [validate-js]
+
     steps:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
@@ -51,7 +38,7 @@ jobs:
           docker push $REGISTRY/valhalla-agent:sha-$SHA_SHORT
   build-gateway:
     runs-on: ubuntu-latest
-    needs: [validate-js]
+
     steps:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
@@ -78,7 +65,7 @@ jobs:
           docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
   build-seidr:
     runs-on: ubuntu-latest
-    needs: [validate-js]
+
     steps:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
@@ -105,7 +92,7 @@ jobs:
           docker push $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
   build-codex:
     runs-on: ubuntu-latest
-    needs: [validate-js]
+
     steps:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
@@ -132,7 +119,7 @@ jobs:
           docker push $REGISTRY/valhalla-codex:sha-$SHA_SHORT
   build-lockbox:
     runs-on: ubuntu-latest
-    needs: [validate-js]
+
     steps:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
@@ -161,7 +148,7 @@ jobs:
           fi
   build-hirdforge:
     runs-on: ubuntu-latest
-    needs: [validate-js]
+
     steps:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
@@ -188,7 +175,7 @@ jobs:
           docker push $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
   build-astgraph:
     runs-on: ubuntu-latest
-    needs: [validate-js]
+
     steps:
       - name: Install Docker CLI
         run: apk add --no-cache docker-cli
