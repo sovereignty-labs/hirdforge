@@ -404,6 +404,8 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
     saveAndSwitch(sid,[],name);
   };
 
+  const isAll=target==='all';
+
   const send=()=>{
     if(!msg.trim()||sending)return;
     const userMsg={role:'user',content:msg.trim(),ts:Date.now()};
@@ -437,6 +439,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
       h('div',{style:{padding:'6px'}},
         h('button',{className:'new-chat-btn',onClick:()=>{const sid=`hirdforge-${target}-${Date.now()}`;saveAndSwitch(sid,[],target)}},'+ New conversation')),
       h('div',{className:'agent-select'},
+        h('button',{key:'all',className:`agent-chip${target==='all'?' active':''}`,onClick:()=>switchAgent('all')},'All'),
         agentList.map(name=>h('button',{key:name,className:`agent-chip${target===name?' active':''}`,onClick:()=>switchAgent(name)},name))
       ),
       h('div',{className:'sessions'},
@@ -445,7 +448,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
           h('div',{className:'session-task'},history[0]?.content?.slice(0,60)||'Active session'),
           h('div',{className:'session-time'},'now')
         ),
-        sessions.filter(s=>s.agent===target&&s.id!==sessionId).map(s=>h('div',{key:s.id,className:'session',onClick:()=>loadSession(s.id)},
+        sessions.filter(s=>s.id!==sessionId&&(isAll||s.agent===target)).map(s=>h('div',{key:s.id,className:'session',onClick:()=>loadSession(s.id)},
           h('div',{className:'session-agent'},h('div',{className:'dot dot-idle dot-sm'}),s.agent||'Session'),
           h('div',{className:'session-task'},s.summary||s.id),
           h('div',{className:'session-time'},s.updated_at?ago(new Date(s.updated_at).getTime()):'')
@@ -463,7 +466,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
         )
       ),
       h('div',{className:'messages'},
-        history.length===0&&h('div',{className:'empty',style:{marginTop:60}},'Send a message to ',target,' to get started.'),
+        history.length===0&&h('div',{className:'empty',style:{marginTop:60}},isAll?'Select an agent to start a conversation':'Send a message to ',target,' to get started.'),
         // Inline PR notification cards for new PRs
         newPRs.length>0&&newPRs.map(pr=>h('div',{key:'pr-'+pr.number,className:'pr-card',style:{display:'flex',flexDirection:'column',gap:6}},
           h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between'}},
@@ -495,7 +498,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
               )
             )
           ),
-        events.filter(e=>e.Agent===target).slice(0,15).map((e,i)=>h('div',{key:'ev-'+i,className:'activity-card'},
+        events.filter(e=>isAll||e.Agent===target).slice(0,15).map((e,i)=>h('div',{key:'ev-'+i,className:'activity-card'},
           h('span',null,eventIcon(e.Type)),
           h('span',null,e.Summary||''),
           h('span',null,e.Time?ago(Math.floor(new Date(e.Time).getTime()/1000)):'')
@@ -504,7 +507,7 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
       ),
       h('div',{className:'input-area'},
         h('textarea',{ref:inputRef,className:'chat-input',placeholder:`Message ${target}...`,value:msg,onChange:e=>setMsg(e.target.value),onKeyDown:handleKey,rows:1}),
-        h('button',{className:'send-btn',onClick:send,disabled:sending||!msg.trim()},sending?'···':'Send')
+        h('button',{className:'send-btn',onClick:send,disabled:sending||!msg.trim()||isAll},sending?'···':'Send')
       )
     ),
     /* Slide-over panels */
