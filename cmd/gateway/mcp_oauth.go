@@ -397,6 +397,7 @@ func (s *gatewayMCPOAuthServer) handleToken(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "MCP_SOVEREIGN_TOKEN is not configured", http.StatusServiceUnavailable)
 		return
 	}
+	log.Printf("mcp oauth: token exchange SUCCEEDED for client_id=%s", req.ClientID)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"access_token": s.accessToken,
 		"token_type":   "bearer",
