@@ -363,9 +363,12 @@ func (s *gatewayMCPOAuthServer) handleToken(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid client_id", http.StatusUnauthorized)
 		return
 	}
-	if s.clientSecret == "" || req.ClientSecret != s.clientSecret {
-		http.Error(w, "invalid client_secret", http.StatusUnauthorized)
-		return
+	log.Printf("mcp oauth: token exchange client_id=%s has_secret=%v has_verifier=%v", req.ClientID, req.ClientSecret != "", req.CodeVerifier != "")
+	if req.CodeVerifier == "" {
+		if s.clientSecret == "" || req.ClientSecret != s.clientSecret {
+			http.Error(w, "invalid client_secret", http.StatusUnauthorized)
+			return
+		}
 	}
 	code, ok := s.store.consume(strings.TrimSpace(req.Code))
 	if !ok {
