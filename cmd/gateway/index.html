@@ -353,6 +353,8 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   const inputRef=useRef(null);
   const initialPRs=useRef(null);
   const sessionCache=useRef({});
+  const agentSessionMap=useRef({});
+  useEffect(()=>{agentSessionMap.current[target]=sessionId},[]);
 
   // Track initial PRs on mount — only show new PRs as notifications
   useEffect(()=>{
@@ -416,8 +418,21 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   const pendingApprovals=useMemo(()=>(Array.isArray(approvals)?approvals:[]).filter(a=>a&&a.status==='pending'),[approvals]);
 
   const switchAgent=(name)=>{
-    const sid=`hirdforge-${name}-${Date.now()}`;
-    saveAndSwitch(sid,[],name);
+    if(target&&sessionId){
+      agentSessionMap.current[target]=sessionId;
+      sessionCache.current[sessionId]={history,target};
+    }
+    const existingSid=agentSessionMap.current[name];
+    if(existingSid&&sessionCache.current[existingSid]){
+      const cached=sessionCache.current[existingSid];
+      setSessionId(existingSid);
+      setHistory(cached.history);
+      setTarget(name);
+    }else{
+      const sid=`hirdforge-${name}-${Date.now()}`;
+      agentSessionMap.current[name]=sid;
+      saveAndSwitch(sid,[],name);
+    }
   };
 
   const isAll=target==='all';
