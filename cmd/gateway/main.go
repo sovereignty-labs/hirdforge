@@ -28,6 +28,8 @@ import (
 	"time"
 
 	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
+	temporalclient "go.temporal.io/sdk/client"
+	wf "github.com/kitporath/project_valhalla/pkg/workflows"
 )
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
@@ -341,8 +343,10 @@ type gateway struct {
 
 	// delegationTimelines stores typed events indexed by session_id.
 	// Access is protected by dtlMu.
-	dtlMu             sync.RWMutex
+	dtlMu               sync.RWMutex
 	delegationTimelines map[string][]delegationTimelineEvent
+
+	temporalClient temporalclient.Client
 }
 
 type settingsStore struct {
@@ -2069,7 +2073,20 @@ func main() {
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for Gitea webhook validation (optional)")
 	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
 	seidrURLFlag := flag.String("seidr-url", "http://seidr.asgard.svc:8082", "Seidr memory service URL")
+	temporalAddr := flag.String("temporal-addr", "", "Temporal server address (e.g. temporal.valhalla.svc.cluster.local:7233). If empty, Temporal integration is disabled.")
 	flag.Parse()
+	var temporalClient temporalclient.Client
+	if *temporalAddr != "" {
+		var err error
+		temporalClient, err = temporalclient.Dial(temporalclient.Options{
+			HostPort: *temporalAddr,
+		})
+		if err != nil {
+			log.Printf("WARNING: Temporal connection failed: %v (v2 message endpoint disabled)", err)
+		} else {
+			log.Printf("Temporal client connected to %s", *temporalAddr)
+		}
+	}
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
 			log.Printf("invalid GATEWAY_STREAM_TIMEOUT_SECONDS=%q: %v", raw, err)
@@ -2113,6 +2130,7 @@ func main() {
 		discordWebhookURL: strings.TrimSpace(*discordWebhookURL),
 		delegationTimelines: make(map[string][]delegationTimelineEvent),
 	}
+	gw.temporalClient = temporalClient
 	if err := gw.loadPipelineState(); err != nil {
 		log.Printf("webhook: failed to load pipeline state: %v", err)
 	}
@@ -3782,6 +3800,65 @@ func main() {
 			return
 		}
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+	})
+	mux.HandleFunc("/api/v2/message", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if gw.temporalClient == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Temporal integration not configured"})
+			return
+		}
+		var in messageReq
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		if in.Agent == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent is required"})
+			return
+		}
+		sessionID := strings.TrimSpace(in.SessionID)
+		if sessionID == "" {
+			sessionID = fmt.Sprintf("temporal-%s-%d", in.Agent, time.Now().UnixNano())
+		}
+		workflowID := fmt.Sprintf("sovereign-session-%s", in.Agent)
+		msg := wf.SovereignMessage{
+			Content:   in.Content,
+			SessionID: sessionID,
+			AgentName: in.Agent,
+		}
+		updateOpts := temporalclient.UpdateWithStartWorkflowOptions{
+			UpdateOptions: temporalclient.UpdateWorkflowOptions{
+				UpdateName:   "send_message",
+				Args:         []interface{}{msg},
+				WaitForStage: temporalclient.WorkflowUpdateStageCompleted,
+			},
+		}
+		startOpts := temporalclient.StartWorkflowOptions{
+			ID:        workflowID,
+			TaskQueue: wf.TaskQueue,
+		}
+		startOp := gw.temporalClient.NewWithStartWorkflowOperation(startOpts, wf.SovereignSessionWorkflow, in.Agent)
+		updateOpts.StartWorkflowOperation = startOp
+		handle, err := gw.temporalClient.UpdateWithStartWorkflow(r.Context(), updateOpts)
+		if err != nil {
+			log.Printf("temporal v2: UpdateWithStartWorkflow failed for %s: %v", in.Agent, err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("Temporal error: %v", err)})
+			return
+		}
+		var resp wf.SovereignResponse
+		if err := handle.Get(r.Context(), &resp); err != nil {
+			log.Printf("temporal v2: Update result failed for %s: %v", in.Agent, err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": fmt.Sprintf("Temporal response error: %v", err)})
+			return
+		}
+		if resp.Error != "" {
+			writeJSON(w, http.StatusOK, map[string]interface{}{"content": resp.Content, "error": resp.Error, "session_id": sessionID, "agent": in.Agent})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"content": resp.Content, "session_id": sessionID, "agent": in.Agent})
 	})
 	mux.HandleFunc("/api/v1/message", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
