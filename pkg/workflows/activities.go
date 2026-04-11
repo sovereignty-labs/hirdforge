@@ -125,3 +125,97 @@ func (a *AgentActivities) SendMessageToAgent(ctx context.Context, agentName stri
 
 	return result, nil
 }
+
+// DispatchToAgent sends a message to an agent and returns the full response.
+// It POSTs to http://{agentName}.asgard.svc:8081/message with JSON body
+// {"message": message}. SSE chunks are collected into a single string.
+// Timeout: 5 minutes.
+func (a *AgentActivities) DispatchToAgent(ctx context.Context, agentName string, message string) (string, error) {
+	logger := activity.GetLogger(ctx)
+	logger.Info("DispatchToAgent", "agent", agentName, "msg_len", len(message))
+
+	agentURL := fmt.Sprintf("http://%s.asgard.svc:8081/message", agentName)
+
+	reqBody, err := json.Marshal(agentMessageRequest{Message: message})
+	if err != nil {
+		return "", fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", agentURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("POST to %s: %w", agentName, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("agent %s returned %d: %s", agentName, resp.StatusCode, string(body))
+	}
+
+	activity.RecordHeartbeat(ctx, "collecting SSE response")
+
+	var fullResponse strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 1024*1024)
+
+	chunkCount := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+			for _, field := range []string{"content", "text", "response"} {
+				if v, ok := chunk[field]; ok {
+					if s, ok := v.(string); ok {
+						fullResponse.WriteString(s)
+						chunkCount++
+						break
+					}
+				}
+			}
+		} else {
+			fullResponse.WriteString(data)
+			chunkCount++
+		}
+
+		if chunkCount%10 == 0 {
+			activity.RecordHeartbeat(ctx, fmt.Sprintf("received %d chunks", chunkCount))
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Warn("SSE scanner error", "error", err)
+	}
+
+	result := fullResponse.String()
+	logger.Info("DispatchToAgent complete", "agent", agentName, "chunks", chunkCount, "response_len", len(result))
+
+	if result == "" {
+		return "", fmt.Errorf("agent %s returned empty response after %d chunks", agentName, chunkCount)
+	}
+
+	return result, nil
+}
+
+// ClassifyMessage classifies a message content type.
+// For MVP: always returns "task". Placeholder for LLM-based classification later.
+func (a *AgentActivities) ClassifyMessage(ctx context.Context, content string) (string, error) {
+	// MVP: all messages are tasks
+	return "task", nil
+}
