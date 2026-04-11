@@ -146,6 +146,33 @@ jobs:
             fi
             docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
           fi
+  build-worker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: "true"
+      - name: Clone repository
+        run: rm -rf /src-worker && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-worker
+      - name: Build and push worker
+        run: |
+          cd /src-worker
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(cmd/worker/|pkg/workflows/|go\.mod$|go\.sum$|Dockerfile\.worker$)'; then
+            if docker pull $REGISTRY/temporal-worker:latest 2>/dev/null; then
+              docker tag $REGISTRY/temporal-worker:latest $REGISTRY/temporal-worker:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.worker -t $REGISTRY/temporal-worker:latest -t $REGISTRY/temporal-worker:sha-$SHA_SHORT .
+              docker push $REGISTRY/temporal-worker:latest
+            fi
+          else
+            docker build -f Dockerfile.worker -t $REGISTRY/temporal-worker:latest -t $REGISTRY/temporal-worker:sha-$SHA_SHORT .
+            docker push $REGISTRY/temporal-worker:latest
+          fi
+          docker push $REGISTRY/temporal-worker:sha-$SHA_SHORT
   build-hirdforge:
     runs-on: ubuntu-latest
 
@@ -203,7 +230,7 @@ jobs:
   update-infra:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox, build-hirdforge, build-astgraph]
+    needs: [build-agent, build-gateway, build-seidr, build-codex, build-lockbox, build-worker, build-hirdforge, build-astgraph]
     steps:
       - name: Install tools
         run: apk add --no-cache curl jq python3
@@ -251,6 +278,8 @@ jobs:
           for file in updated:
               print(f"updated: {file}")
           PY
+          # Update temporal-worker image tag
+          sed -i "s|image:.*temporal-worker:.*|image: git.hirdforge.com/kit/hirdforge/temporal-worker:${NEW_TAG}|" infrastructure/asgard/temporal-worker.yaml
           git config user.name "CI Bot" && git config user.email "ci@valhalla.local"
           BRANCH_NAME="ci/update-images-$SHA_SHORT"
           git checkout -b $BRANCH_NAME
