@@ -408,7 +408,6 @@ type trackedTask struct {
 
 var sessions = map[string][]message{}
 var seenSessions = map[string]bool{}
-var skillNudgeInjected = map[string]bool{}
 var sessionContextMemoryIDs = map[string]map[string]struct{}{}
 var sessionValidatedIDs = map[string]map[string]bool{}
 var episodicStates = map[string]string{} // sessionID -> loaded narrative
@@ -4350,11 +4349,6 @@ func main() {
 		if firstMessage {
 			seenSessions[sessionID] = true
 		}
-		injectSkillNudge := false
-		if firstMessage && strings.TrimSpace(*personaRepoFlag) != "" && !skillNudgeInjected[sessionID] {
-			skillNudgeInjected[sessionID] = true
-			injectSkillNudge = true
-		}
 		sessionsMu.Unlock()
 		sanitizeHistory := func(history []message) []message {
 			if len(history) == 0 {
@@ -4460,12 +4454,6 @@ func main() {
 			})
 		}
 		messages = append(messages, history...)
-		if injectSkillNudge {
-			messages = append(messages, message{
-				Role:    "user",
-				Content: "Before starting this task, check the Skills table in your SOUL and load any matching skill files using exec: cat /tmp/valhalla-personas/<path>. Do not skip this step.",
-			})
-		}
 		if *intuitionFlag {
 			if intuitionCtx := fetchIntuitiveContext(*memoryURL, agentName, content); intuitionCtx != "" {
 				messages = append(messages, message{Role: "user", Content: intuitionCtx})
@@ -5045,7 +5033,6 @@ func main() {
 			sessionsMu.Lock()
 			delete(sessions, sessionID)
 			delete(seenSessions, sessionID)
-			delete(skillNudgeInjected, sessionID)
 			delete(sessionContextMemoryIDs, sessionID)
 			delete(sessionValidatedIDs, sessionID)
 			delete(episodicStates, sessionID)
