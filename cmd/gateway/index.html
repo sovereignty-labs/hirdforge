@@ -193,6 +193,16 @@ a{color:inherit;text-decoration:none}
 .restart-btn{font-size:10px;color:var(--text-muted);padding:2px 6px;border-radius:4px;transition:all 0.12s}
 .restart-btn:hover{color:var(--amber);background:var(--amber-dim)}
 .activity-card{display:flex;align-items:center;gap:8px;padding:4px 10px;font-size:11px;color:var(--text-dim);border-left:2px solid var(--border)}
+.dispatch-sessions{display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto}
+.dispatch-session{padding:10px 12px;border-radius:var(--radius);background:rgba(255,255,255,0.02);border:1px solid var(--border);transition:all 0.12s}
+.dispatch-session:hover{background:rgba(255,255,255,0.04)}
+.dispatch-session.active{background:var(--accent-dim);border-color:var(--accent-border)}
+.dispatch-session-agent{font-size:12px;font-weight:500;color:var(--text-bright)}
+.dispatch-timeline{margin-top:16px}
+.dispatch-timeline-hdr{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);margin-bottom:12px}
+.dispatch-events{display:flex;flex-direction:column;gap:8px}
+.dispatch-event{padding:10px 12px;border-radius:var(--radius);transition:background 0.12s}
+.dispatch-event:hover{filter:brightness(1.1)}
 </style>
 </head>
 <body>
@@ -549,6 +559,181 @@ function CommsView({agents,fleetState,prs,approvals,events,wsOk,showToast,onMerg
   );
 }
 
+/* ── DispatchView ── */
+function DispatchView({events}){
+  const[knownSessions,setKnownSessions]=useState([]);
+  const[selectedSession,setSelectedSession]=useState(null);
+  const[timeline,setTimeline]=useState(null);
+  const[timelineLoading,setTimelineLoading]=useState(false);
+  const[agentFilter,setAgentFilter]=useState('all');
+
+  // Extract unique sessions from events and maintain knownSessions list
+  useEffect(()=>{
+    if(!events||!events.length)return;
+    const sessionMap={};
+    events.forEach(e=>{
+      const sid=e.SessionId||e.session_id||'';
+      if(!sid)return;
+      if(!sessionMap[sid]){
+        // Extract agent name from session ID like "hirdforge-ragnar-123" -> "ragnar"
+        const parts=sid.split('-');
+        const agent=parts.length>=3?parts[2]:(parts[1]||'unknown');
+        sessionMap[sid]={id:sid,agent,lastActivity:e.Time||e.time};
+      }else{
+        // Update lastActivity if newer
+        const existingTs=new Date(sessionMap[sid].lastActivity).getTime();
+        const newTs=new Date(e.Time||e.time).getTime();
+        if(newTs>existingTs)sessionMap[sid].lastActivity=e.Time||e.time;
+      }
+    });
+    const sessions=Object.values(sessionMap).sort((a,b)=>{
+      const ta=a.lastActivity?new Date(a.lastActivity).getTime():0;
+      const tb=b.lastActivity?new Date(b.lastActivity).getTime():0;
+      return tb-ta;
+    });
+    setKnownSessions(sessions);
+  },[events]);
+
+  // Auto-refresh: when wsEvents array changes and a selectedSession is active, re-fetch timeline
+  useEffect(()=>{
+    if(!selectedSession)return;
+    const fetchTimeline=async()=>{
+      setTimelineLoading(true);
+      try{
+        const data=await api(`/api/v1/delegation/timeline/${encodeURIComponent(selectedSession)}`);
+        if(data)setTimeline(data);
+      }catch(e){console.error('Failed to fetch timeline:',e)}
+      setTimelineLoading(false);
+    };
+    fetchTimeline();
+    // Set up polling for auto-refresh
+    const interval=setInterval(fetchTimeline,5000);
+    return()=>clearInterval(interval);
+  },[selectedSession,events.length]);
+
+  // Filter sessions by agent
+  const filteredSessions=useMemo(()=>{
+    if(agentFilter==='all')return knownSessions;
+    return knownSessions.filter(s=>s.agent===agentFilter);
+  },[knownSessions,agentFilter]);
+
+  // Get unique agents for filter dropdown
+  const uniqueAgents=useMemo(()=>{
+    const agents=new Set(knownSessions.map(s=>s.agent));
+    return['all',...Array.from(agents).sort()];
+  },[knownSessions]);
+
+  // Calculate session duration from timeline
+  const sessionDuration=useMemo(()=>{
+    if(!timeline||!timeline.events||!timeline.events.length)return null;
+    const events=timeline.events;
+    const first=events[0]?.timestamp||events[0]?.time;
+    const last=events[events.length-1]?.timestamp||events[events.length-1]?.time;
+    if(!first||!last)return null;
+    const start=new Date(first).getTime();
+    const end=new Date(last).getTime();
+    const elapsed=Math.floor((end-start)/1000);
+    if(elapsed<60)return elapsed+'s';
+    if(elapsed<3600)return Math.floor(elapsed/60)+'m '+Math.floor(elapsed%60)+'s';
+    return Math.floor(elapsed/3600)+'h '+Math.floor((elapsed%3600)/60)+'m';
+  },[timeline]);
+
+  // Determine event color based on type
+  const getEventColor=(event)=>{
+    const type=(event.type||event.event_type||'').toLowerCase();
+    const summary=(event.summary||event.description||'').toLowerCase();
+    // Dispatch events - amber
+    if(type==='dispatch'||type==='delegate'||summary.includes('dispatch')||summary.includes('delegate')||summary.includes('delegated')){
+      return{color:'var(--amber)',bg:'var(--amber-dim)',border:'var(--amber-border)'};
+    }
+    // Review events - blue (accent)
+    if(type==='review'||type==='review_requested'||summary.includes('review')||summary.includes('reviewing')){
+      return{color:'var(--accent)',bg:'var(--accent-dim)',border:'var(--accent-border)'};
+    }
+    // Completion/merge events - green
+    if(type==='merge'||type==='completed'||type==='success'||summary.includes('merge')||summary.includes('merged')||summary.includes('completed')||summary.includes('success')){
+      return{color:'var(--green)',bg:'var(--green-dim)',border:'var(--green-border)'};
+    }
+    // Failure events - red
+    if(type==='failure'||type==='failed'||type==='error'||summary.includes('fail')||summary.includes('error')||summary.includes('rejected')){
+      return{color:'var(--red)',bg:'var(--red-dim)',border:'var(--red-border)'};
+    }
+    // Default
+    return{color:'var(--text)',bg:'var(--bg-surface)',border:'var(--border)'};
+  };
+
+  return h('div',{className:'view-scroll'},
+    h('div',{className:'section-title'},'Dispatch — Delegation Timeline'),
+    // Agent filter dropdown
+    h('div',{style:{display:'flex',gap:10,alignItems:'center',marginBottom:16}},
+      h('label',{style:{fontSize:11,color:'var(--text-dim)'}},'Filter by agent:'),
+      h('select',{
+        value:agentFilter,
+        onChange:e=>setAgentFilter(e.target.value),
+        style:{background:'rgba(255,255,255,0.04)',border:'1px solid rgba(255,255,255,0.08)',borderRadius:6,padding:'4px 10px',color:'var(--text)',fontSize:12,cursor:'pointer'}
+      },
+        uniqueAgents.map(a=>h('option',{key:a,value:a},a==='all'?'All agents':a))
+      ),
+      h('span',{style:{fontSize:11,color:'var(--text-muted)'}},filteredSessions.length,' session(s)')
+    ),
+    // Sessions list
+    h('div',{style:{marginBottom:20}},
+      h('div',{style:{fontSize:11,color:'var(--text-dim)',marginBottom:8,textTransform:'uppercase',letterSpacing:'0.08em'}},'Sessions'),
+      filteredSessions.length===0
+        ?h('div',{className:'empty'},'No sessions found')
+        :h('div',{className:'dispatch-sessions'},
+            filteredSessions.map(s=>{
+              const isSelected=selectedSession===s.id;
+              return h('div',{
+                key:s.id,
+                className:`dispatch-session${isSelected?' active':''}`,
+                onClick:()=>setSelectedSession(isSelected?null:s.id),
+                style:{cursor:'pointer'}
+              },
+                h('div',{className:'dispatch-session-agent'},s.agent),
+                h('div',{className:'dispatch-session-id',style:{fontSize:10,color:'var(--text-muted)',marginTop:2}},
+                  s.id.length>40?s.id.slice(0,40)+'...':s.id
+                ),
+                h('div',{className:'dispatch-session-time',style:{fontSize:10,color:'var(--text-muted)',marginTop:4}},
+                  s.lastActivity?ago(Math.floor(new Date(s.lastActivity).getTime()/1000))+' ago':'no activity'
+                )
+              );
+            })
+          )
+    ),
+    // Timeline display
+    selectedSession&&h('div',{className:'dispatch-timeline'},
+      h('div',{className:'dispatch-timeline-hdr'},
+        h('span',{style:{fontSize:12,fontWeight:500,color:'var(--text-bright)'}},'Timeline'),
+        sessionDuration&&h('span',{style:{fontSize:11,color:'var(--text-muted)',marginLeft:8}},'Duration: ',sessionDuration),
+        timelineLoading&&h('span',{style:{fontSize:10,color:'var(--text-muted)',marginLeft:8}},'Loading...')
+      ),
+      timeline&&timeline.events&&timeline.events.length>0
+        ?h('div',{className:'dispatch-events'},
+            timeline.events.map((e,i)=>{
+              const colors=getEventColor(e);
+              return h('div',{
+                key:i,
+                className:'dispatch-event',
+                style:{borderLeftColor:colors.color,background:colors.bg,borderLeft:'3px solid '+colors.color}
+              },
+                h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:4}},
+                  h('span',{style:{fontSize:11,fontWeight:500,color:colors.color}},e.type||e.event_type||'event'),
+                  h('span',{style:{fontSize:10,color:'var(--text-muted)'}},
+                    e.timestamp||e.time?ago(Math.floor(new Date(e.timestamp||e.time).getTime()/1000))+' ago':''
+                  )
+                ),
+                h('div',{style:{fontSize:12,color:'var(--text)'}},e.summary||e.description||JSON.stringify(e).slice(0,100)),
+                e.agent&&h('div',{style:{fontSize:10,color:'var(--text-dim)',marginTop:4}},'Agent: ',e.agent),
+                e.pr_number&&h('div',{style:{fontSize:10,color:'var(--text-dim)',marginTop:2}},'PR #',e.pr_number)
+              );
+            })
+          )
+        :h('div',{className:'empty',style:{marginTop:20}},'No events in timeline')
+    )
+  );
+}
+
 /* ── RealmView ── */
 function RealmView({nodes,pods,gitops}){
   const[nsFilter,setNsFilter]=useState('asgard');
@@ -713,9 +898,9 @@ function App(){
       h('div',{className:'header-left'},
         h('div',{className:'logo'},h('span',{className:'logo-mark'},'⚒'),' Hirdforge'),
         h('div',{className:'nav'},
-          ['comms','realm','settings'].map(t=>
+          ['comms','realm','dispatch','settings'].map(t=>
             h('button',{key:t,className:tab===t?'active':'',onClick:()=>{setTab(t);setPanel(null)}},
-              t==='comms'?'Comms':t==='realm'?'Realm':'Settings'))
+              t==='comms'?'Comms':t==='realm'?'Realm':t==='dispatch'?'Dispatch':'Settings'))
         )
       ),
       h('div',{className:'status-bar'},
@@ -738,6 +923,7 @@ function App(){
         const parts=pr.repository?.full_name?.split('/')||[];
         if(parts.length===2)await apiPost(`/api/v1/gitea/prs/${parts[0]}/${parts[1]}/${pr.number}/close`);
       },onApproval,onRestart}),
+    tab==='dispatch'&&h(DispatchView,{events}),
     tab==='realm'&&h(RealmView,{nodes,pods,gitops}),
     tab==='settings'&&h(SettingsView,{agents,fleetState}),
     /* Global slide-overs (visible on any tab) */
