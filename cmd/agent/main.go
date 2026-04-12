@@ -3084,6 +3084,32 @@ func renderSoulSections(sections []soulSection) string {
 	return strings.Join(parts, "\n\n") + "\n"
 }
 
+func parseSoulAllowedTools(soulContent string) []string {
+	trimmed := strings.TrimSpace(soulContent)
+	if !strings.HasPrefix(trimmed, "---") {
+		return nil
+	}
+	parts := strings.SplitN(trimmed, "---", 3)
+	if len(parts) < 3 {
+		return nil
+	}
+	for _, line := range strings.Split(parts[1], "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "allowed_tools:") {
+			value := strings.TrimPrefix(line, "allowed_tools:")
+			value = strings.Trim(strings.TrimSpace(value), "[]")
+			var tools []string
+			for _, t := range strings.Split(value, ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					tools = append(tools, t)
+				}
+			}
+			return tools
+		}
+	}
+	return nil
+}
+
 func countSoulLines(content string) int {
 	trimmed := strings.TrimRight(content, "\n")
 	if trimmed == "" {
@@ -4136,6 +4162,23 @@ func main() {
 	for _, name := range strings.Split(*toolsFlag, ",") {
 		if name = strings.TrimSpace(name); name != "" {
 			enabled[name] = true
+		}
+	}
+	if allowedTools := parseSoulAllowedTools(soul); len(allowedTools) > 0 {
+		allowed := map[string]bool{}
+		for _, t := range allowedTools {
+			allowed[t] = true
+		}
+		for name := range enabled {
+			if !allowed[name] {
+				delete(enabled, name)
+				logJSON("info", "tool filtered by soul allowed_tools", map[string]interface{}{"tool": name, "agent": agentName})
+			}
+		}
+	}
+	if trimmed := strings.TrimSpace(soul); strings.HasPrefix(trimmed, "---") {
+		if parts := strings.SplitN(trimmed, "---", 3); len(parts) >= 3 {
+			soul = strings.TrimSpace(parts[2])
 		}
 	}
 	if enabled["exec"] {
