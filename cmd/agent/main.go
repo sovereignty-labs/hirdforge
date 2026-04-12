@@ -4030,6 +4030,7 @@ func main() {
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
 	intuitionFlag := flag.Bool("intuition", false, "Enable Seidr intuitive recall (injects stale context; off by default")
+	episodicFlag := flag.Bool("episodic", false, "Enable episodic state loading/injection/persist")
 	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
 	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
 	requirePRPattern := flag.String("require-pr-pattern", "", "Regex pattern required in async task completion responses; empty disables the gate")
@@ -4408,7 +4409,7 @@ func main() {
 			return out
 		}
 		history = sanitizeHistory(history)
-		if firstMessage && strings.TrimSpace(*memoryURL) != "" {
+		if *episodicFlag && firstMessage && strings.TrimSpace(*memoryURL) != "" {
 			loaded := loadEpisodicState(*memoryURL, agentName)
 			if loaded != "" {
 				sessionsMu.Lock()
@@ -4443,7 +4444,7 @@ func main() {
 		sessionsMu.Lock()
 		episodicNarrative := episodicStates[sessionID]
 		sessionsMu.Unlock()
-		if strings.TrimSpace(episodicNarrative) != "" {
+		if *episodicFlag && strings.TrimSpace(episodicNarrative) != "" {
 			messages = append(messages, message{
 				Role:    "user",
 				Content: "Session context from your previous work session:\n" + episodicNarrative + "\n\nContinue from where you left off if relevant to the current task.",
@@ -4964,7 +4965,7 @@ func main() {
 		sessionsMu.Lock()
 		sessions[sessionID] = append(sessions[sessionID], message{Role: "user", Content: content}, message{Role: "assistant", Content: cleaned})
 		sessionsMu.Unlock()
-		if *memoryURL != "" && hadToolCalls {
+		if *episodicFlag && *memoryURL != "" && hadToolCalls {
 			sessionsMu.Lock()
 			currentHistory := append([]message(nil), sessions[sessionID]...)
 			sessionsMu.Unlock()
@@ -5035,7 +5036,9 @@ func main() {
 			delete(seenSessions, sessionID)
 			delete(sessionContextMemoryIDs, sessionID)
 			delete(sessionValidatedIDs, sessionID)
-			delete(episodicStates, sessionID)
+			if *episodicFlag {
+				delete(episodicStates, sessionID)
+			}
 			delete(trackedTasks, sessionID)
 			sessionsMu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
