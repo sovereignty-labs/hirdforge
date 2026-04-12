@@ -4031,6 +4031,7 @@ func main() {
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
 	intuitionFlag := flag.Bool("intuition", false, "Enable Seidr intuitive recall (injects stale context; off by default")
 	episodicFlag := flag.Bool("episodic", false, "Enable episodic state loading/injection/persist")
+	bootstrapFlag := flag.Bool("bootstrap", false, "Enable session bootstrap and reflection context injection")
 	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
 	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
 	requirePRPattern := flag.String("require-pr-pattern", "", "Regex pattern required in async task completion responses; empty disables the gate")
@@ -4427,18 +4428,22 @@ func main() {
 					logJSON("warn", "persona repo refresh failed", map[string]interface{}{"error": err.Error()})
 				}
 			}
-			bootstrapContext, bootstrapMemoryIDs = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, soul, persona)
-			if len(bootstrapMemoryIDs) > 0 {
-				addSessionContextMemoryIDs(sessionID, bootstrapMemoryIDs)
+			if *bootstrapFlag {
+				bootstrapContext, bootstrapMemoryIDs = buildSessionBootstrapContext(*memoryURL, agentName, *toolsFile, *playbookFile, soul, persona)
+				if len(bootstrapMemoryIDs) > 0 {
+					addSessionContextMemoryIDs(sessionID, bootstrapMemoryIDs)
+				}
+				reflectionContext = fetchReflectionContext(*memoryURL, agentName)
 			}
-			reflectionContext = fetchReflectionContext(*memoryURL, agentName)
 		}
 		systemContent := soul
-		if strings.TrimSpace(bootstrapContext) != "" {
-			systemContent = soul + "\n\n" + bootstrapContext
-		}
-		if strings.TrimSpace(reflectionContext) != "" {
-			systemContent += "\n\n" + reflectionContext
+		if *bootstrapFlag {
+			if strings.TrimSpace(bootstrapContext) != "" {
+				systemContent = soul + "\n\n" + bootstrapContext
+			}
+			if strings.TrimSpace(reflectionContext) != "" {
+				systemContent += "\n\n" + reflectionContext
+			}
 		}
 		messages := []message{{Role: "system", Content: systemContent}}
 		sessionsMu.Lock()
