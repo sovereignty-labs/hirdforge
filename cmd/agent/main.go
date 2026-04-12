@@ -4030,6 +4030,7 @@ func main() {
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
+	intuitionFlag := flag.Bool("intuition", false, "Enable Seidr intuitive recall (injects stale context; off by default")
 	hunterTask := flag.String("hunter-task", "", "JSON string with fetch instructions for hunter mode")
 	hunterQuarantine := flag.String("hunter-quarantine-prefix", "", "Seidr collection prefix for quarantine writes")
 	requirePRPattern := flag.String("require-pr-pattern", "", "Regex pattern required in async task completion responses; empty disables the gate")
@@ -4465,10 +4466,12 @@ func main() {
 				Content: "Before starting this task, check the Skills table in your SOUL and load any matching skill files using exec: cat /tmp/valhalla-personas/<path>. Do not skip this step.",
 			})
 		}
-		if intuitionCtx := fetchIntuitiveContext(*memoryURL, agentName, content); intuitionCtx != "" {
-			messages = append(messages, message{Role: "user", Content: intuitionCtx})
-			messages = append(messages, message{Role: "assistant", Content: "Noted, I'll keep that context in mind."})
-			logJSON("info", "intuitive recall injected", map[string]interface{}{"agent": agentName, "session_id": sessionID, "memories": strings.Count(intuitionCtx, "\n- ") + 1})
+		if *intuitionFlag {
+			if intuitionCtx := fetchIntuitiveContext(*memoryURL, agentName, content); intuitionCtx != "" {
+				messages = append(messages, message{Role: "user", Content: intuitionCtx})
+				messages = append(messages, message{Role: "assistant", Content: "Noted, I'll keep that context in mind."})
+				logJSON("info", "intuitive recall injected", map[string]interface{}{"agent": agentName, "session_id": sessionID, "memories": strings.Count(intuitionCtx, "\n- ") + 1})
+			}
 		}
 		messages = append(messages, message{Role: "user", Content: content})
 
