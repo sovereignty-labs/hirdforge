@@ -883,6 +883,20 @@ func (g *gateway) dispatchReviewToAgent(agentName string, agentURL string, pr we
 	reviewText = strings.TrimSpace(thinkTagRE.ReplaceAllString(reviewText, ""))
 	log.Printf("webhook: %s completed for PR #%d on %s by %s: %s", eventType, pr.Number, pr.Repo, agentName, reviewText)
 	g.addEvent(eventType, agentName, fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo))
+	// Also record to the delegation timeline so review dispatch events appear
+	// in the warfeed timeline with full session context.
+	g.addDelegationTimelineEvent(sessionID, delegationTimelineEvent{
+		Type:      eventType,
+		Agent:     agentName,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Metadata: map[string]interface{}{
+			"session_id": sessionID,
+			"message":    fmt.Sprintf("Reviewed PR #%d on %s", pr.Number, pr.Repo),
+			"pr_number":  pr.Number,
+			"pr_title":   pr.Title,
+			"pr_repo":    pr.Repo,
+		},
+	})
 	return reviewText, nil
 }
 
@@ -1342,6 +1356,19 @@ func (g *gateway) dispatchTaskToAgent(agentName, agentURL string, task webhookIs
 		return fmt.Errorf("dispatch returned %d", resp.StatusCode)
 	}
 	g.addEvent("webhook_dispatch", agentName, fmt.Sprintf("Dispatched task #%d: %s", task.Number, task.Title))
+	// Also record to the delegation timeline so the "warfeed" timeline panel shows
+	// the dispatch event with its session_id, enabling full task lifecycle visibility.
+	g.addDelegationTimelineEvent(sessionID, delegationTimelineEvent{
+		Type:      "webhook_dispatch",
+		Agent:     agentName,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Metadata: map[string]interface{}{
+			"session_id":  sessionID,
+			"message":     fmt.Sprintf("Dispatched task #%d: %s", task.Number, task.Title),
+			"task_number": task.Number,
+			"task_title":  task.Title,
+		},
+	})
 	return nil
 }
 
