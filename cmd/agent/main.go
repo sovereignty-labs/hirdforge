@@ -4041,7 +4041,8 @@ func main() {
 	sovereignNotifyOn := flag.String("sovereign-notify-on", "completed,failed,nudged", "Comma-separated sovereign notification states")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
-	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
+	memoryURL        := flag.String("memory-url", "", "Seidr memory service URL")
+	memoryToolsFlag := flag.Bool("memory-tools", false, "Enable recall, remember, and memory-edit tools (requires --memory-url)")
 	gatewayURL := flag.String("gateway-url", "", "Gateway URL for event notifications (optional)")
 	agentNameFlag := flag.String("agent-name", "", "agent name override (defaults to soul filename)")
 	personaRepoFlag := flag.String("persona-repo", "", "git URL of persona repository")
@@ -4210,7 +4211,17 @@ func main() {
 		}
 		if enabled["gitea"] {
 			giteaTool = toolpkg.NewGiteaAPITool(*giteaURL, giteaToken)
-			reg.Register(giteaTool)
+			reg.Register(toolpkg.NewCreateIssueTool(giteaTool))
+			reg.Register(toolpkg.NewCreatePRTool(giteaTool))
+			reg.Register(toolpkg.NewListIssuesTool(giteaTool))
+			reg.Register(toolpkg.NewCloseIssueTool(giteaTool))
+			reg.Register(toolpkg.NewCommentTool(giteaTool))
+			reg.Register(toolpkg.NewCreateReviewTool(giteaTool))
+			reg.Register(toolpkg.NewMergePRTool(giteaTool))
+			reg.Register(toolpkg.NewListPRFilesTool(giteaTool))
+			reg.Register(toolpkg.NewUpdateLabelsTool(giteaTool))
+			reg.Register(toolpkg.NewGetIssueTool(giteaTool))
+			reg.Register(toolpkg.NewListBranchesTool(giteaTool))
 		}
 		if enabled["parallel-build"] {
 			reg.Register(toolpkg.NewParallelBuildTool(*workspace))
@@ -4223,7 +4234,7 @@ func main() {
 	if enabled["broadcast"] || len(peers) > 0 {
 		reg.Register(broadcastExec)
 	}
-	if strings.TrimSpace(*memoryURL) != "" {
+	if *memoryToolsFlag && strings.TrimSpace(*memoryURL) != "" {
 		reg.Register(recallExec)
 		reg.Register(rememberExec)
 		reg.Register(memoryEditExec)
