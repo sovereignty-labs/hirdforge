@@ -292,7 +292,7 @@ func (t *mergePRTool) Execute(args map[string]interface{}) ToolResult {
 	if prNum == 0 {
 		return ToolResult{Error: "index (PR number) is required"}
 	}
-	payload := map[string]string{"do": "merge"}
+	payload := map[string]string{"Do": "merge"}
 	resp, status, err := t.api.apiRequest("POST", fmt.Sprintf("/repos/%s/%s/pulls/%d/merge", owner, name, prNum), payload)
 	if err != nil {
 		return ToolResult{Error: err.Error()}
