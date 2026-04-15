@@ -267,7 +267,7 @@ function streamMessage(agent,message,sessionId,onChunk,onDone){
             if(line.startsWith('data: ')){
               const raw=line.slice(6);
               if(raw==='[DONE]'){onDone();return}
-              try{const j=JSON.parse(raw);if(j.content)onChunk(j.content);if(j.tool_call)onChunk(`\n[tool: ${j.tool_call.name}]\n`)}catch(e){onChunk(raw)}
+              try{const j=JSON.parse(raw);if(j.done){onDone();return}if(j.content)onChunk(j.content);if(j.tool_call)onChunk(`\n[tool: ${j.tool_call.name}]\n`)}catch(e){onChunk(raw)}
             }
           }
           pump();
