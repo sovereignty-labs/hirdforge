@@ -11,7 +11,7 @@ tags: [healthcheck, observability, embedding, liveness]
 acceptance:
   - /health returns HTTP 200 within 100ms with only {"status": "ok"} on success
   - /health performs only a DB connection ping — no count queries
-  - /health/embedding performs embedding health check and returns model/device status
+  - /health/embedding performs embedding health check and returns model/device status and latency
   - /health/embedding returns HTTP 503 when embedding is unavailable
   - Kubernetes liveness probe uses /health (existing probes continue to work)
   - Kubernetes readiness probe or monitoring can use /health/embedding
@@ -64,13 +64,16 @@ Checks:
 ```python
 @app.get("/health/embedding")
 async def health_embedding():
+    import time
     try:
         if EMBED_URL:
             async with httpx.AsyncClient(timeout=5.0) as client:
+                t0 = time.monotonic()
                 resp = await client.post(
                     f"{EMBED_URL.rstrip('/')}/embed",
                     json={"texts": ["ping"]}
                 )
+                latency_ms = (time.monotonic() - t0) * 1000
                 resp.raise_for_status()
                 data = resp.json()
                 embeddings = data.get("embeddings", [])
@@ -82,15 +85,21 @@ async def health_embedding():
                     "embed_url": EMBED_URL,
                     "model": EMBEDDING_MODEL,
                     "embedding_dim": len(embeddings[0]),
+                    "latency_ms": round(latency_ms, 2),
                 }
         else:
+            t0 = time.monotonic()
             if EMBED_MODEL is None:
                 raise HTTPException(status_code=503, detail="embedding model not initialized")
+            # Local model: warm up with a single inference to validate readiness
+            _ = EMBED_MODEL.encode(["ping"])
+            latency_ms = (time.monotonic() - t0) * 1000
             return {
                 "status": "ok",
                 "backend": "local",
                 "model": EMBEDDING_MODEL,
                 "device": EMBEDDING_DEVICE,
+                "latency_ms": round(latency_ms, 2),
             }
     except httpx.TimeoutException:
         raise HTTPException(status_code=503, detail="embedding service timed out")
@@ -115,5 +124,5 @@ async def health_embedding():
 
 ## Open Questions
 
-- Should `/health/embedding` include a latency field (e.g., `"latency_ms": 42}`)? Useful for dashboards. **Recommendation: add it.**
+- ~~Should `/health/embedding` include a latency field (e.g., `"latency_ms": 42}`)? Useful for dashboards. **Recommendation: add it.**~~ **Decided: yes, include `latency_ms`.**
 - Does the embed server's own `/health` need to stay as-is, or should it also adopt this pattern? The embed server is a sidecar — the main Seidr service should be the canonical health source for k8s probes.
