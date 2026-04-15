@@ -2681,6 +2681,23 @@ func main() {
 				// receive the full event payload (not just the legacy flat Event).
 				gw.broadcastPayload(evt)
 			}
+
+			// Delegation visibility: track target agent as active in fleet_state
+			if in.Type == "delegation_started" {
+				if target, ok := in.Metadata["target_agent"].(string); ok && target != "" {
+					sid, _ := in.Metadata["session_id"].(string)
+					if sid == "" {
+						sid = fmt.Sprintf("delegation-%s-%d", target, time.Now().UnixNano())
+					}
+					gw.setActiveRequest(target, sid, nil)
+				}
+			}
+			if in.Type == "delegation_ended" {
+				if target, ok := in.Metadata["target_agent"].(string); ok && target != "" {
+					gw.clearActiveRequest(target, nil)
+				}
+			}
+
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

@@ -4508,7 +4508,20 @@ func main() {
 				switch tc.Function.Name {
 				case "delegate":
 					args["_task_id"] = sessionID
+					targetAgent := strings.TrimSpace(fmt.Sprint(args["agent"]))
+					if targetAgent != "" {
+						notifyGateway(*gatewayURL, "delegation_started", agentName, map[string]interface{}{
+							"target_agent": targetAgent,
+							"session_id":   sessionID,
+						})
+					}
 					result = delegateExec.Execute(args)
+					if targetAgent != "" {
+						notifyGateway(*gatewayURL, "delegation_ended", agentName, map[string]interface{}{
+							"target_agent": targetAgent,
+							"session_id":   sessionID,
+						})
+					}
 				case "broadcast":
 					result = broadcastExec.Execute(args)
 				default:
