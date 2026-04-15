@@ -254,7 +254,7 @@ function useWS(){
 
 /* ── stream message via SSE ── */
 function streamMessage(agent,message,sessionId,onChunk,onDone){
-  const body=JSON.stringify({agent,message,session_id:sessionId});
+  const body=JSON.stringify({agent,content:message, session_id:sessionId});
   fetch('/api/v1/message',{method:'POST',headers:{'Content-Type':'application/json'},body})
     .then(res=>{
       const reader=res.body.getReader();const dec=new TextDecoder();let buf='';
