@@ -65,13 +65,10 @@ func SovereignSessionWorkflow(ctx workflow.Context, agentName string) error {
 
 		// Send message to agent and get response
 		var response string
-		// Wrap Sovereign's natural language in structured format.
-		// Agents respond reliably to TASK/DONE WHEN but fail on raw conversation.
-		wrappedContent := fmt.Sprintf("TASK: %s\n\nDONE WHEN: You have completed the request and reported back.", msg.Content)
 		err := workflow.ExecuteActivity(actCtx,
 			(*AgentActivities).DispatchToAgent,
 			msg.AgentName,
-			wrappedContent,
+			msg.Content,
 		).Get(ctx, &response)
 
 		state.MessageCount++
