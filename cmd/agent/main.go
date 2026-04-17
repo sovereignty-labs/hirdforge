@@ -4905,6 +4905,119 @@ func main() {
 			log.Printf("[STALL] agent=%s model=%s session=%s — no output produced", agentName, *model, sessionID)
 			atomic.AddInt64(&metricsStallsTotal, 1)
 			rememberToolFailure(*memoryURL, agentName, sessionID, "inference", map[string]interface{}{}, toolpkg.ToolResult{Error: "no output produced"}, "stall")
+
+			// Stall recovery: trim context aggressively and retry once
+			originalMsgCount := len(messages) - 1
+			trimmed := progressiveTrim(messages[1:], *maxContext/2)
+			messages = append([]message{messages[0]}, trimmed...)
+			newMsgCount := len(messages) - 1
+			log.Printf("[STALL-RETRY] agent=%s trimmed context from %d to %d messages, retrying", agentName, originalMsgCount, newMsgCount)
+
+			// Retry streaming with trimmed context
+			full.Reset()
+			xmlToolResults = nil
+			hadXMLToolCalls = false
+			streamIterationHadToolCalls = false
+			streamCtx2, cancelStream2 := withInferenceTimeout(ctx)
+			resp2 := streamResponsesWithContext(streamCtx2, messages, toolDefs, *inferenceURL, *model, *apiKey)
+			insideThink := false
+			for resp2 != nil {
+				select {
+				case event, ok := <-resp2:
+					if !ok {
+						resp2 = nil
+						break
+					}
+					if event.Err != nil {
+						log.Printf("[STALL-RETRY] stream error: %v", event.Err)
+						resp2 = nil
+						break
+					}
+					for _, tc := range event.ToolCalls {
+						cleanedChunk, xmlResults := extractAndExecuteXMLToolCalls(
+							fmt.Sprintf("<minimax:tool_call>\n<invoke name=%q>\n<parameter name=%q>%s</parameter>\n</invoke>\n</minimax:tool_call>", tc.Function.Name, "name", tc.Function.Arguments),
+							func(tc toolCall) ToolResult {
+								result := executeOneToolCall(tc)
+								out := result.Output
+								if result.Error != "" {
+									out = "ERROR: " + result.Error
+								}
+								if len(out) > 500 {
+									out = out[:500] + "...[truncated]"
+								}
+								xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+								return result
+							})
+						if len(xmlResults) > 0 {
+							hadXMLToolCalls = true
+						}
+						if cleanedChunk == "" {
+							continue
+						}
+						full.WriteString(cleanedChunk)
+						if !emit(sseChunk{Type: "content", Content: cleanedChunk, Done: false}) {
+							cancelStream2()
+							resp2 = nil
+							break
+						}
+					}
+					if event.Content != "" {
+						combined := event.Content
+						if strings.Contains(combined, "<think>") {
+							idx := strings.Index(combined, "<think>")
+							insideThink = true
+							cleaned := combined[:idx]
+							if end := strings.Index(combined[idx:], "</minimax:tool_call>"); end >= 0 {
+								insideThink = false
+								cleaned += combined[idx+end+len("</minimax:tool_call>"):]
+							}
+							combined = cleaned
+						} else if insideThink {
+							continue
+						} else if end := strings.Index(combined, "</minimax:tool_call>"); end >= 0 {
+							insideThink = false
+							combined = combined[end+len("</minimax:tool_call>"):]
+						}
+						combined = orphanThinkRe.ReplaceAllString(combined, "")
+						if combined == "" {
+							continue
+						}
+						_, xmlResults := extractAndExecuteXMLToolCalls(combined, func(tc toolCall) ToolResult {
+							result := executeOneToolCall(tc)
+							out := result.Output
+							if result.Error != "" {
+								out = "ERROR: " + result.Error
+							}
+							if len(out) > 500 {
+								out = out[:500] + "...[truncated]"
+							}
+							xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
+							return result
+						})
+						if len(xmlResults) > 0 {
+							hadXMLToolCalls = true
+						}
+						if combined == "" {
+							continue
+						}
+						full.WriteString(combined)
+						if !emit(sseChunk{Type: "content", Content: combined, Done: false}) {
+							cancelStream2()
+							resp2 = nil
+							break
+						}
+					}
+				case <-streamCtx2.Done():
+					resp2 = nil
+					break
+				}
+			}
+			cancelStream2()
+			finalContent = full.String()
+			if strings.TrimSpace(finalContent) == "" && !hadXMLToolCalls {
+				log.Printf("[STALL-FATAL] agent=%s model=%s session=%s — retry produced no output", agentName, *model, sessionID)
+				atomic.AddInt64(&metricsStallsTotal, 1)
+			}
 		}
 		if strings.Contains(finalContent, "<minimax:tool_call>") {
 			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
