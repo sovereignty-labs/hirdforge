@@ -197,8 +197,6 @@ jobs:
           for file in updated:
               print(f"updated: {file}")
           PY
-          # Update temporal-worker image tag
-          sed -i "s|image:.*temporal-worker:.*|image: git.hirdforge.com/kit/hirdforge/temporal-worker:${NEW_TAG}|" infrastructure/asgard/temporal-worker.yaml
           git config user.name "CI Bot" && git config user.email "ci@valhalla.local"
           BRANCH_NAME="ci/update-images-$SHA_SHORT"
           git checkout -b $BRANCH_NAME
