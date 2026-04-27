@@ -39,6 +39,9 @@ var streamTimeout = 600 * time.Second
 //go:embed index.html
 var dashboardHTML string
 
+//go:embed ui.html
+var uiHTML string
+
 type Agent struct {
 	Name           string   `json:"name"`
 	URL            string   `json:"url"`
@@ -2184,6 +2187,22 @@ func main() {
 	streamClient := &http.Client{Timeout: streamTimeout}
 	giteaClient := &http.Client{Timeout: 10 * time.Second}
 	mux := http.NewServeMux()
+	mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, uiHTML)
+	})
+	mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, uiHTML)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
