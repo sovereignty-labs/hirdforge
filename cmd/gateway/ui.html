@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hirdforge UI 1.0</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgb(39 39 42); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgb(63 63 70); }
+    * { scrollbar-width: thin; scrollbar-color: rgb(39 39 42) transparent; }
+    body { margin: 0; background: rgb(9 9 11); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useState } = React;
+
+    const agents = [
+      { id: 'ragnar', name: 'Ragnar', role: 'Architect', model: 'MiniMax M2.7', status: 'active', task: 'Coordinating #211 review', surface: 'idle' },
+      { id: 'ivar', name: 'Ivar', role: 'Builder', model: 'Gemma 4 26B (local-builder)', status: 'active', task: 'Writing rbac/gateway-argocd.yaml', surface: 'builder' },
+      { id: 'jeeves', name: 'Jeeves', role: 'PA', model: 'MiniMax M2.7', status: 'active', task: 'Drafting reply to Sarah Chen', pendingApproval: true, flag: true, surface: 'action' },
+      { id: 'sindri', name: 'Sindri', role: 'Builder', model: 'MiniMax M2.7', status: 'active', task: 'Reading PR #210 diff', surface: 'idle' },
+      { id: 'chuck', name: 'Chuck', role: 'Builder', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
+      { id: 'val', name: 'Val', role: 'Builder', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
+      { id: 'leif', name: 'Leif', role: 'Builder', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
+      { id: 'freya', name: 'Freya', role: 'Reviewer', model: 'GPT-5.2', status: 'idle', surface: 'idle' },
+      { id: 'thane', name: 'Thane', role: 'Reviewer', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
+    ];
+
+    const ivarActivity = [
+      { t: '2m ago', text: 'cloned kit/asgard-infra', icon: 'FolderGit2' },
+      { t: '90s ago', text: 'created branch ivar/argocd-rbac-fix', icon: 'GitBranch' },
+      { t: '70s ago', text: 'read rbac/agent-roles.yaml', icon: 'FileCode' },
+      { t: '45s ago', text: 'read rbac/asgard-agent-binding.yaml', icon: 'FileCode' },
+      { t: 'now', text: 'writing rbac/gateway-argocd.yaml', icon: 'FileCode', current: true },
+      { t: 'next', text: 'validate yaml', icon: 'CheckCircle2', pending: true },
+      { t: 'next', text: 'commit and push', icon: 'GitCommit', pending: true },
+      { t: 'next', text: 'open PR', icon: 'GitPullRequest', pending: true },
+    ];
+
+    const jeevesActivity = [
+      { t: '4m ago', text: 'received email from Sarah Chen', icon: 'Inbox' },
+      { t: '3m ago', text: 'classified as response-needed', icon: 'Mail' },
+      { t: '2m ago', text: 'checked calendar — Fri 2pm available', icon: 'Calendar' },
+      { t: '90s ago', text: 'composed reply', icon: 'Edit3' },
+      { t: 'now', text: 'queued send for Sovereign approval', icon: 'ShieldAlert', current: true },
+      { t: 'next', text: 'send email', icon: 'Send', pending: true },
+      { t: 'next', text: 'send calendar invite', icon: 'Calendar', pending: true },
+    ];
+
+    const tree = {
+      name: 'kit/asgard-infra',
+      type: 'repo',
+      children: [
+        { name: 'infrastructure', type: 'folder', collapsed: true },
+        {
+          name: 'rbac',
+          type: 'folder',
+          expanded: true,
+          children: [
+            { name: 'agent-roles.yaml', type: 'file', state: 'read', age: '70s' },
+            { name: 'asgard-agent-binding.yaml', type: 'file', state: 'read', age: '45s' },
+            { name: 'gateway-argocd.yaml', type: 'file', state: 'writing', age: 'now' },
+          ],
+        },
+        { name: 'networkpolicies', type: 'folder', collapsed: true },
+        { name: 'sealed-secrets', type: 'folder', collapsed: true },
+        { name: 'README.md', type: 'file', state: 'clean' },
+      ],
+    };
+
+    const yamlLines = [
+      { n: 1, c: 'apiVersion: rbac.authorization.k8s.io/v1' },
+      { n: 2, c: 'kind: ClusterRole' },
+      { n: 3, c: 'metadata:' },
+      { n: 4, c: '  name: gateway-argocd-reader' },
+      { n: 5, c: '  labels:' },
+      { n: 6, c: '    asgard.io/component: gateway' },
+      { n: 7, c: 'rules:' },
+      { n: 8, c: '  - apiGroups: ["argoproj.io"]' },
+      { n: 9, c: '    resources: ["applications"]' },
+      { n: 10, c: '    verbs: ["get", "list", "watch", "patch"]', writing: true },
+    ];
+
+    const realmSections = [
+      { id: 'cluster', title: 'Cluster', icon: 'Server', open: true, body: '10 nodes · 47 pods · all green' },
+      { id: 'gitops', title: 'GitOps · ArgoCD', icon: 'GitBranch', open: true, body: 'asgard · Synced · Healthy' },
+      { id: 'gitea', title: 'Gitea PRs', icon: 'GitPullRequest', open: false, body: '3 open · 1 awaiting Sovereign merge' },
+      { id: 'certs', title: 'Certs', icon: 'ShieldCheck', open: false, body: 'ingress certs valid · next expiry 31d' },
+      { id: 'events', title: 'K8s Events', icon: 'Activity', open: false, body: 'No warning events in the last hour' },
+    ];
+
+    function getIconNode(name) {
+      const registry = window.lucide && window.lucide.icons ? window.lucide.icons : {};
+      const icon = registry[name];
+      if (Array.isArray(icon)) return icon;
+      if (icon && Array.isArray(icon.iconNode)) return icon.iconNode;
+      return null;
+    }
+
+    function Icon({ name, className = '' }) {
+      const iconNode = getIconNode(name);
+      if (!iconNode) {
+        return <span className={`inline-block rounded-sm border border-current ${className}`} aria-hidden="true" />;
+      }
+      return (
+        <svg
+          className={className}
+          xmlns="http://www.w3.org/2000/svg"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          {iconNode.map(([tag, attrs], index) => React.createElement(tag, { ...attrs, key: index }))}
+        </svg>
+      );
+    }
+
+    function StatusDot({ status, flag }) {
+      return (
+        <span className="relative inline-flex items-center justify-center shrink-0">
+          <span className={`w-2 h-2 rounded-full ${status === 'active' ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
+          {status === 'active' && <span className="absolute w-2 h-2 rounded-full bg-emerald-400 animate-ping opacity-75" />}
+          {flag && <span className="absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
+        </span>
+      );
+    }
+
+    function Message({ who, name, time, children }) {
+      const isKit = who === 'kit';
+      return (
+        <div className={`flex flex-col ${isKit ? 'items-end' : 'items-start'}`}>
+          <div className="flex items-center gap-2 mb-1 text-[10px] text-zinc-500">
+            {!isKit && <span className="font-semibold text-zinc-400">{name}</span>}
+            <span>{time}</span>
+            {isKit && <span className="font-semibold text-amber-400">{name}</span>}
+          </div>
+          <div className={`max-w-[85%] px-3 py-2 rounded text-zinc-300 leading-relaxed ${isKit ? 'bg-amber-500/10 border border-amber-500/20' : 'bg-zinc-900 border border-zinc-800'}`}>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    function TreeNode({ node, depth = 0 }) {
+      const indent = { paddingLeft: `${depth * 12 + 8}px` };
+      if (node.type === 'repo') {
+        return (
+          <div>
+            <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-400 border-b border-zinc-800/60">
+              <Icon name="FolderGit2" className="w-3 h-3 text-amber-400 shrink-0" />
+              <span className="text-zinc-300 truncate">{node.name}</span>
+              <span className="ml-auto text-[10px] text-zinc-600 flex items-center gap-1 shrink-0">
+                <Icon name="GitBranch" className="w-2.5 h-2.5" /> ivar/argocd-rbac-fix
+              </span>
+            </div>
+            {node.children.map((child, index) => <TreeNode key={index} node={child} depth={0} />)}
+          </div>
+        );
+      }
+      if (node.type === 'folder') {
+        return (
+          <div>
+            <div style={indent} className="flex items-center gap-1 py-0.5 text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer">
+              <Icon name={node.expanded ? 'ChevronDown' : 'ChevronRight'} className="w-3 h-3 shrink-0" />
+              <Icon name={node.expanded ? 'FolderOpen' : 'Folder'} className="w-3 h-3 shrink-0" />
+              <span className="truncate">{node.name}</span>
+            </div>
+            {node.expanded && node.children.map((child, index) => <TreeNode key={index} node={child} depth={depth + 1} />)}
+          </div>
+        );
+      }
+      const stateClasses =
+        node.state === 'writing' ? 'bg-amber-500/10 text-amber-200 border-l-2 border-amber-500'
+        : node.state === 'read' ? 'text-zinc-300'
+        : 'text-zinc-500';
+      const dotClass =
+        node.state === 'writing' ? 'bg-amber-400 animate-pulse'
+        : node.state === 'read' ? 'bg-blue-400/60'
+        : 'bg-transparent';
+      return (
+        <div style={indent} className={`flex items-center gap-1.5 py-0.5 text-xs cursor-pointer ${stateClasses}`}>
+          <span className="w-3 shrink-0" />
+          <Icon name="File" className="w-3 h-3 opacity-70 shrink-0" />
+          <span className="flex-1 truncate">{node.name}</span>
+          {node.state !== 'clean' && (
+            <>
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotClass}`} />
+              <span className="text-[9px] text-zinc-600 w-7 text-right shrink-0">{node.age}</span>
+            </>
+          )}
+        </div>
+      );
+    }
+
+    function ActivityTimeline({ items, activityHeight, startDragActivity, isDraggingActivity }) {
+      return (
+        <>
+          <div
+            onMouseDown={startDragActivity}
+            className={`h-1 shrink-0 cursor-row-resize transition-colors ${isDraggingActivity ? 'bg-zinc-700' : 'bg-transparent hover:bg-zinc-800'}`}
+          />
+          <div style={{ height: `${activityHeight}px` }} className="border-t border-zinc-800 bg-zinc-900/50 shrink-0 flex flex-col">
+            <div className="px-3 py-1.5 text-[10px] uppercase text-zinc-500 flex items-center gap-2 border-b border-zinc-800 shrink-0">
+              <Icon name="Activity" className="w-3 h-3" />
+              <span>Activity</span>
+              <span className="ml-auto text-zinc-600">{items.length} events</span>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
+              {items.map((item, index) => {
+                const textColor = item.current ? 'text-amber-300' : item.pending ? 'text-zinc-600' : 'text-zinc-400';
+                const iconColor = item.current ? 'text-amber-400' : item.pending ? 'text-zinc-700' : 'text-zinc-500';
+                return (
+                  <div key={`${item.text}-${index}`} className={`flex items-center gap-2 text-[11px] ${textColor}`}>
+                    <span className="text-[9px] text-zinc-600 w-12 shrink-0">{item.t}</span>
+                    <Icon name={item.icon} className={`w-3 h-3 shrink-0 ${iconColor}`} />
+                    <span className="truncate">{item.text}</span>
+                    {item.current && <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse shrink-0" />}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      );
+    }
+
+    function CommsTab({ focused, activeAgent, setActiveAgent }) {
+      return (
+        <div className="flex-1 flex min-h-0">
+          <div className="w-44 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
+            <div className="px-2 py-1.5 text-[10px] uppercase text-zinc-500 border-b border-zinc-800/60">
+              Warband - {agents.length}
+            </div>
+            {agents.map(agent => (
+              <button
+                key={agent.id}
+                onClick={() => setActiveAgent(agent.id)}
+                className={`w-full flex items-center gap-2 px-2 py-1.5 text-left transition-colors border-l-2 ${activeAgent === agent.id ? 'bg-zinc-900 border-amber-500' : 'border-transparent hover:bg-zinc-900/50'}`}
+              >
+                <StatusDot status={agent.status} flag={agent.flag} />
+                <div className="flex-1 min-w-0">
+                  <div className={`text-xs truncate ${activeAgent === agent.id ? 'text-zinc-100' : 'text-zinc-400'}`}>{agent.name}</div>
+                  <div className="text-[9px] text-zinc-600 truncate">{agent.role}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 flex flex-col min-w-0">
+            <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+              <StatusDot status={focused.status} />
+              <span className="text-zinc-300 text-xs">{focused.name}</span>
+              <span className="text-zinc-600 text-[10px]">-</span>
+              <span className="text-zinc-500 text-[10px]">{focused.role}</span>
+              <span className="text-zinc-600 text-[10px] ml-auto truncate">{focused.model}</span>
+            </div>
+            <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3 text-[11px]">
+              <Message who="kit" name="Kit" time="14:01">Take a look at PR #211, the gateway argocd RBAC fix.</Message>
+              <Message who="agent" name={focused.name} time="14:02">
+                Sure - pulling the diff now. Initial scan shows two new manifests under <code className="text-amber-300">rbac/</code>: a ClusterRole and a ClusterRoleBinding for the gateway service account...
+              </Message>
+              <Message who="agent" name={focused.name} time="14:03">
+                <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 mb-1">
+                  <Icon name="FileCode" className="w-2.5 h-2.5" />
+                  <span>tool: gitea_file_read</span>
+                  <span className="text-zinc-600">→ rbac/gateway-argocd.yaml</span>
+                </div>
+                Verbs look right: get, list, watch, patch on argoproj.io/applications. Binding subject matches the gateway SA. I'd approve.
+              </Message>
+            </div>
+            <div className="border-t border-zinc-800 bg-zinc-900/50 px-3 py-2 shrink-0">
+              <div className="flex items-end gap-2">
+                <textarea
+                  rows="1"
+                  placeholder={`Message ${focused.name}...`}
+                  className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-amber-500 resize-none"
+                />
+                <button className="bg-amber-500 hover:bg-amber-400 text-zinc-950 rounded p-1.5" title="Send">
+                  <Icon name="Send" className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <div className="mt-1 text-[9px] text-zinc-600 flex items-center justify-between">
+                <span>Enter to send - Shift+Enter for newline</span>
+                <span>{focused.status === 'active' ? 'ready' : 'idle'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function WarriorsTab({ setActiveTab, setActiveAgent }) {
+      return (
+        <div className="flex-1 overflow-y-auto p-3">
+          <div className="text-[10px] uppercase text-zinc-500 mb-2">Fleet - {agents.length}</div>
+          <div className="grid grid-cols-2 gap-2">
+            {agents.map(agent => (
+              <button
+                key={agent.id}
+                onClick={() => { setActiveAgent(agent.id); setActiveTab('comms'); }}
+                className="border border-zinc-800 rounded p-2 bg-zinc-900/30 text-left hover:border-zinc-700"
+              >
+                <div className="flex items-center gap-1.5 mb-1">
+                  <StatusDot status={agent.status} flag={agent.flag} />
+                  <span className="text-zinc-200 text-xs font-semibold">{agent.name}</span>
+                  <span className="text-[9px] text-zinc-600 ml-auto">{agent.role}</span>
+                </div>
+                <div className="text-[10px] text-zinc-500 truncate mb-1">{agent.model}</div>
+                <div className="text-[10px] text-zinc-500">uptime 4h - requests 37 - tools 112</div>
+                <div className="text-[10px] text-zinc-400 truncate min-h-4">{agent.task || 'idle'}</div>
+                <div className="mt-2 flex gap-1">
+                  <span className="flex-1 text-[9px] py-0.5 border border-zinc-800 rounded text-zinc-500 text-center">Pause</span>
+                  <span className="flex-1 text-[9px] py-0.5 border border-zinc-800 rounded text-zinc-500 text-center">Inject</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    function RealmTab() {
+      const [open, setOpen] = useState(() => Object.fromEntries(realmSections.map(section => [section.id, section.open])));
+      return (
+        <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          {realmSections.map(section => (
+            <div key={section.id} className="border border-zinc-800 rounded">
+              <button
+                onClick={() => setOpen(prev => ({ ...prev, [section.id]: !prev[section.id] }))}
+                className="w-full px-2 py-1 text-[10px] uppercase text-zinc-500 border-b border-zinc-800 flex items-center gap-2 text-left"
+              >
+                <Icon name={open[section.id] ? 'ChevronDown' : 'ChevronRight'} className="w-3 h-3" />
+                <Icon name={section.icon} className="w-3 h-3" />
+                <span>{section.title}</span>
+              </button>
+              {open[section.id] && <div className="px-2 py-1.5 text-[10px] text-zinc-400">{section.body}</div>}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function BuilderSurface({ cursorBlink, leftRailWidth, startDragTree, isDraggingTree, activityHeight, startDragActivity, isDraggingActivity }) {
+      return (
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex min-h-0">
+            <div style={{ width: `${leftRailWidth}px` }} className="border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
+              <TreeNode node={tree} />
+              <div className="mt-2 px-2 py-1.5 border-t border-zinc-800/60 text-[9px] text-zinc-600">
+                <div className="uppercase mb-1">Legend</div>
+                <div className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" /> writing</div>
+                <div className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-400/60" /> read</div>
+                <div className="mt-2 text-zinc-700">Other agents in repo: none</div>
+              </div>
+            </div>
+            <ResizeRailHandle startDragTree={startDragTree} isDraggingTree={isDraggingTree} />
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="px-3 py-1 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+                <Icon name="FileCode" className="w-3 h-3 text-amber-400" />
+                <span className="text-zinc-300">rbac/gateway-argocd.yaml</span>
+                <span className="text-[10px] text-amber-400 ml-auto flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" /> writing
+                </span>
+              </div>
+              <div className="flex-1 overflow-y-auto bg-zinc-950">
+                {yamlLines.map(line => (
+                  <div key={line.n} className={`flex font-mono text-[11px] leading-5 ${line.writing ? 'bg-amber-500/5 border-l-2 border-amber-500' : 'border-l-2 border-transparent'}`}>
+                    <span className="w-10 text-right pr-3 text-zinc-700 select-none shrink-0">{line.n}</span>
+                    <span className="text-zinc-300">
+                      {line.c}
+                      {line.writing && <span className={`inline-block w-2 h-3.5 align-middle ml-px ${cursorBlink ? 'bg-amber-400' : 'bg-transparent'}`} />}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <ActivityTimeline items={ivarActivity} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+        </div>
+      );
+    }
+
+    function ActionSurface({ leftRailWidth, startDragTree, isDraggingTree, activityHeight, startDragActivity, isDraggingActivity }) {
+      return (
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex min-h-0">
+            <div style={{ width: `${leftRailWidth}px` }} className="border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
+              <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-400 border-b border-zinc-800/60">
+                <Icon name="Mail" className="w-3 h-3 text-blue-400 shrink-0" />
+                <span className="text-zinc-300 truncate">Re: Hirdforge demo</span>
+              </div>
+              <div className="p-3 border-b border-zinc-800/60">
+                <div className="flex items-center gap-2 text-[10px] text-zinc-600 mb-1.5">
+                  <span className="text-zinc-400 font-semibold">Sarah Chen</span>
+                  <span>-</span>
+                  <span>11:32</span>
+                </div>
+                <div className="text-[11px] text-zinc-400 leading-relaxed">
+                  Hi Kit, we're huge fans of what you're building. Could we set up a 30-min walkthrough of Hirdforge sometime this week? I'm flexible Wed-Fri afternoons.
+                </div>
+              </div>
+              <div className="px-3 py-3">
+                <div className="text-[10px] uppercase text-zinc-500 mb-2">Plan</div>
+                <ul className="space-y-1.5">
+                  <PlanStep icon="CheckCircle2" iconClass="text-emerald-400" text="Checked calendar — Fri 2pm available" />
+                  <PlanStep icon="CheckCircle2" iconClass="text-emerald-400" text="Drafted reply" />
+                  <PlanStep icon="Clock" iconClass="text-amber-400" text="Awaiting Sovereign approval" textClass="text-amber-300" />
+                  <PlanStep icon="Circle" iconClass="text-zinc-600" text="Send reply" textClass="text-zinc-600" />
+                  <PlanStep icon="Circle" iconClass="text-zinc-600" text="Send calendar invite" textClass="text-zinc-600" />
+                </ul>
+              </div>
+            </div>
+            <ResizeRailHandle startDragTree={startDragTree} isDraggingTree={isDraggingTree} />
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+                <Icon name="Mail" className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-xs text-zinc-300">Compose email</span>
+                <span className="text-[10px] text-amber-400 ml-auto px-1.5 py-0.5 border border-amber-500/30 rounded flex items-center gap-1">
+                  <Icon name="ShieldAlert" className="w-2.5 h-2.5" /> destructive_write - awaiting approval
+                </span>
+              </div>
+              <div className="flex-1 overflow-y-auto bg-zinc-950 px-6 py-4 text-xs">
+                <div className="space-y-2 mb-4">
+                  <div className="flex gap-3"><span className="text-zinc-500 w-16 shrink-0">To:</span><span className="text-zinc-300">Sarah Chen &lt;sarah@anthropic.com&gt;</span></div>
+                  <div className="flex gap-3"><span className="text-zinc-500 w-16 shrink-0">Subject:</span><span className="text-zinc-300">Re: Hirdforge demo</span></div>
+                </div>
+                <div className="border-t border-zinc-800 pt-4 text-zinc-300 leading-relaxed font-sans text-sm">
+                  Hi Sarah,<br /><br />
+                  Thanks for reaching out. I'd be glad to walk you through Hirdforge — Kit's multi-agent orchestration platform. Friday at 2pm works on his calendar; I'll send a calendar invite shortly.<br /><br />
+                  Best,<br />
+                  Jeeves <span className="text-zinc-500 italic text-xs">(on behalf of Kit)</span>
+                </div>
+              </div>
+              <div className="px-4 py-3 border-t border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+                <span className="text-[10px] text-zinc-500 flex items-center gap-1.5">
+                  <Icon name="ShieldAlert" className="w-3 h-3" /> Lockbox - #queue-7af2
+                </span>
+                <div className="ml-auto flex items-center gap-2">
+                  <button className="text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200">Reject</button>
+                  <button className="flex items-center gap-1.5 text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200">
+                    <Icon name="Edit3" className="w-3 h-3" /> Revise
+                  </button>
+                  <button className="flex items-center gap-1.5 text-xs px-4 py-1.5 bg-amber-500 text-zinc-950 rounded font-semibold hover:bg-amber-400">
+                    <Icon name="Send" className="w-3 h-3" /> Approve & send
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <ActivityTimeline items={jeevesActivity} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+        </div>
+      );
+    }
+
+    function PlanStep({ icon, iconClass, text, textClass = 'text-zinc-400' }) {
+      return (
+        <li className="flex items-start gap-2 text-[11px]">
+          <Icon name={icon} className={`w-3 h-3 shrink-0 mt-0.5 ${iconClass}`} />
+          <span className={textClass}>{text}</span>
+        </li>
+      );
+    }
+
+    function ResizeRailHandle({ startDragTree, isDraggingTree }) {
+      return (
+        <div
+          onMouseDown={startDragTree}
+          className={`w-1 shrink-0 cursor-col-resize transition-colors ${isDraggingTree ? 'bg-zinc-700' : 'bg-transparent hover:bg-zinc-800'}`}
+        />
+      );
+    }
+
+    function IdleSurface({ focused }) {
+      return (
+        <div className="flex-1 flex items-center justify-center text-zinc-600 text-xs">
+          <div className="text-center">
+            <Icon name="Pause" className="w-6 h-6 mx-auto mb-2 opacity-50" />
+            <div>{focused.status === 'idle' ? `${focused.name} is idle.` : `${focused.name}'s surface - design pending`}</div>
+            <div className="text-[10px] mt-1 text-zinc-700">Reviewer - PR diff - Architect - dispatch tree - PA - email/calendar</div>
+          </div>
+        </div>
+      );
+    }
+
+    function HirdforgeUI() {
+      const [activeAgent, setActiveAgent] = useState('jeeves');
+      const [activeTab, setActiveTab] = useState('comms');
+      const [cursorBlink, setCursorBlink] = useState(true);
+      const [leftRailWidth, setLeftRailWidth] = useState(260);
+      const [activityHeight, setActivityHeight] = useState(176);
+      const [isDraggingTree, setIsDraggingTree] = useState(false);
+      const [isDraggingActivity, setIsDraggingActivity] = useState(false);
+      const focused = useMemo(() => agents.find(agent => agent.id === activeAgent) || agents[0], [activeAgent]);
+      const pendingCount = agents.filter(agent => agent.pendingApproval).length;
+
+      useEffect(() => {
+        const id = setInterval(() => setCursorBlink(blink => !blink), 530);
+        return () => clearInterval(id);
+      }, []);
+
+      const startDragTree = (event) => {
+        event.preventDefault();
+        setIsDraggingTree(true);
+        const startX = event.clientX;
+        const startWidth = leftRailWidth;
+        const onMove = (moveEvent) => {
+          const next = Math.max(160, Math.min(500, startWidth + (moveEvent.clientX - startX)));
+          setLeftRailWidth(next);
+        };
+        const onUp = () => {
+          setIsDraggingTree(false);
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      };
+
+      const startDragActivity = (event) => {
+        event.preventDefault();
+        setIsDraggingActivity(true);
+        const startY = event.clientY;
+        const startHeight = activityHeight;
+        const onMove = (moveEvent) => {
+          const next = Math.max(60, Math.min(400, startHeight - (moveEvent.clientY - startY)));
+          setActivityHeight(next);
+        };
+        const onUp = () => {
+          setIsDraggingActivity(false);
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      };
+
+      const dragCursorClass = isDraggingTree ? 'cursor-col-resize select-none' : isDraggingActivity ? 'cursor-row-resize select-none' : '';
+
+      return (
+        <div className={`h-screen w-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden font-mono text-xs ${dragCursorClass}`}>
+          <div className="h-10 border-b border-zinc-800 bg-zinc-900 flex items-center px-3 gap-3 shrink-0">
+            <div className="flex items-center gap-1.5">
+              <div className="w-4 h-4 bg-amber-500 rounded-sm flex items-center justify-center">
+                <span className="text-zinc-950 font-bold text-[10px]">H</span>
+              </div>
+              <span className="font-bold text-amber-400 text-xs">HIRDFORGE</span>
+            </div>
+            <div className="ml-2 flex items-center gap-0">
+              {[
+                { id: 'comms', label: 'Comms', icon: 'MessageSquare' },
+                { id: 'warriors', label: 'Warriors', icon: 'Users' },
+                { id: 'realm', label: 'Realm', icon: 'Server' },
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex items-center gap-1.5 px-3 py-1 text-xs transition-colors ${activeTab === tab.id ? 'text-amber-400 border-b border-amber-400 -mb-px' : 'text-zinc-500 hover:text-zinc-300'}`}
+                >
+                  <Icon name={tab.icon} className="w-3 h-3" />
+                  <span>{tab.label}</span>
+                </button>
+              ))}
+            </div>
+            <div className="ml-auto flex items-center gap-3">
+              <button className="relative flex items-center gap-1 text-amber-400 hover:text-amber-300" title="Pending approvals">
+                <Icon name="ShieldAlert" className="w-4 h-4" />
+                <span className="text-[10px] font-semibold">{pendingCount}</span>
+                {pendingCount > 0 && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
+              </button>
+              <span className="text-zinc-500 text-[10px]">kit@hirdforge</span>
+            </div>
+          </div>
+
+          <div className="flex-1 flex min-h-0">
+            <div className="w-1/2 border-r border-zinc-800 flex flex-col min-h-0">
+              {activeTab === 'comms' && <CommsTab focused={focused} activeAgent={activeAgent} setActiveAgent={setActiveAgent} />}
+              {activeTab === 'warriors' && <WarriorsTab setActiveTab={setActiveTab} setActiveAgent={setActiveAgent} />}
+              {activeTab === 'realm' && <RealmTab />}
+            </div>
+
+            <div className="w-1/2 flex flex-col min-h-0">
+              <div className="border-b border-zinc-800 bg-zinc-900/30 px-2 py-1.5 shrink-0">
+                <div className="text-[9px] uppercase text-zinc-600 mb-1">Active - {agents.filter(agent => agent.status === 'active').length}</div>
+                <div className="flex flex-wrap gap-1">
+                  {agents.filter(agent => agent.status === 'active').map(agent => (
+                    <button
+                      key={agent.id}
+                      onClick={() => setActiveAgent(agent.id)}
+                      className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border transition-colors ${activeAgent === agent.id ? 'border-amber-500/50 bg-amber-500/10 text-amber-300' : 'border-zinc-800 text-zinc-400 hover:border-zinc-700'}`}
+                    >
+                      <StatusDot status={agent.status} flag={agent.flag} />
+                      <span>{agent.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="border-b border-zinc-800 bg-zinc-900/50 px-3 py-1.5 shrink-0 flex items-center gap-2">
+                <span className="text-[10px] text-zinc-500">Watching</span>
+                <StatusDot status={focused.status} flag={focused.flag} />
+                <span className="text-zinc-200 text-xs font-semibold">{focused.name}</span>
+                <span className="text-[10px] text-zinc-600">-</span>
+                <span className="text-[10px] text-zinc-500 truncate flex-1">{focused.task || 'idle'}</span>
+                <button className="flex items-center gap-1 px-2 py-0.5 border border-zinc-800 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 shrink-0">
+                  <Icon name="Hand" className="w-2.5 h-2.5" /> Interject
+                </button>
+              </div>
+              {focused.surface === 'builder' ? (
+                <BuilderSurface cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+              ) : focused.surface === 'action' ? (
+                <ActionSurface leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+              ) : (
+                <IdleSurface focused={focused} />
+              )}
+            </div>
+          </div>
+
+          <div className="h-6 border-t border-zinc-800 bg-zinc-900 flex items-center px-4 text-[10px] text-zinc-600 shrink-0">
+            <span>v1.0 · scaffolding</span>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<HirdforgeUI />);
+  </script>
+</body>
+</html>
