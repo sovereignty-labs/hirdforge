@@ -24,7 +24,7 @@
   <script type="text/babel">
     const { useEffect, useMemo, useState } = React;
 
-    const agents = [
+    const mockAgents = [
       { id: 'ragnar', name: 'Ragnar', role: 'Architect', model: 'MiniMax M2.7', status: 'active', task: 'Coordinating #211 review', surface: 'idle' },
       { id: 'ivar', name: 'Ivar', role: 'Builder', model: 'Gemma 4 26B (local-builder)', status: 'active', task: 'Writing rbac/gateway-argocd.yaml', surface: 'builder' },
       { id: 'jeeves', name: 'Jeeves', role: 'PA', model: 'MiniMax M2.7', status: 'active', task: 'Drafting reply to Sarah Chen', pendingApproval: true, flag: true, surface: 'action' },
@@ -35,6 +35,35 @@
       { id: 'freya', name: 'Freya', role: 'Reviewer', model: 'GPT-5.2', status: 'idle', surface: 'idle' },
       { id: 'thane', name: 'Thane', role: 'Reviewer', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
     ];
+
+    function normalizeAgent(agent) {
+      const name = String(agent.name || '').trim();
+      return {
+        ...agent,
+        id: name,
+        name,
+        role: agent.role || 'Agent',
+        model: agent.model || 'unknown',
+        status: agent.healthy ? 'active' : 'idle',
+      };
+    }
+
+    function formatTime(date = new Date()) {
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+
+    function messageID(prefix) {
+      if (window.crypto && window.crypto.randomUUID) return `${prefix}-${window.crypto.randomUUID()}`;
+      return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function extractToolName(evt) {
+      if (evt.name) return String(evt.name);
+      const call = evt.tool_call || {};
+      if (call.name) return String(call.name);
+      if (call.function && call.function.name) return String(call.function.name);
+      return 'tool_call';
+    }
 
     const ivarActivity = [
       { t: '2m ago', text: 'cloned kit/asgard-infra', icon: 'FolderGit2' },
@@ -155,6 +184,29 @@
       );
     }
 
+    function ToolCallChip({ name }) {
+      return (
+        <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 mb-1">
+          <Icon name="FileCode" className="w-2.5 h-2.5 text-blue-400" />
+          <span>tool: {name}</span>
+        </div>
+      );
+    }
+
+    function ChatMessage({ message, agentName }) {
+      const isKit = message.who === 'kit';
+      return (
+        <Message who={message.who} name={isKit ? 'Kit' : agentName} time={message.time}>
+          {message.toolCalls && message.toolCalls.map((tool, index) => (
+            <ToolCallChip key={`${tool.name}-${index}`} name={tool.name} />
+          ))}
+          {message.content && <span className="whitespace-pre-wrap">{message.content}</span>}
+          {message.streaming && <span className="inline-block w-1.5 h-3 align-middle ml-1 bg-amber-400 animate-pulse" />}
+          {message.error && <span className="text-red-300 whitespace-pre-wrap">{message.error}</span>}
+        </Message>
+      );
+    }
+
     function TreeNode({ node, depth = 0 }) {
       const indent = { paddingLeft: `${depth * 12 + 8}px` };
       if (node.type === 'repo') {
@@ -238,13 +290,38 @@
       );
     }
 
-    function CommsTab({ focused, activeAgent, setActiveAgent }) {
+    function CommsTab({
+      agents,
+      agentsLoading,
+      agentsError,
+      focused,
+      activeAgent,
+      setActiveAgent,
+      threads,
+      inputValue,
+      setInputValue,
+      onSend,
+      sendingAgent,
+    }) {
+      const activeThread = threads[activeAgent] || [];
+      const canSend = focused && inputValue.trim() && sendingAgent !== activeAgent;
       return (
         <div className="flex-1 flex min-h-0">
           <div className="w-44 border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
             <div className="px-2 py-1.5 text-[10px] uppercase text-zinc-500 border-b border-zinc-800/60">
-              Warband - {agents.length}
+              Warband - {agentsLoading ? 'loading' : agents.length}
             </div>
+            {agentsError && (
+              <div className="m-2 rounded border border-red-900/60 bg-red-950/30 px-2 py-1.5 text-[10px] text-red-300">
+                {agentsError}
+              </div>
+            )}
+            {!agentsLoading && !agentsError && agents.length === 0 && (
+              <div className="px-2 py-2 text-[10px] text-zinc-600">No agents returned.</div>
+            )}
+            {agentsLoading && (
+              <div className="px-2 py-2 text-[10px] text-zinc-600">Loading agents...</div>
+            )}
             {agents.map(agent => (
               <button
                 key={agent.id}
@@ -262,40 +339,50 @@
 
           <div className="flex-1 flex flex-col min-w-0">
             <div className="px-3 py-1.5 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
-              <StatusDot status={focused.status} />
-              <span className="text-zinc-300 text-xs">{focused.name}</span>
+              <StatusDot status={focused ? focused.status : 'idle'} />
+              <span className="text-zinc-300 text-xs">{focused ? focused.name : 'No agent'}</span>
               <span className="text-zinc-600 text-[10px]">-</span>
-              <span className="text-zinc-500 text-[10px]">{focused.role}</span>
-              <span className="text-zinc-600 text-[10px] ml-auto truncate">{focused.model}</span>
+              <span className="text-zinc-500 text-[10px]">{focused ? focused.role : 'Comms'}</span>
+              <span className="text-zinc-600 text-[10px] ml-auto truncate">{focused ? focused.model : ''}</span>
             </div>
             <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3 text-[11px]">
-              <Message who="kit" name="Kit" time="14:01">Take a look at PR #211, the gateway argocd RBAC fix.</Message>
-              <Message who="agent" name={focused.name} time="14:02">
-                Sure - pulling the diff now. Initial scan shows two new manifests under <code className="text-amber-300">rbac/</code>: a ClusterRole and a ClusterRoleBinding for the gateway service account...
-              </Message>
-              <Message who="agent" name={focused.name} time="14:03">
-                <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 mb-1">
-                  <Icon name="FileCode" className="w-2.5 h-2.5" />
-                  <span>tool: gitea_file_read</span>
-                  <span className="text-zinc-600">→ rbac/gateway-argocd.yaml</span>
+              {activeThread.length === 0 && (
+                <div className="h-full flex items-center justify-center text-zinc-700 text-xs">
+                  {focused ? `No messages with ${focused.name} yet.` : 'Select an agent to start a thread.'}
                 </div>
-                Verbs look right: get, list, watch, patch on argoproj.io/applications. Binding subject matches the gateway SA. I'd approve.
-              </Message>
+              )}
+              {activeThread.map(message => (
+                <ChatMessage key={message.id} message={message} agentName={focused ? focused.name : 'Agent'} />
+              ))}
             </div>
             <div className="border-t border-zinc-800 bg-zinc-900/50 px-3 py-2 shrink-0">
               <div className="flex items-end gap-2">
                 <textarea
                   rows="1"
-                  placeholder={`Message ${focused.name}...`}
+                  value={inputValue}
+                  disabled={!focused || sendingAgent === activeAgent}
+                  onChange={event => setInputValue(event.target.value)}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      if (canSend) onSend();
+                    }
+                  }}
+                  placeholder={focused ? `Message ${focused.name}...` : 'No agent selected'}
                   className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-amber-500 resize-none"
                 />
-                <button className="bg-amber-500 hover:bg-amber-400 text-zinc-950 rounded p-1.5" title="Send">
+                <button
+                  onClick={onSend}
+                  disabled={!canSend}
+                  className={`rounded p-1.5 ${canSend ? 'bg-amber-500 hover:bg-amber-400 text-zinc-950' : 'bg-zinc-800 text-zinc-600 cursor-not-allowed'}`}
+                  title="Send"
+                >
                   <Icon name="Send" className="w-3.5 h-3.5" />
                 </button>
               </div>
               <div className="mt-1 text-[9px] text-zinc-600 flex items-center justify-between">
                 <span>Enter to send - Shift+Enter for newline</span>
-                <span>{focused.status === 'active' ? 'ready' : 'idle'}</span>
+                <span>{sendingAgent === activeAgent ? 'streaming' : focused && focused.status === 'active' ? 'ready' : 'idle'}</span>
               </div>
             </div>
           </div>
@@ -306,9 +393,9 @@
     function WarriorsTab({ setActiveTab, setActiveAgent }) {
       return (
         <div className="flex-1 overflow-y-auto p-3">
-          <div className="text-[10px] uppercase text-zinc-500 mb-2">Fleet - {agents.length}</div>
+          <div className="text-[10px] uppercase text-zinc-500 mb-2">Fleet - {mockAgents.length}</div>
           <div className="grid grid-cols-2 gap-2">
-            {agents.map(agent => (
+            {mockAgents.map(agent => (
               <button
                 key={agent.id}
                 onClick={() => { setActiveAgent(agent.id); setActiveTab('comms'); }}
@@ -498,19 +585,171 @@
 
     function HirdforgeUI() {
       const [activeAgent, setActiveAgent] = useState('jeeves');
+      const [activeCommsAgent, setActiveCommsAgent] = useState('');
       const [activeTab, setActiveTab] = useState('comms');
+      const [agents, setAgents] = useState([]);
+      const [agentsLoading, setAgentsLoading] = useState(true);
+      const [agentsError, setAgentsError] = useState('');
+      const [threads, setThreads] = useState({});
+      const [inputByAgent, setInputByAgent] = useState({});
+      const [sendingAgent, setSendingAgent] = useState('');
       const [cursorBlink, setCursorBlink] = useState(true);
       const [leftRailWidth, setLeftRailWidth] = useState(260);
       const [activityHeight, setActivityHeight] = useState(176);
       const [isDraggingTree, setIsDraggingTree] = useState(false);
       const [isDraggingActivity, setIsDraggingActivity] = useState(false);
-      const focused = useMemo(() => agents.find(agent => agent.id === activeAgent) || agents[0], [activeAgent]);
-      const pendingCount = agents.filter(agent => agent.pendingApproval).length;
+      const focused = useMemo(() => mockAgents.find(agent => agent.id === activeAgent) || mockAgents[0], [activeAgent]);
+      const commsFocused = useMemo(() => agents.find(agent => agent.id === activeCommsAgent) || null, [agents, activeCommsAgent]);
+      const pendingCount = mockAgents.filter(agent => agent.pendingApproval).length;
 
       useEffect(() => {
         const id = setInterval(() => setCursorBlink(blink => !blink), 530);
         return () => clearInterval(id);
       }, []);
+
+      useEffect(() => {
+        let cancelled = false;
+        fetch('/api/v1/agents')
+          .then(response => {
+            if (!response.ok) throw new Error(`agents request failed: ${response.status}`);
+            return response.json();
+          })
+          .then(data => {
+            if (cancelled) return;
+            const nextAgents = Array.isArray(data) ? data.map(normalizeAgent).filter(agent => agent.name) : [];
+            setAgents(nextAgents);
+            setAgentsError('');
+            setActiveCommsAgent(current => current || (nextAgents[0] ? nextAgents[0].id : ''));
+          })
+          .catch(error => {
+            if (cancelled) return;
+            setAgentsError(error.message || 'failed to load agents');
+          })
+          .finally(() => {
+            if (!cancelled) setAgentsLoading(false);
+          });
+        return () => { cancelled = true; };
+      }, []);
+
+      const updateThread = (agentID, updater) => {
+        setThreads(current => {
+          const thread = current[agentID] || [];
+          return { ...current, [agentID]: updater(thread) };
+        });
+      };
+
+      const updateAgentMessage = (agentID, messageIDValue, updater) => {
+        updateThread(agentID, thread => thread.map(message => (
+          message.id === messageIDValue ? updater(message) : message
+        )));
+      };
+
+      const sendCommsMessage = async () => {
+        const agent = commsFocused;
+        if (!agent || sendingAgent === agent.id) return;
+        const content = (inputByAgent[agent.id] || '').trim();
+        if (!content) return;
+
+        const kitMessage = {
+          id: messageID('kit'),
+          who: 'kit',
+          time: formatTime(),
+          content,
+        };
+        const agentMessageID = messageID('agent');
+        const agentMessage = {
+          id: agentMessageID,
+          who: 'agent',
+          time: formatTime(),
+          content: '',
+          toolCalls: [],
+          streaming: true,
+        };
+
+        updateThread(agent.id, thread => [...thread, kitMessage, agentMessage]);
+        setInputByAgent(current => ({ ...current, [agent.id]: '' }));
+        setSendingAgent(agent.id);
+
+        try {
+          const response = await fetch('/api/v1/message', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent: agent.name, content }),
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || `message request failed: ${response.status}`);
+          }
+          if (!response.body) throw new Error('streaming response unavailable');
+
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          const handleEvent = (evt) => {
+            if (evt.type === 'content' || (typeof evt.content === 'string' && !evt.type)) {
+              updateAgentMessage(agent.id, agentMessageID, message => ({
+                ...message,
+                content: message.content + (evt.content || ''),
+              }));
+              return;
+            }
+            if (evt.type === 'replace') {
+              updateAgentMessage(agent.id, agentMessageID, message => ({
+                ...message,
+                content: evt.content || '',
+              }));
+              return;
+            }
+            if (evt.type === 'tool_call') {
+              updateAgentMessage(agent.id, agentMessageID, message => ({
+                ...message,
+                toolCalls: [...(message.toolCalls || []), { name: extractToolName(evt) }],
+              }));
+              return;
+            }
+            if (evt.type === 'done' || evt.done) {
+              updateAgentMessage(agent.id, agentMessageID, message => ({ ...message, streaming: false }));
+            }
+          };
+
+          const drainChunk = (chunk) => {
+            buffer += chunk;
+            const frames = buffer.split('\n\n');
+            buffer = frames.pop() || '';
+            frames.forEach(frame => {
+              const dataLines = frame.split('\n')
+                .filter(line => line.startsWith('data:'))
+                .map(line => line.replace(/^data:\s?/, ''));
+              if (dataLines.length === 0) return;
+              try {
+                handleEvent(JSON.parse(dataLines.join('\n')));
+              } catch (error) {
+                updateAgentMessage(agent.id, agentMessageID, message => ({
+                  ...message,
+                  content: message.content + dataLines.join('\n'),
+                }));
+              }
+            });
+          };
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (value) drainChunk(decoder.decode(value, { stream: !done }));
+            if (done) break;
+          }
+          if (buffer.trim()) drainChunk('\n\n');
+          updateAgentMessage(agent.id, agentMessageID, message => ({ ...message, streaming: false }));
+        } catch (error) {
+          updateAgentMessage(agent.id, agentMessageID, message => ({
+            ...message,
+            streaming: false,
+            error: error.message || 'message send failed',
+          }));
+        } finally {
+          setSendingAgent(current => current === agent.id ? '' : current);
+        }
+      };
 
       const startDragTree = (event) => {
         event.preventDefault();
@@ -587,16 +826,30 @@
 
           <div className="flex-1 flex min-h-0">
             <div className="w-1/2 border-r border-zinc-800 flex flex-col min-h-0">
-              {activeTab === 'comms' && <CommsTab focused={focused} activeAgent={activeAgent} setActiveAgent={setActiveAgent} />}
+              {activeTab === 'comms' && (
+                <CommsTab
+                  agents={agents}
+                  agentsLoading={agentsLoading}
+                  agentsError={agentsError}
+                  focused={commsFocused}
+                  activeAgent={activeCommsAgent}
+                  setActiveAgent={setActiveCommsAgent}
+                  threads={threads}
+                  inputValue={inputByAgent[activeCommsAgent] || ''}
+                  setInputValue={value => setInputByAgent(current => ({ ...current, [activeCommsAgent]: value }))}
+                  onSend={sendCommsMessage}
+                  sendingAgent={sendingAgent}
+                />
+              )}
               {activeTab === 'warriors' && <WarriorsTab setActiveTab={setActiveTab} setActiveAgent={setActiveAgent} />}
               {activeTab === 'realm' && <RealmTab />}
             </div>
 
             <div className="w-1/2 flex flex-col min-h-0">
               <div className="border-b border-zinc-800 bg-zinc-900/30 px-2 py-1.5 shrink-0">
-                <div className="text-[9px] uppercase text-zinc-600 mb-1">Active - {agents.filter(agent => agent.status === 'active').length}</div>
+                <div className="text-[9px] uppercase text-zinc-600 mb-1">Active - {mockAgents.filter(agent => agent.status === 'active').length}</div>
                 <div className="flex flex-wrap gap-1">
-                  {agents.filter(agent => agent.status === 'active').map(agent => (
+                  {mockAgents.filter(agent => agent.status === 'active').map(agent => (
                     <button
                       key={agent.id}
                       onClick={() => setActiveAgent(agent.id)}
