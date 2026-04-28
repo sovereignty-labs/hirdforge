@@ -1343,13 +1343,20 @@ func envOrDefault(key, fallback string) string {
 func fetchGitOpsStatus(k8s *k8sState) gitopsStatusResponse {
 	out := gitopsStatusResponse{App: "asgard", RecentDeployments: []gitopsDeploymentInfo{}}
 	if k8s == nil || !k8s.enabled {
+		log.Printf("gitops: kubernetes integration disabled")
 		return out
 	}
-	status, body, _, err := k8s.getJSONWithStatus("/apis/argoproj.io/v1alpha1/namespaces/argocd/applications/asgard")
-	if err != nil || status == http.StatusNotFound {
+	status, body, rawBody, err := k8s.getJSONWithStatus("/apis/argoproj.io/v1alpha1/namespaces/argocd/applications/asgard")
+	if err != nil {
+		log.Printf("gitops: argocd request error: %v", err)
+		return out
+	}
+	if status == http.StatusNotFound {
+		log.Printf("gitops: argocd application 'asgard' not found (404)")
 		return out
 	}
 	if status < 200 || status >= 300 {
+		log.Printf("gitops: argocd returned status %d, body: %s", status, truncateRunes(string(rawBody), 256))
 		return out
 	}
 	spec := asMap(body["spec"])
@@ -1383,6 +1390,7 @@ func fetchGitOpsStatus(k8s *k8sState) gitopsStatusResponse {
 			break
 		}
 	}
+	log.Printf("gitops: synced=%s health=%s sha=%s last_sync=%s", out.SyncStatus, out.HealthStatus, out.DeployedSHA, out.LastSync)
 	return out
 }
 
@@ -1498,10 +1506,20 @@ func fetchDeploymentHistory(client *http.Client, baseURL, token string, limit in
 func listCertExpiries(k8s *k8sState, namespace string) certsResponse {
 	out := certsResponse{Certs: []certExpiryInfo{}}
 	if k8s == nil || !k8s.enabled {
+		log.Printf("certs: kubernetes integration disabled")
 		return out
 	}
-	status, body, _, err := k8s.getJSONWithStatus(fmt.Sprintf("/apis/cert-manager.io/v1/namespaces/%s/certificates", url.PathEscape(namespace)))
-	if err != nil || status == http.StatusNotFound || status < 200 || status >= 300 {
+	status, body, rawBody, err := k8s.getJSONWithStatus(fmt.Sprintf("/apis/cert-manager.io/v1/namespaces/%s/certificates", url.PathEscape(namespace)))
+	if err != nil {
+		log.Printf("certs: certificate request error: %v", err)
+		return out
+	}
+	if status == http.StatusNotFound {
+		log.Printf("certs: cert-manager certificates not found in namespace %s (404)", namespace)
+		return out
+	}
+	if status < 200 || status >= 300 {
+		log.Printf("certs: certificate request returned status %d, body: %s", status, truncateRunes(string(rawBody), 256))
 		return out
 	}
 	for _, item := range asSlice(body["items"]) {
@@ -1522,6 +1540,7 @@ func listCertExpiries(k8s *k8sState, namespace string) certsResponse {
 		})
 	}
 	sort.Slice(out.Certs, func(i, j int) bool { return out.Certs[i].Name < out.Certs[j].Name })
+	log.Printf("certs: returned %d certificates from namespace %s", len(out.Certs), namespace)
 	return out
 }
 
@@ -1837,6 +1856,8 @@ func (k *k8sState) refreshNodes() error {
 	metricsBody, err := k.get("/apis/metrics.k8s.io/v1beta1/nodes")
 	if err == nil {
 		nodes = enrichNodesWithUsage(nodes, parseNodeUsage(metricsBody))
+	} else {
+		log.Printf("k8s: node metrics fetch failed: %v", err)
 	}
 	k.setNodes(nodes)
 	return nil
@@ -2156,9 +2177,11 @@ func main() {
 	if gw.k8s.enabled {
 		gw.addEvent("k8s_event", "cluster", "Kubernetes integration enabled")
 		if err := gw.k8s.refreshPods(); err != nil {
+			log.Printf("k8s: pod refresh error: %v", err)
 			gw.addEvent("k8s_event", "cluster", "pod refresh error: "+err.Error())
 		}
 		if err := gw.k8s.refreshNodes(); err != nil {
+			log.Printf("k8s: node refresh error: %v", err)
 			gw.addEvent("k8s_event", "cluster", "node refresh error: "+err.Error())
 		}
 		go func() {
@@ -2166,6 +2189,7 @@ func main() {
 			defer t.Stop()
 			for range t.C {
 				if err := gw.k8s.refreshPods(); err != nil {
+					log.Printf("k8s: pod refresh error: %v", err)
 					gw.addEvent("k8s_event", "cluster", "pod refresh error: "+err.Error())
 				}
 			}
@@ -2175,6 +2199,7 @@ func main() {
 			defer t.Stop()
 			for range t.C {
 				if err := gw.k8s.refreshNodes(); err != nil {
+					log.Printf("k8s: node refresh error: %v", err)
 					gw.addEvent("k8s_event", "cluster", "node refresh error: "+err.Error())
 				}
 			}
@@ -3154,10 +3179,13 @@ func main() {
 		}
 		body, err := gw.k8s.get(fmt.Sprintf("/api/v1/namespaces/%s/events", url.PathEscape(gw.k8s.podNS)))
 		if err != nil {
+			log.Printf("k8s events: fetch error: %v", err)
 			writeJSON(w, http.StatusOK, []K8sEventInfo{})
 			return
 		}
-		writeJSON(w, http.StatusOK, parseK8sEvents(body))
+		parsed := parseK8sEvents(body)
+		log.Printf("k8s events: returned %d events from namespace %s", len(parsed), gw.k8s.podNS)
+		writeJSON(w, http.StatusOK, parsed)
 	})
 	mux.HandleFunc("/api/v1/k8s/resources", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
