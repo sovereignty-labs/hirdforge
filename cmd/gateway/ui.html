@@ -48,6 +48,30 @@
       };
     }
 
+    function normalizeFleetState(state) {
+      const name = String(state.name || '').trim();
+      return {
+        ...state,
+        id: name,
+        name,
+        status: state.active ? 'active' : 'idle',
+      };
+    }
+
+    function countPendingApprovals(data) {
+      const queues = Array.isArray(data) ? data : Array.isArray(data && data.queues) ? data.queues : [];
+      return queues.filter(item => item && item.status === 'pending').length;
+    }
+
+    function mockSurfaceForAgent(agent) {
+      const key = String((agent && (agent.id || agent.name)) || '').toLowerCase();
+      const mock = mockAgents.find(item => item.id === key || item.name.toLowerCase() === key);
+      if (mock && (mock.surface === 'builder' || mock.surface === 'action')) return mock.surface;
+      const role = String((agent && agent.role) || '').toLowerCase();
+      if (role.includes('pa') || role.includes('assistant') || role.includes('action')) return 'action';
+      return 'builder';
+    }
+
     function formatTime(date = new Date()) {
       return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
     }
@@ -571,25 +595,32 @@
       );
     }
 
-    function IdleSurface({ focused }) {
+    function IdleSurface({ surface, cursorBlink, leftRailWidth, startDragTree, isDraggingTree, activityHeight, startDragActivity, isDraggingActivity }) {
       return (
-        <div className="flex-1 flex items-center justify-center text-zinc-600 text-xs">
-          <div className="text-center">
-            <Icon name="Pause" className="w-6 h-6 mx-auto mb-2 opacity-50" />
-            <div>{focused.status === 'idle' ? `${focused.name} is idle.` : `${focused.name}'s surface - design pending`}</div>
-            <div className="text-[10px] mt-1 text-zinc-700">Reviewer - PR diff - Architect - dispatch tree - PA - email/calendar</div>
+        <div className="relative flex-1 min-h-0 bg-zinc-950">
+          <div className="absolute right-3 top-3 z-10 rounded border border-zinc-700 bg-zinc-950/90 px-2 py-0.5 text-[10px] uppercase text-zinc-400">
+            idle
+          </div>
+          <div className="h-full flex flex-col opacity-40 pointer-events-none grayscale">
+            {surface === 'action' ? (
+              <ActionSurface leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+            ) : (
+              <BuilderSurface cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+            )}
           </div>
         </div>
       );
     }
 
     function HirdforgeUI() {
-      const [activeAgent, setActiveAgent] = useState('jeeves');
-      const [activeCommsAgent, setActiveCommsAgent] = useState('');
+      const [activeAgent, setActiveAgent] = useState('');
       const [activeTab, setActiveTab] = useState('comms');
       const [agents, setAgents] = useState([]);
       const [agentsLoading, setAgentsLoading] = useState(true);
       const [agentsError, setAgentsError] = useState('');
+      const [fleetStates, setFleetStates] = useState([]);
+      const [pendingApprovals, setPendingApprovals] = useState(0);
+      const [showApprovalShield, setShowApprovalShield] = useState(false);
       const [threads, setThreads] = useState({});
       const [inputByAgent, setInputByAgent] = useState({});
       const [sendingAgent, setSendingAgent] = useState('');
@@ -598,9 +629,10 @@
       const [activityHeight, setActivityHeight] = useState(176);
       const [isDraggingTree, setIsDraggingTree] = useState(false);
       const [isDraggingActivity, setIsDraggingActivity] = useState(false);
-      const focused = useMemo(() => mockAgents.find(agent => agent.id === activeAgent) || mockAgents[0], [activeAgent]);
-      const commsFocused = useMemo(() => agents.find(agent => agent.id === activeCommsAgent) || null, [agents, activeCommsAgent]);
-      const pendingCount = mockAgents.filter(agent => agent.pendingApproval).length;
+      const focused = useMemo(() => agents.find(agent => agent.id === activeAgent) || null, [agents, activeAgent]);
+      const focusedFleetState = useMemo(() => fleetStates.find(state => state.id === activeAgent) || null, [fleetStates, activeAgent]);
+      const focusedSurface = mockSurfaceForAgent(focused);
+      const focusedStatusText = focusedFleetState && focusedFleetState.active ? 'active' : 'idle';
 
       useEffect(() => {
         const id = setInterval(() => setCursorBlink(blink => !blink), 530);
@@ -619,7 +651,7 @@
             const nextAgents = Array.isArray(data) ? data.map(normalizeAgent).filter(agent => agent.name) : [];
             setAgents(nextAgents);
             setAgentsError('');
-            setActiveCommsAgent(current => current || (nextAgents[0] ? nextAgents[0].id : ''));
+            setActiveAgent(current => current || (nextAgents[0] ? nextAgents[0].id : ''));
           })
           .catch(error => {
             if (cancelled) return;
@@ -629,6 +661,58 @@
             if (!cancelled) setAgentsLoading(false);
           });
         return () => { cancelled = true; };
+      }, []);
+
+      useEffect(() => {
+        let cancelled = false;
+        const fetchFleetState = () => {
+          fetch('/api/v1/fleet/state')
+            .then(response => {
+              if (!response.ok) throw new Error(`fleet state request failed: ${response.status}`);
+              return response.json();
+            })
+            .then(data => {
+              if (cancelled) return;
+              const nextStates = Array.isArray(data) ? data.map(normalizeFleetState).filter(state => state.name) : [];
+              setFleetStates(nextStates);
+            })
+            .catch(() => {
+              if (!cancelled) setFleetStates([]);
+            });
+        };
+        fetchFleetState();
+        const id = setInterval(fetchFleetState, 5000);
+        return () => {
+          cancelled = true;
+          clearInterval(id);
+        };
+      }, []);
+
+      useEffect(() => {
+        let cancelled = false;
+        const fetchApprovals = () => {
+          fetch('/api/v1/approvals')
+            .then(response => {
+              if (!response.ok) throw new Error(`approvals request failed: ${response.status}`);
+              return response.json();
+            })
+            .then(data => {
+              if (cancelled) return;
+              setPendingApprovals(countPendingApprovals(data));
+              setShowApprovalShield(true);
+            })
+            .catch(() => {
+              if (cancelled) return;
+              setPendingApprovals(0);
+              setShowApprovalShield(false);
+            });
+        };
+        fetchApprovals();
+        const id = setInterval(fetchApprovals, 10000);
+        return () => {
+          cancelled = true;
+          clearInterval(id);
+        };
       }, []);
 
       const updateThread = (agentID, updater) => {
@@ -645,7 +729,7 @@
       };
 
       const sendCommsMessage = async () => {
-        const agent = commsFocused;
+        const agent = focused;
         if (!agent || sendingAgent === agent.id) return;
         const content = (inputByAgent[agent.id] || '').trim();
         if (!content) return;
@@ -815,11 +899,13 @@
               ))}
             </div>
             <div className="ml-auto flex items-center gap-3">
-              <button className="relative flex items-center gap-1 text-amber-400 hover:text-amber-300" title="Pending approvals">
-                <Icon name="ShieldAlert" className="w-4 h-4" />
-                <span className="text-[10px] font-semibold">{pendingCount}</span>
-                {pendingCount > 0 && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
-              </button>
+              {showApprovalShield && (
+                <button className="relative flex items-center gap-1 text-amber-400 hover:text-amber-300" title="Pending approvals">
+                  <Icon name="ShieldAlert" className="w-4 h-4" />
+                  <span className="text-[10px] font-semibold">{pendingApprovals}</span>
+                  {pendingApprovals > 0 && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
+                </button>
+              )}
               <span className="text-zinc-500 text-[10px]">kit@hirdforge</span>
             </div>
           </div>
@@ -831,12 +917,12 @@
                   agents={agents}
                   agentsLoading={agentsLoading}
                   agentsError={agentsError}
-                  focused={commsFocused}
-                  activeAgent={activeCommsAgent}
-                  setActiveAgent={setActiveCommsAgent}
+                  focused={focused}
+                  activeAgent={activeAgent}
+                  setActiveAgent={setActiveAgent}
                   threads={threads}
-                  inputValue={inputByAgent[activeCommsAgent] || ''}
-                  setInputValue={value => setInputByAgent(current => ({ ...current, [activeCommsAgent]: value }))}
+                  inputValue={inputByAgent[activeAgent] || ''}
+                  setInputValue={value => setInputByAgent(current => ({ ...current, [activeAgent]: value }))}
                   onSend={sendCommsMessage}
                   sendingAgent={sendingAgent}
                 />
@@ -847,36 +933,38 @@
 
             <div className="w-1/2 flex flex-col min-h-0">
               <div className="border-b border-zinc-800 bg-zinc-900/30 px-2 py-1.5 shrink-0">
-                <div className="text-[9px] uppercase text-zinc-600 mb-1">Active - {mockAgents.filter(agent => agent.status === 'active').length}</div>
+                <div className="text-[9px] uppercase text-zinc-600 mb-1">Active - {fleetStates.filter(agent => agent.active).length}</div>
                 <div className="flex flex-wrap gap-1">
-                  {mockAgents.filter(agent => agent.status === 'active').map(agent => (
+                  {fleetStates.map(agent => (
                     <button
                       key={agent.id}
                       onClick={() => setActiveAgent(agent.id)}
                       className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] border transition-colors ${activeAgent === agent.id ? 'border-amber-500/50 bg-amber-500/10 text-amber-300' : 'border-zinc-800 text-zinc-400 hover:border-zinc-700'}`}
                     >
-                      <StatusDot status={agent.status} flag={agent.flag} />
+                      <StatusDot status={agent.active ? 'active' : 'idle'} />
                       <span>{agent.name}</span>
                     </button>
                   ))}
+                  {fleetStates.length === 0 && <span className="text-[10px] text-zinc-700">fleet state unavailable</span>}
                 </div>
               </div>
               <div className="border-b border-zinc-800 bg-zinc-900/50 px-3 py-1.5 shrink-0 flex items-center gap-2">
                 <span className="text-[10px] text-zinc-500">Watching</span>
-                <StatusDot status={focused.status} flag={focused.flag} />
-                <span className="text-zinc-200 text-xs font-semibold">{focused.name}</span>
+                <StatusDot status={focusedStatusText} />
+                <span className="text-zinc-200 text-xs font-semibold">{focused ? focused.name : 'No agent'}</span>
                 <span className="text-[10px] text-zinc-600">-</span>
-                <span className="text-[10px] text-zinc-500 truncate flex-1">{focused.task || 'idle'}</span>
+                {/* TODO: replace active/idle with fleet state's current_task_summary once §5.3 backend field lands. */}
+                <span className="text-[10px] text-zinc-500 truncate flex-1">{focused ? focusedStatusText : 'idle'}</span>
                 <button className="flex items-center gap-1 px-2 py-0.5 border border-zinc-800 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 shrink-0">
                   <Icon name="Hand" className="w-2.5 h-2.5" /> Interject
                 </button>
               </div>
-              {focused.surface === 'builder' ? (
+              {focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'builder' ? (
                 <BuilderSurface cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
-              ) : focused.surface === 'action' ? (
+              ) : focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'action' ? (
                 <ActionSurface leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
               ) : (
-                <IdleSurface focused={focused} />
+                <IdleSurface surface={focusedSurface} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
               )}
             </div>
           </div>
