@@ -45,6 +45,7 @@ type MCPToolResult struct {
 
 type Client struct {
 	serverURL  string
+	agentName  string
 	sessionID  string
 	httpClient *http.Client
 	requestID  int64
@@ -55,6 +56,12 @@ func NewClient(serverURL string) *Client {
 		serverURL:  serverURL,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+func NewClientWithAgent(serverURL, agentName string) *Client {
+	client := NewClient(serverURL)
+	client.agentName = stringsTrim(agentName)
+	return client
 }
 
 func (c *Client) nextID() int64 {
@@ -168,13 +175,20 @@ func (c *Client) ListTools() ([]MCPToolDef, error) {
 }
 
 func (c *Client) CallTool(name string, arguments map[string]interface{}) (string, error) {
+	callArgs := cloneArguments(arguments)
+	if c.agentName != "" {
+		if callArgs == nil {
+			callArgs = map[string]interface{}{}
+		}
+		callArgs["_agent_name"] = c.agentName
+	}
 	resp, err := c.send(jsonRPCRequest{
 		JSONRPC: "2.0",
 		ID:      c.nextID(),
 		Method:  "tools/call",
 		Params: map[string]interface{}{
 			"name":      name,
-			"arguments": arguments,
+			"arguments": callArgs,
 		},
 	})
 	if err != nil {
@@ -206,4 +220,15 @@ func (c *Client) CallTool(name string, arguments map[string]interface{}) (string
 
 func stringsTrim(s string) string {
 	return string(bytes.TrimSpace([]byte(s)))
+}
+
+func cloneArguments(in map[string]interface{}) map[string]interface{} {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }

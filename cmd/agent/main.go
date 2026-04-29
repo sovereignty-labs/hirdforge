@@ -4249,7 +4249,7 @@ func main() {
 				continue
 			}
 			logJSON("info", "connecting to MCP server", map[string]interface{}{"url": serverURL})
-			client := mcppkg.NewClient(serverURL)
+			client := mcppkg.NewClientWithAgent(serverURL, agentName)
 			if err := client.Initialize(); err != nil {
 				logJSON("warn", "MCP server unreachable, skipping", map[string]interface{}{"url": serverURL, "error": err.Error()})
 				continue
