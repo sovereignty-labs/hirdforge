@@ -2,6 +2,42 @@ package workspace
 
 import "testing"
 
+func TestProjectorPlanLifecycle(t *testing.T) {
+	p := NewProjector()
+
+	ws := p.Get("jeeves")
+	if ws.Plan != nil {
+		t.Fatalf("expected nil plan before first event, got %+v", ws.Plan)
+	}
+
+	p.Apply("jeeves", "plan", map[string]interface{}{
+		"steps": []interface{}{"read trigger context", "draft reply", "queue for approval"},
+	})
+
+	ws = p.Get("jeeves")
+	if ws.Plan == nil {
+		t.Fatalf("expected plan after plan event")
+	}
+	if ws.Plan.CurrentStep != 0 {
+		t.Fatalf("CurrentStep = %d", ws.Plan.CurrentStep)
+	}
+	if len(ws.Plan.Steps) != 3 {
+		t.Fatalf("Steps = %#v", ws.Plan.Steps)
+	}
+
+	p.Apply("jeeves", "plan_step_complete", map[string]interface{}{"step": float64(1)})
+	ws = p.Get("jeeves")
+	if ws.Plan.CurrentStep != 2 {
+		t.Fatalf("CurrentStep after completion = %d", ws.Plan.CurrentStep)
+	}
+
+	p.Apply("jeeves", "plan_step_complete", map[string]interface{}{"step": float64(99)})
+	ws = p.Get("jeeves")
+	if ws.Plan.CurrentStep != len(ws.Plan.Steps) {
+		t.Fatalf("CurrentStep after clamp = %d", ws.Plan.CurrentStep)
+	}
+}
+
 func TestProjectorFileWriteTransitions(t *testing.T) {
 	p := NewProjector()
 
@@ -71,9 +107,11 @@ func TestProjectorGitCloneUpdatesCurrentRepo(t *testing.T) {
 func TestProjectorSnapshotDeepCopiesFilesTouched(t *testing.T) {
 	p := NewProjector()
 	p.Apply("ivar", "file_read", map[string]interface{}{"path": "README.md"})
+	p.Apply("ivar", "plan", map[string]interface{}{"steps": []interface{}{"one", "two"}})
 
 	first := p.Get("ivar")
 	first.FilesTouched["README.md"] = FileState{Path: "README.md", State: "writing", LineCursor: 99}
+	first.Plan.Steps[0] = "mutated"
 
 	second := p.Get("ivar")
 	state := second.FilesTouched["README.md"]
@@ -82,5 +120,8 @@ func TestProjectorSnapshotDeepCopiesFilesTouched(t *testing.T) {
 	}
 	if state.LineCursor != 0 {
 		t.Fatalf("LineCursor = %d", state.LineCursor)
+	}
+	if second.Plan == nil || second.Plan.Steps[0] != "one" {
+		t.Fatalf("plan snapshot mutation leaked into projector: %+v", second.Plan)
 	}
 }

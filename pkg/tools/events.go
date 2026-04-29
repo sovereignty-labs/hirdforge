@@ -79,6 +79,16 @@ type HTTPRequestEvent struct {
 	StatusCode int    `json:"status_code"`
 }
 
+type PlanEvent struct {
+	Type  string   `json:"type"`
+	Steps []string `json:"steps"`
+}
+
+type PlanStepCompleteEvent struct {
+	Type string `json:"type"`
+	Step int    `json:"step"`
+}
+
 type ToolEventContext struct {
 	GitBranchFrom string
 	GitBranchNew  string
@@ -117,6 +127,24 @@ func TypedToolStartEvents(toolName string, args map[string]interface{}, workDir 
 			LineStart: lineStart,
 			LineEnd:   lineEnd,
 			Status:    "writing",
+		}}
+	case "plan":
+		steps, err := parsePlanSteps(args["steps"])
+		if err != nil {
+			return nil
+		}
+		return []interface{}{PlanEvent{
+			Type:  "plan",
+			Steps: steps,
+		}}
+	case "plan-step-complete":
+		step := intArg(args, "step")
+		if step < 0 {
+			return nil
+		}
+		return []interface{}{PlanStepCompleteEvent{
+			Type: "plan_step_complete",
+			Step: step,
 		}}
 	default:
 		return nil
@@ -260,6 +288,38 @@ func TypedToolResultEvents(toolName string, args map[string]interface{}, result 
 func stringArg(args map[string]interface{}, key string) string {
 	v, ok := args[key]
 	if !ok || v == nil {
+		return ""
+	}
+	return stringFromAny(v)
+}
+
+// intArg returns -1 when the value is missing or cannot be parsed.
+// That sentinel is intentional here because step 0 is valid for plan-step-complete.
+// This differs from workspace.intPayload, which uses 0 as its generic missing-value fallback.
+func intArg(args map[string]interface{}, key string) int {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return -1
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case float32:
+		return int(n)
+	}
+	var out int
+	if _, err := fmt.Sscanf(strings.TrimSpace(fmt.Sprint(v)), "%d", &out); err == nil {
+		return out
+	}
+	return -1
+}
+
+func stringFromAny(v interface{}) string {
+	if v == nil {
 		return ""
 	}
 	if s, ok := v.(string); ok {
