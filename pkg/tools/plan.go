@@ -1,6 +1,9 @@
 package tools
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 type PlanTool struct{}
 
@@ -58,6 +61,9 @@ func (t *PlanStepCompleteTool) Execute(args map[string]interface{}) ToolResult {
 	return ToolResult{Output: fmt.Sprintf("plan step %d complete", step)}
 }
 
+// parsePlanSteps accepts native arrays plus JSON-encoded string wrappers that
+// some smaller models emit instead of structured arguments. Supported string
+// forms are a JSON array directly or a JSON object containing a "steps" array.
 func parsePlanSteps(raw interface{}) ([]string, error) {
 	items, ok := raw.([]interface{})
 	if !ok {
@@ -72,6 +78,18 @@ func parsePlanSteps(raw interface{}) ([]string, error) {
 				return nil, fmt.Errorf("steps must not be empty")
 			}
 			return out, nil
+		}
+		if text, ok := raw.(string); ok {
+			var arrayPayload []interface{}
+			if err := json.Unmarshal([]byte(text), &arrayPayload); err == nil {
+				return parsePlanSteps(arrayPayload)
+			}
+			var objectPayload map[string]interface{}
+			if err := json.Unmarshal([]byte(text), &objectPayload); err == nil {
+				if nested, ok := objectPayload["steps"]; ok {
+					return parsePlanSteps(nested)
+				}
+			}
 		}
 		return nil, fmt.Errorf("steps must be an array of strings")
 	}
