@@ -4142,6 +4142,8 @@ func main() {
 	}
 
 	reg := toolpkg.NewRegistry()
+	reg.Register(toolpkg.NewPlanTool())
+	reg.Register(toolpkg.NewPlanStepCompleteTool())
 	var giteaTool *toolpkg.GiteaAPITool
 	delegateExec := &delegateTool{
 		peers:               peers,

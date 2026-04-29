@@ -12,6 +12,7 @@ type AgentWorkspace struct {
 	CurrentBranch string               `json:"current_branch"`
 	CurrentFile   string               `json:"current_file"`
 	FilesTouched  map[string]FileState `json:"files_touched"`
+	Plan          *Plan                `json:"plan,omitempty"`
 	LastUpdated   time.Time            `json:"last_updated"`
 }
 
@@ -20,6 +21,12 @@ type FileState struct {
 	State      string    `json:"state"`
 	LastAccess time.Time `json:"last_access"`
 	LineCursor int       `json:"line_cursor"`
+}
+
+type Plan struct {
+	Steps       []string  `json:"steps"`
+	CurrentStep int       `json:"current_step"`
+	StartedAt   time.Time `json:"started_at"`
 }
 
 type Projector struct {
@@ -33,7 +40,7 @@ func NewProjector() *Projector {
 
 func IsTypedEvent(eventType string) bool {
 	switch eventType {
-	case "file_read", "file_write", "git_clone", "git_branch_create", "git_commit", "git_push", "pr_create", "exec", "http_request":
+	case "file_read", "file_write", "git_clone", "git_branch_create", "git_commit", "git_push", "pr_create", "exec", "http_request", "plan", "plan_step_complete":
 		return true
 	default:
 		return false
@@ -53,6 +60,29 @@ func (p *Projector) Apply(agentName string, eventType string, payload map[string
 	ws.LastUpdated = now
 
 	switch eventType {
+	case "plan":
+		steps := stringSlicePayload(payload, "steps")
+		if len(steps) == 0 {
+			return
+		}
+		ws.Plan = &Plan{
+			Steps:       steps,
+			CurrentStep: 0,
+			StartedAt:   now,
+		}
+	case "plan_step_complete":
+		if ws.Plan == nil {
+			return
+		}
+		step := intPayload(payload, "step")
+		if step < 0 {
+			return
+		}
+		next := step + 1
+		if next > len(ws.Plan.Steps) {
+			next = len(ws.Plan.Steps)
+		}
+		ws.Plan.CurrentStep = next
 	case "file_read":
 		path := stringPayload(payload, "path")
 		if path == "" {
@@ -161,6 +191,11 @@ func cloneWorkspace(ws *AgentWorkspace) AgentWorkspace {
 	for path, state := range ws.FilesTouched {
 		out.FilesTouched[path] = state
 	}
+	if ws.Plan != nil {
+		plan := *ws.Plan
+		plan.Steps = append([]string(nil), ws.Plan.Steps...)
+		out.Plan = &plan
+	}
 	return out
 }
 
@@ -201,4 +236,31 @@ func intPayload(payload map[string]interface{}, key string) int {
 
 type jsonNumber interface {
 	Int64() (int64, error)
+}
+
+func stringSlicePayload(payload map[string]interface{}, key string) []string {
+	v, ok := payload[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch items := v.(type) {
+	case []string:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if item = stringPayload(map[string]interface{}{"value": item}, "value"); item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]string, 0, len(items))
+		for _, item := range items {
+			if text := stringPayload(map[string]interface{}{"value": item}, "value"); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
