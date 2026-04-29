@@ -290,16 +290,12 @@ func stringArg(args map[string]interface{}, key string) string {
 	if !ok || v == nil {
 		return ""
 	}
-	if s, ok := v.(string); ok {
-		return strings.TrimSpace(s)
-	}
-	value := strings.TrimSpace(fmt.Sprint(v))
-	if value == "<nil>" {
-		return ""
-	}
-	return value
+	return stringFromAny(v)
 }
 
+// intArg returns -1 when the value is missing or cannot be parsed.
+// That sentinel is intentional here because step 0 is valid for plan-step-complete.
+// This differs from workspace.intPayload, which uses 0 as its generic missing-value fallback.
 func intArg(args map[string]interface{}, key string) int {
 	v, ok := args[key]
 	if !ok || v == nil {
@@ -320,6 +316,20 @@ func intArg(args map[string]interface{}, key string) int {
 		return out
 	}
 	return -1
+}
+
+func stringFromAny(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	value := strings.TrimSpace(fmt.Sprint(v))
+	if value == "<nil>" {
+		return ""
+	}
+	return value
 }
 
 func repoDirName(repo string) string {

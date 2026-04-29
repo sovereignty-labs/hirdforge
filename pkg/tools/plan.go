@@ -64,7 +64,7 @@ func parsePlanSteps(raw interface{}) ([]string, error) {
 		if strings, ok := raw.([]string); ok {
 			out := make([]string, 0, len(strings))
 			for _, step := range strings {
-				if step = stringArg(map[string]interface{}{"step": step}, "step"); step != "" {
+				if step = stringFromAny(step); step != "" {
 					out = append(out, step)
 				}
 			}
@@ -78,7 +78,7 @@ func parsePlanSteps(raw interface{}) ([]string, error) {
 
 	out := make([]string, 0, len(items))
 	for _, item := range items {
-		step := stringArg(map[string]interface{}{"step": item}, "step")
+		step := stringFromAny(item)
 		if step == "" {
 			return nil, fmt.Errorf("steps must not contain empty values")
 		}

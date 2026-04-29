@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -204,10 +205,7 @@ func stringPayload(payload map[string]interface{}, key string) string {
 	if !ok || v == nil {
 		return ""
 	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return fmt.Sprint(v)
+	return stringFromAny(v)
 }
 
 func intPayload(payload map[string]interface{}, key string) int {
@@ -247,7 +245,7 @@ func stringSlicePayload(payload map[string]interface{}, key string) []string {
 	case []string:
 		out := make([]string, 0, len(items))
 		for _, item := range items {
-			if item = stringPayload(map[string]interface{}{"value": item}, "value"); item != "" {
+			if item = stringFromAny(item); item != "" {
 				out = append(out, item)
 			}
 		}
@@ -255,7 +253,7 @@ func stringSlicePayload(payload map[string]interface{}, key string) []string {
 	case []interface{}:
 		out := make([]string, 0, len(items))
 		for _, item := range items {
-			if text := stringPayload(map[string]interface{}{"value": item}, "value"); text != "" {
+			if text := stringFromAny(item); text != "" {
 				out = append(out, text)
 			}
 		}
@@ -263,4 +261,18 @@ func stringSlicePayload(payload map[string]interface{}, key string) []string {
 	default:
 		return nil
 	}
+}
+
+func stringFromAny(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	value := strings.TrimSpace(fmt.Sprint(v))
+	if value == "<nil>" {
+		return ""
+	}
+	return value
 }
