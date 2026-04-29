@@ -2088,6 +2088,44 @@ func approvalAgentName(item approvalQueueItem) string {
 	return "unknown"
 }
 
+func resolveApprovalHuntID(ctx context.Context, lockboxURL, queueID string) (string, error) {
+	base := strings.TrimSpace(lockboxURL)
+	if base == "" {
+		return "", fmt.Errorf("lockbox not configured")
+	}
+	queueID = strings.TrimSpace(queueID)
+	if queueID == "" {
+		return "", fmt.Errorf("queue_id is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/queues", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("lockbox /queues returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	var out approvalsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	for _, item := range out.Queues {
+		if strings.TrimSpace(item.QueueID) == queueID {
+			huntID := strings.TrimSpace(item.HuntID)
+			if huntID == "" {
+				return "", fmt.Errorf("queue %s missing hunt_id", queueID)
+			}
+			return huntID, nil
+		}
+	}
+	return "", fmt.Errorf("queue item not found")
+}
+
 func sendDiscordApprovalWebhook(webhookURL string, item approvalQueueItem) error {
 	webhookURL = strings.TrimSpace(webhookURL)
 	if webhookURL == "" {
@@ -2908,8 +2946,17 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "queue_id is required"})
 			return
 		}
+		huntID, err := resolveApprovalHuntID(r.Context(), *lockboxURL, in.QueueID)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "queue item not found"})
+			} else {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			}
+			return
+		}
 		payload, _ := json.Marshal(map[string]interface{}{
-			"hunt_id":  "mcp",
+			"hunt_id":  huntID,
 			"queue_id": in.QueueID,
 			"approved": true,
 		})
@@ -2932,12 +2979,61 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "queue_id is required"})
 			return
 		}
+		huntID, err := resolveApprovalHuntID(r.Context(), *lockboxURL, in.QueueID)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "queue item not found"})
+			} else {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			}
+			return
+		}
 		payload, _ := json.Marshal(map[string]interface{}{
-			"hunt_id":  "mcp",
+			"hunt_id":  huntID,
 			"queue_id": in.QueueID,
 			"approved": false,
 		})
 		proxyLockbox(w, r, http.MethodPost, "/approve-write", payload)
+	})
+	mux.HandleFunc("/api/v1/approvals/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/approvals/"), "/")
+		parts := strings.Split(path, "/")
+		if len(parts) != 2 || parts[0] == "" || parts[1] != "revise" {
+			http.NotFound(w, r)
+			return
+		}
+		queueID := strings.TrimSpace(parts[0])
+		var in struct {
+			Note string `json:"note"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+			return
+		}
+		in.Note = strings.TrimSpace(in.Note)
+		if in.Note == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "note is required"})
+			return
+		}
+		huntID, err := resolveApprovalHuntID(r.Context(), *lockboxURL, queueID)
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "queue item not found"})
+			} else {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+			}
+			return
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"hunt_id":  huntID,
+			"queue_id": queueID,
+			"note":     in.Note,
+		})
+		proxyLockbox(w, r, http.MethodPost, "/revise", payload)
 	})
 	mux.HandleFunc("/api/v1/settings/agents/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

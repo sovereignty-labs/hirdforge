@@ -46,6 +46,13 @@ type AuditEntry struct {
 	Error     string                 `json:"error,omitempty"`
 }
 
+type Trigger struct {
+	Type       string                 `json:"type"`
+	Summary    string                 `json:"summary"`
+	OccurredAt time.Time              `json:"occurred_at"`
+	Source     map[string]interface{} `json:"source,omitempty"`
+}
+
 type WriteQueue struct {
 	QueueID  string                 `json:"queue_id"`
 	HuntID   string                 `json:"hunt_id"`
@@ -54,6 +61,8 @@ type WriteQueue struct {
 	Params   map[string]interface{} `json:"params"`
 	Status   string                 `json:"status"`
 	Error    string                 `json:"error,omitempty"`
+	Note     string                 `json:"note,omitempty"`
+	Trigger  *Trigger               `json:"trigger,omitempty"`
 	QueuedAt time.Time              `json:"queued_at"`
 }
 
@@ -189,12 +198,19 @@ type actionReq struct {
 	Service string                 `json:"service"`
 	Action  string                 `json:"action"`
 	Params  map[string]interface{} `json:"params"`
+	Trigger *Trigger               `json:"trigger,omitempty"`
 }
 
 type approveWriteReq struct {
 	HuntID   string `json:"hunt_id"`
 	QueueID  string `json:"queue_id"`
 	Approved *bool  `json:"approved"`
+}
+
+type reviseWriteReq struct {
+	HuntID  string `json:"hunt_id"`
+	QueueID string `json:"queue_id"`
+	Note    string `json:"note"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
@@ -224,6 +240,120 @@ func cloneParams(in map[string]interface{}) map[string]interface{} {
 		out[k] = v
 	}
 	return out
+}
+
+func cloneTrigger(in *Trigger) *Trigger {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if out.OccurredAt.IsZero() {
+		out.OccurredAt = time.Now().UTC()
+	}
+	return &out
+}
+
+func parseTriggerTime(raw interface{}) (time.Time, bool) {
+	switch v := raw.(type) {
+	case time.Time:
+		return v.UTC(), true
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return time.Time{}, false
+		}
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if t, err := time.Parse(layout, s); err == nil {
+				return t.UTC(), true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseTriggerMap(raw map[string]interface{}) *Trigger {
+	if raw == nil {
+		return nil
+	}
+	trigger := &Trigger{
+		Type:    strings.TrimSpace(fmt.Sprint(raw["type"])),
+		Summary: strings.TrimSpace(fmt.Sprint(raw["summary"])),
+	}
+	if t, ok := parseTriggerTime(raw["occurred_at"]); ok {
+		trigger.OccurredAt = t
+	} else {
+		trigger.OccurredAt = time.Now().UTC()
+	}
+	if source, ok := raw["source"].(map[string]interface{}); ok && len(source) > 0 {
+		trigger.Source = source
+	}
+	if trigger.Type == "" && trigger.Summary == "" && trigger.Source == nil && trigger.OccurredAt.IsZero() {
+		return nil
+	}
+	return trigger
+}
+
+func parseTriggerValue(raw interface{}) *Trigger {
+	switch v := raw.(type) {
+	case nil:
+		return nil
+	case *Trigger:
+		return cloneTrigger(v)
+	case Trigger:
+		return cloneTrigger(&v)
+	case map[string]interface{}:
+		return parseTriggerMap(v)
+	case json.RawMessage:
+		if len(v) == 0 {
+			return nil
+		}
+		var out Trigger
+		if err := json.Unmarshal(v, &out); err == nil {
+			if out.OccurredAt.IsZero() {
+				out.OccurredAt = time.Now().UTC()
+			}
+			return &out
+		}
+		var generic map[string]interface{}
+		if err := json.Unmarshal(v, &generic); err == nil {
+			return parseTriggerMap(generic)
+		}
+		return nil
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		var out Trigger
+		if err := json.Unmarshal([]byte(s), &out); err == nil {
+			if out.OccurredAt.IsZero() {
+				out.OccurredAt = time.Now().UTC()
+			}
+			return &out
+		}
+		var generic map[string]interface{}
+		if err := json.Unmarshal([]byte(s), &generic); err == nil {
+			return parseTriggerMap(generic)
+		}
+		return &Trigger{
+			Summary:    s,
+			OccurredAt: time.Now().UTC(),
+		}
+	default:
+		return nil
+	}
+}
+
+func extractTrigger(args map[string]interface{}) *Trigger {
+	if args == nil {
+		return nil
+	}
+	raw, ok := args["_trigger"]
+	if !ok {
+		return nil
+	}
+	delete(args, "_trigger")
+	return parseTriggerValue(raw)
 }
 
 func actionSupported(svc ServiceHandler, action string) bool {
@@ -426,6 +556,7 @@ func (s *lockboxState) action(w http.ResponseWriter, r *http.Request) {
 			Action:   req.Action,
 			Params:   cloneParams(req.Params),
 			Status:   "pending",
+			Trigger:  cloneTrigger(req.Trigger),
 			QueuedAt: now,
 		}
 		s.queues[qid] = queue
@@ -692,6 +823,76 @@ func (s *lockboxState) approveWrite(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *lockboxState) reviseWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req reviseWriteReq
+	if err := decodeJSONStrict(r, &req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "error": "invalid JSON: " + err.Error()})
+		return
+	}
+	req.HuntID = strings.TrimSpace(req.HuntID)
+	req.QueueID = strings.TrimSpace(req.QueueID)
+	req.Note = strings.TrimSpace(req.Note)
+	if req.HuntID == "" || req.QueueID == "" || req.Note == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "error": "hunt_id, queue_id, and note are required"})
+		return
+	}
+
+	now := time.Now().UTC()
+
+	s.mu.Lock()
+	q, ok := s.queues[req.QueueID]
+	if !ok || q.HuntID != req.HuntID {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusNotFound, map[string]interface{}{"status": "error", "error": "queue item not found"})
+		return
+	}
+	if q.Status != "pending" {
+		s.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]interface{}{"status": "error", "error": "queue item is not pending"})
+		return
+	}
+	if q.Service != "mcp" {
+		scope, ok := s.hunts[req.HuntID]
+		if !ok {
+			s.mu.Unlock()
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"status": "error", "error": "hunt scope not found"})
+			return
+		}
+		if now.After(scope.ExpiresAt) {
+			delete(s.hunts, req.HuntID)
+			delete(s.audits, req.HuntID)
+			for qid, queued := range s.queues {
+				if queued.HuntID == req.HuntID {
+					delete(s.queues, qid)
+				}
+			}
+			s.mu.Unlock()
+			writeJSON(w, http.StatusGone, map[string]interface{}{"status": "expired", "error": req.HuntID + " scope has expired"})
+			return
+		}
+	}
+
+	q.Status = "revising"
+	q.Note = req.Note
+	s.addAudit(AuditEntry{
+		Timestamp: now,
+		HuntID:    req.HuntID,
+		Service:   q.Service,
+		Action:    q.Action,
+		Params:    cloneParams(q.Params),
+		Status:    "revised",
+	}, q.QueueID)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "revising",
+		"queue_id": q.QueueID,
+	})
+}
+
 func (s *lockboxState) audit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -769,6 +970,8 @@ func (s *lockboxState) listQueues(w http.ResponseWriter, r *http.Request) {
 			"action":    q.Action,
 			"params":    cloneParams(q.Params),
 			"status":    q.Status,
+			"note":      q.Note,
+			"trigger":   q.Trigger,
 			"queued_at": q.QueuedAt,
 		})
 	}
@@ -1149,6 +1352,7 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 				args["user_google_email"] = googleUserEmail
 			}
 		}
+		trigger := extractTrigger(args)
 		s.mu.RLock()
 		tool, nativeTool := s.tools[toolName]
 		_, upstreamTool := s.upstreamTools[toolName]
@@ -1192,6 +1396,7 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 					Action:   toolName,
 					Params:   cloneParams(args),
 					Status:   "pending",
+					Trigger:  cloneTrigger(trigger),
 					QueuedAt: now,
 				}
 				s.addAudit(AuditEntry{
@@ -1268,6 +1473,7 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 				Action:   toolName,
 				Params:   cloneParams(args),
 				Status:   "pending",
+				Trigger:  cloneTrigger(trigger),
 				QueuedAt: now,
 			}
 			s.addAudit(AuditEntry{
@@ -1855,6 +2061,7 @@ func main() {
 	mux.HandleFunc("/register", state.registerHunt)
 	mux.HandleFunc("/action", state.action)
 	mux.HandleFunc("/approve-write", state.approveWrite)
+	mux.HandleFunc("/revise", state.reviseWrite)
 	mux.HandleFunc("/audit/", state.audit)
 	mux.HandleFunc("/queues", state.listQueues)
 	mux.HandleFunc("/health", state.health)
