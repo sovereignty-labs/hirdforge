@@ -2107,7 +2107,7 @@ func runHunterMode(taskJSON, memoryURL, quarantinePrefix string) error {
 	return nil
 }
 
-func writeSSE(w http.ResponseWriter, payload sseChunk) {
+func writeSSE(w http.ResponseWriter, payload interface{}) {
 	b, _ := json.Marshal(payload)
 	fmt.Fprintf(w, "data: %s\n\n", b)
 }
@@ -3807,8 +3807,8 @@ func notifyGateway(gatewayURL, eventType, agentName string, metadata map[string]
 	}
 	go func() {
 		payload := map[string]interface{}{
-			"type":    eventType,
-			"agent":   agentName,
+			"type":     eventType,
+			"agent":    agentName,
 			"metadata": metadata,
 		}
 		body, _ := json.Marshal(payload)
@@ -4041,7 +4041,7 @@ func main() {
 	sovereignNotifyOn := flag.String("sovereign-notify-on", "completed,failed,nudged", "Comma-separated sovereign notification states")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
-	memoryURL        := flag.String("memory-url", "", "Seidr memory service URL")
+	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
 	memoryToolsFlag := flag.Bool("memory-tools", false, "Enable recall, remember, and memory-edit tools (requires --memory-url)")
 	gatewayURL := flag.String("gateway-url", "", "Gateway URL for event notifications (optional)")
 	agentNameFlag := flag.String("agent-name", "", "agent name override (defaults to soul filename)")
@@ -4273,8 +4273,8 @@ func main() {
 	enabledTools = reg.List()
 	modelName = *model
 
-	emitNoop := func(sseChunk) bool { return true }
-	processConversation := func(ctx context.Context, sessionID, content string, emit func(sseChunk) bool, logTool func(taskspkg.ToolLog)) (string, error) {
+	emitNoop := func(interface{}) bool { return true }
+	processConversation := func(ctx context.Context, sessionID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
 		if emit == nil {
 			emit = emitNoop
 		}
@@ -4502,6 +4502,12 @@ func main() {
 			if !emit(sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false}) {
 				return toolpkg.ToolResult{Error: "stream closed"}
 			}
+			for _, event := range toolpkg.TypedToolStartEvents(tc.Function.Name, args, *workspace) {
+				if !emit(event) {
+					return toolpkg.ToolResult{Error: "stream closed"}
+				}
+			}
+			typedEventContext := toolpkg.CaptureTypedToolEventContext(tc.Function.Name, args, *workspace, agentName)
 
 			runToolAttempt := func() toolpkg.ToolResult {
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
@@ -4614,9 +4620,9 @@ func main() {
 						prRepo := truncateMemoryValue(fmt.Sprint(args["repo"]), 200)
 						prURL := truncateMemoryValue(extractFirstURL(result.Output), 300)
 						notifyGateway(*gatewayURL, "pr_created", agentName, map[string]interface{}{
-							"repo":     prRepo,
-							"branch":   prHead,
-							"pr_url":   prURL,
+							"repo":   prRepo,
+							"branch": prHead,
+							"pr_url": prURL,
 						})
 					}
 				}
@@ -4758,6 +4764,11 @@ func main() {
 				logTool(taskspkg.ToolLog{Name: tc.Function.Name, Input: string(inputBytes), Output: out})
 			}
 			maybeRememberAction(*memoryURL, agentName, sessionID, tc.Function.Name, args, result)
+			for _, event := range toolpkg.TypedToolResultEvents(tc.Function.Name, args, result, *workspace, typedEventContext) {
+				if !emit(event) {
+					return result
+				}
+			}
 			if !emit(sseChunk{Type: "tool_result", Tool: tc.Function.Name, Result: result, Done: false}) {
 				return result
 			}
@@ -5295,7 +5306,7 @@ func main() {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		emit := func(chunk sseChunk) bool {
+		emit := func(chunk interface{}) bool {
 			writeSSE(w, chunk)
 			flusher.Flush()
 			return true
