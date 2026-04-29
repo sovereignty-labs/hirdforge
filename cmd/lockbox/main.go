@@ -43,6 +43,7 @@ type AuditEntry struct {
 	Action    string                 `json:"action"`
 	Params    map[string]interface{} `json:"params,omitempty"`
 	Status    string                 `json:"status"`
+	Note      string                 `json:"note,omitempty"`
 	Error     string                 `json:"error,omitempty"`
 }
 
@@ -279,16 +280,19 @@ func parseTriggerMap(raw map[string]interface{}) *Trigger {
 		Type:    strings.TrimSpace(fmt.Sprint(raw["type"])),
 		Summary: strings.TrimSpace(fmt.Sprint(raw["summary"])),
 	}
+	explicitOccurredAt := false
 	if t, ok := parseTriggerTime(raw["occurred_at"]); ok {
 		trigger.OccurredAt = t
-	} else {
-		trigger.OccurredAt = time.Now().UTC()
+		explicitOccurredAt = true
 	}
 	if source, ok := raw["source"].(map[string]interface{}); ok && len(source) > 0 {
 		trigger.Source = source
 	}
-	if trigger.Type == "" && trigger.Summary == "" && trigger.Source == nil && trigger.OccurredAt.IsZero() {
+	if trigger.Type == "" && trigger.Summary == "" && trigger.Source == nil && !explicitOccurredAt {
 		return nil
+	}
+	if trigger.OccurredAt.IsZero() {
+		trigger.OccurredAt = time.Now().UTC()
 	}
 	return trigger
 }
@@ -885,6 +889,7 @@ func (s *lockboxState) reviseWrite(w http.ResponseWriter, r *http.Request) {
 		Action:    q.Action,
 		Params:    cloneParams(q.Params),
 		Status:    "revised",
+		Note:      req.Note,
 	}, q.QueueID)
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]interface{}{
