@@ -28,6 +28,7 @@ import (
 	"time"
 
 	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
+	workspacepkg "github.com/kitporath/project_valhalla/pkg/workspace"
 )
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
@@ -320,6 +321,7 @@ type gateway struct {
 	wsMu              sync.Mutex
 	wsConns           []*wsClient
 	sessionStore      *sessionStore
+	projector         *workspacepkg.Projector
 	settings          *settingsStore
 	notifMu           sync.Mutex
 	notifications     []Notification
@@ -497,6 +499,31 @@ func (g *gateway) addEvent(eventType, agent, summary string) {
 		g.broadcastPayload(structured)
 		go g.notifyDelegatingAgent(structured)
 	}
+}
+
+func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface{}) {
+	if g == nil || g.projector == nil {
+		return
+	}
+	eventType, _ := evt["type"].(string)
+	if !workspacepkg.IsTypedEvent(eventType) {
+		return
+	}
+	g.projector.Apply(agentName, eventType, evt)
+	now := time.Now().Format(time.RFC3339)
+	typed := make(map[string]interface{}, len(evt)+2)
+	for k, v := range evt {
+		typed[k] = v
+	}
+	typed["agent"] = agentName
+	typed["timestamp"] = now
+	g.broadcastPayload(typed)
+	g.broadcastPayload(map[string]interface{}{
+		"type":      "workspace_update",
+		"agent":     agentName,
+		"timestamp": now,
+		"workspace": g.projector.Get(agentName),
+	})
 }
 
 func writeWSFrame(conn net.Conn, opcode byte, payload []byte) error {
@@ -2113,28 +2140,29 @@ func main() {
 		die("failed to parse --agents", err)
 	}
 	gw := &gateway{
-		agents:            agents,
-		order:             order,
-		repos:             []string{},
-		events:            make([]Event, 0, 200),
-		eventCap:          200,
-		k8s:               initK8s(),
-		sessionStore:      newSessionStore(),
-		settings:          newSettingsStore(),
-		notifications:     make([]Notification, 0, 100),
-		notifCap:          100,
-		lastSession:       map[string]string{},
-		prReviewState:     map[string]prReviewState{},
-		dispatchedTasks:   map[int64]*dispatchedTask{},
-		activeRequests:    map[string]*ActiveRequest{},
-		injections:        map[string][]InjectionMessage{},
-		pausedAgents:      map[string]bool{},
-		webhookSecret:     strings.TrimSpace(*webhookSecret),
-		taskRepo:          strings.TrimSpace(*taskRepoFlag),
-		giteaURL:          strings.TrimSpace(*giteaURL),
-		giteaToken:        resolveGatewayGiteaToken(*giteaToken),
-		seidrURL:          strings.TrimSpace(*seidrURLFlag),
-		discordWebhookURL: strings.TrimSpace(*discordWebhookURL),
+		agents:              agents,
+		order:               order,
+		repos:               []string{},
+		events:              make([]Event, 0, 200),
+		eventCap:            200,
+		k8s:                 initK8s(),
+		sessionStore:        newSessionStore(),
+		projector:           workspacepkg.NewProjector(),
+		settings:            newSettingsStore(),
+		notifications:       make([]Notification, 0, 100),
+		notifCap:            100,
+		lastSession:         map[string]string{},
+		prReviewState:       map[string]prReviewState{},
+		dispatchedTasks:     map[int64]*dispatchedTask{},
+		activeRequests:      map[string]*ActiveRequest{},
+		injections:          map[string][]InjectionMessage{},
+		pausedAgents:        map[string]bool{},
+		webhookSecret:       strings.TrimSpace(*webhookSecret),
+		taskRepo:            strings.TrimSpace(*taskRepoFlag),
+		giteaURL:            strings.TrimSpace(*giteaURL),
+		giteaToken:          resolveGatewayGiteaToken(*giteaToken),
+		seidrURL:            strings.TrimSpace(*seidrURLFlag),
+		discordWebhookURL:   strings.TrimSpace(*discordWebhookURL),
 		delegationTimelines: make(map[string][]delegationTimelineEvent),
 	}
 	if err := gw.loadPipelineState(); err != nil {
@@ -2326,6 +2354,22 @@ func main() {
 	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
 		switch {
+		case strings.HasSuffix(path, "/workspace"):
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/workspace")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown agent"})
+				return
+			}
+			writeJSON(w, http.StatusOK, gw.projector.Get(name))
 		case strings.HasSuffix(path, "/inject"):
 			if r.Method != http.MethodPost {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3915,6 +3959,7 @@ func main() {
 						var evt map[string]interface{}
 						if json.Unmarshal([]byte(payload), &evt) == nil {
 							typ, _ := evt["type"].(string)
+							gw.applyWorkspaceEvent(agentName, evt)
 							if typ == "content" {
 								if c, ok := evt["content"].(string); ok {
 									contentBuf.WriteString(c)
@@ -4164,6 +4209,7 @@ func main() {
 					var evt map[string]interface{}
 					if json.Unmarshal([]byte(payload), &evt) == nil {
 						typ, _ := evt["type"].(string)
+						gw.applyWorkspaceEvent(in.Agent, evt)
 						if typ == "content" {
 							if content, _ := evt["content"].(string); content != "" {
 								contentBuf.WriteString(content)
