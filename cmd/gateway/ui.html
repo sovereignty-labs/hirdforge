@@ -70,6 +70,8 @@
     }
 
     function approvalAgentName(item) {
+      const explicit = String(item && item.agent_name || '').trim();
+      if (explicit) return explicit;
       const params = item && item.params;
       if (!params || typeof params !== 'object') return '';
       for (const key of ['agent', 'from', 'requested_by']) {

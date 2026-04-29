@@ -55,16 +55,17 @@ type Trigger struct {
 }
 
 type WriteQueue struct {
-	QueueID  string                 `json:"queue_id"`
-	HuntID   string                 `json:"hunt_id"`
-	Service  string                 `json:"service"`
-	Action   string                 `json:"action"`
-	Params   map[string]interface{} `json:"params"`
-	Status   string                 `json:"status"`
-	Error    string                 `json:"error,omitempty"`
-	Note     string                 `json:"note,omitempty"`
-	Trigger  *Trigger               `json:"trigger,omitempty"`
-	QueuedAt time.Time              `json:"queued_at"`
+	QueueID   string                 `json:"queue_id"`
+	HuntID    string                 `json:"hunt_id"`
+	Service   string                 `json:"service"`
+	Action    string                 `json:"action"`
+	AgentName string                 `json:"agent_name,omitempty"`
+	Params    map[string]interface{} `json:"params"`
+	Status    string                 `json:"status"`
+	Error     string                 `json:"error,omitempty"`
+	Note      string                 `json:"note,omitempty"`
+	Trigger   *Trigger               `json:"trigger,omitempty"`
+	QueuedAt  time.Time              `json:"queued_at"`
 }
 
 type ServiceCredential struct {
@@ -195,11 +196,12 @@ type registerReq struct {
 }
 
 type actionReq struct {
-	HuntID  string                 `json:"hunt_id"`
-	Service string                 `json:"service"`
-	Action  string                 `json:"action"`
-	Params  map[string]interface{} `json:"params"`
-	Trigger *Trigger               `json:"trigger,omitempty"`
+	HuntID    string                 `json:"hunt_id"`
+	Service   string                 `json:"service"`
+	Action    string                 `json:"action"`
+	AgentName string                 `json:"agent_name,omitempty"`
+	Params    map[string]interface{} `json:"params"`
+	Trigger   *Trigger               `json:"trigger,omitempty"`
 }
 
 type approveWriteReq struct {
@@ -360,6 +362,21 @@ func extractTrigger(args map[string]interface{}) *Trigger {
 	return parseTriggerValue(raw)
 }
 
+func extractAgentName(args map[string]interface{}) string {
+	if args == nil {
+		return ""
+	}
+	raw, ok := args["_agent_name"]
+	if !ok {
+		return ""
+	}
+	delete(args, "_agent_name")
+	if raw == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(raw))
+}
+
 func actionSupported(svc ServiceHandler, action string) bool {
 	for _, a := range svc.SupportedActions() {
 		if a == action {
@@ -499,6 +516,7 @@ func (s *lockboxState) action(w http.ResponseWriter, r *http.Request) {
 	req.HuntID = strings.TrimSpace(req.HuntID)
 	req.Service = strings.TrimSpace(req.Service)
 	req.Action = strings.TrimSpace(req.Action)
+	req.AgentName = strings.TrimSpace(req.AgentName)
 	if req.HuntID == "" || req.Service == "" || req.Action == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "error": "hunt_id, service, and action are required"})
 		return
@@ -554,14 +572,15 @@ func (s *lockboxState) action(w http.ResponseWriter, r *http.Request) {
 		remaining := scope.MaxRequests - scope.UsedRequests
 		qid := fmt.Sprintf("q-%06d", atomic.AddUint64(&s.queueSeq, 1))
 		queue := &WriteQueue{
-			QueueID:  qid,
-			HuntID:   req.HuntID,
-			Service:  req.Service,
-			Action:   req.Action,
-			Params:   cloneParams(req.Params),
-			Status:   "pending",
-			Trigger:  cloneTrigger(req.Trigger),
-			QueuedAt: now,
+			QueueID:   qid,
+			HuntID:    req.HuntID,
+			Service:   req.Service,
+			Action:    req.Action,
+			AgentName: req.AgentName,
+			Params:    cloneParams(req.Params),
+			Status:    "pending",
+			Trigger:   cloneTrigger(req.Trigger),
+			QueuedAt:  now,
 		}
 		s.queues[qid] = queue
 		s.addAudit(AuditEntry{
@@ -968,7 +987,7 @@ func (s *lockboxState) listQueues(w http.ResponseWriter, r *http.Request) {
 		if q.Status != "pending" {
 			continue
 		}
-		queues = append(queues, map[string]interface{}{
+		item := map[string]interface{}{
 			"queue_id":  q.QueueID,
 			"hunt_id":   q.HuntID,
 			"service":   q.Service,
@@ -978,7 +997,11 @@ func (s *lockboxState) listQueues(w http.ResponseWriter, r *http.Request) {
 			"note":      q.Note,
 			"trigger":   q.Trigger,
 			"queued_at": q.QueuedAt,
-		})
+		}
+		if strings.TrimSpace(q.AgentName) != "" {
+			item["agent_name"] = q.AgentName
+		}
+		queues = append(queues, item)
 	}
 	s.mu.RUnlock()
 	sort.Slice(queues, func(i, j int) bool {
@@ -1358,6 +1381,7 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		trigger := extractTrigger(args)
+		agentName := extractAgentName(args)
 		s.mu.RLock()
 		tool, nativeTool := s.tools[toolName]
 		_, upstreamTool := s.upstreamTools[toolName]
@@ -1395,14 +1419,15 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 				qid := fmt.Sprintf("q-%06d", atomic.AddUint64(&s.queueSeq, 1))
 				s.mu.Lock()
 				s.queues[qid] = &WriteQueue{
-					QueueID:  qid,
-					HuntID:   "mcp",
-					Service:  "mcp",
-					Action:   toolName,
-					Params:   cloneParams(args),
-					Status:   "pending",
-					Trigger:  cloneTrigger(trigger),
-					QueuedAt: now,
+					QueueID:   qid,
+					HuntID:    "mcp",
+					Service:   "mcp",
+					Action:    toolName,
+					AgentName: agentName,
+					Params:    cloneParams(args),
+					Status:    "pending",
+					Trigger:   cloneTrigger(trigger),
+					QueuedAt:  now,
 				}
 				s.addAudit(AuditEntry{
 					Timestamp: now,
@@ -1472,14 +1497,15 @@ func (s *lockboxState) mcp(w http.ResponseWriter, r *http.Request) {
 			qid := fmt.Sprintf("q-%06d", atomic.AddUint64(&s.queueSeq, 1))
 			s.mu.Lock()
 			s.queues[qid] = &WriteQueue{
-				QueueID:  qid,
-				HuntID:   "mcp",
-				Service:  "mcp",
-				Action:   toolName,
-				Params:   cloneParams(args),
-				Status:   "pending",
-				Trigger:  cloneTrigger(trigger),
-				QueuedAt: now,
+				QueueID:   qid,
+				HuntID:    "mcp",
+				Service:   "mcp",
+				Action:    toolName,
+				AgentName: agentName,
+				Params:    cloneParams(args),
+				Status:    "pending",
+				Trigger:   cloneTrigger(trigger),
+				QueuedAt:  now,
 			}
 			s.addAudit(AuditEntry{
 				Timestamp: now,

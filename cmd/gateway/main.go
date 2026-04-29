@@ -100,13 +100,14 @@ type Notification struct {
 }
 
 type approvalQueueItem struct {
-	QueueID  string                 `json:"queue_id"`
-	HuntID   string                 `json:"hunt_id"`
-	Service  string                 `json:"service"`
-	Action   string                 `json:"action"`
-	Params   map[string]interface{} `json:"params"`
-	Status   string                 `json:"status"`
-	QueuedAt string                 `json:"queued_at"`
+	QueueID   string                 `json:"queue_id"`
+	HuntID    string                 `json:"hunt_id"`
+	Service   string                 `json:"service"`
+	Action    string                 `json:"action"`
+	AgentName string                 `json:"agent_name,omitempty"`
+	Params    map[string]interface{} `json:"params"`
+	Status    string                 `json:"status"`
+	QueuedAt  string                 `json:"queued_at"`
 }
 
 type approvalsResponse struct {
@@ -2075,6 +2076,9 @@ func summarizeApprovalParams(params map[string]interface{}) string {
 }
 
 func approvalAgentName(item approvalQueueItem) string {
+	if s := strings.TrimSpace(item.AgentName); s != "" {
+		return s
+	}
 	if item.Params == nil {
 		return "unknown"
 	}
