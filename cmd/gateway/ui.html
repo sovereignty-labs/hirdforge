@@ -184,6 +184,7 @@
       return {
         time: Date.now(),
         type: evt.type,
+        path: evt.path || '',
         text: activitySummary(evt),
         icon: activityIcon(evt.type),
         current: evt.type === 'file_write' && evt.status === 'writing',
@@ -1397,8 +1398,16 @@
               const entry = activityEntryFromEvent(payload);
               setActivityByAgent(current => {
                 const existing = current[agent] || [];
-                const normalized = entry.current ? existing : existing.map(item => item.current ? { ...item, current: false } : item);
-                return { ...current, [agent]: [...normalized, entry].slice(-50) };
+                const completedPath = payload.type === 'file_write' && payload.status === 'complete' ? String(payload.path || '') : '';
+                const normalized = existing.map(item => {
+                  const completedSameFile = completedPath && item.type === 'file_write' && item.path === completedPath && item.current;
+                  if (!item.current || (entry.current && !completedSameFile)) return item;
+                  return { ...item, current: false };
+                });
+                const capped = [...normalized, entry].slice(-50);
+                const ttlCutoff = Date.now() - 60000;
+                const swept = capped.map(item => item.current && item.time < ttlCutoff ? { ...item, current: false } : item);
+                return { ...current, [agent]: swept };
               });
             }
           };
