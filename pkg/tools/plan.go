@@ -64,6 +64,8 @@ func (t *PlanStepCompleteTool) Execute(args map[string]interface{}) ToolResult {
 // parsePlanSteps accepts native arrays plus JSON-encoded string wrappers that
 // some smaller models emit instead of structured arguments. Supported string
 // forms are a JSON array directly or a JSON object containing a "steps" array.
+// Successful string decoding recurses into the normal array validation path, so
+// empty arrays and empty step values still hit the existing guards.
 func parsePlanSteps(raw interface{}) ([]string, error) {
 	items, ok := raw.([]interface{})
 	if !ok {

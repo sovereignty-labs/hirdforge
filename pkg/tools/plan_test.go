@@ -7,7 +7,7 @@ func TestParsePlanSteps(t *testing.T) {
 		name    string
 		input   interface{}
 		want    []string
-		wantErr bool
+		wantErr string
 	}{
 		{
 			name:  "native interface array",
@@ -32,26 +32,44 @@ func TestParsePlanSteps(t *testing.T) {
 		{
 			name:    "empty array",
 			input:   []interface{}{},
-			wantErr: true,
+			wantErr: "steps must not be empty",
+		},
+		{
+			name:    "json string empty array",
+			input:   `[]`,
+			wantErr: "steps must not be empty",
+		},
+		{
+			name:    "json string empty value",
+			input:   `["a",""]`,
+			wantErr: "steps must not contain empty values",
+		},
+		{
+			name:    "json object with empty step value",
+			input:   `{"steps":["a",""]}`,
+			wantErr: "steps must not contain empty values",
 		},
 		{
 			name:    "non array non string",
 			input:   42,
-			wantErr: true,
+			wantErr: "steps must be an array of strings",
 		},
 		{
 			name:    "malformed json string",
 			input:   `["a",`,
-			wantErr: true,
+			wantErr: "steps must be an array of strings",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := parsePlanSteps(test.input)
-			if test.wantErr {
+			if test.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error, got nil with %#v", got)
+				}
+				if err.Error() != test.wantErr {
+					t.Fatalf("err=%q want %q", err.Error(), test.wantErr)
 				}
 				return
 			}
