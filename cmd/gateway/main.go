@@ -2023,10 +2023,22 @@ func (g *gateway) refreshRepos() {
 	}
 	sort.Strings(repos)
 
+	changed := len(g.repos) != len(repos)
+	if !changed {
+		for i := range g.repos {
+			if g.repos[i] != repos[i] {
+				changed = true
+				break
+			}
+		}
+	}
+
 	g.reposMu.Lock()
 	g.repos = repos
 	g.reposMu.Unlock()
-	log.Printf("gitea repos: discovered %v", repos)
+	if changed {
+		log.Printf("gitea repos: discovered %v", repos)
+	}
 }
 
 func summarizeApprovalParams(params map[string]interface{}) string {
