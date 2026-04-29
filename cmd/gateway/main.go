@@ -1980,6 +1980,24 @@ func shortSHA(in string) string {
 	return in
 }
 
+// refreshRepos queries the Gitea API to discover all visible repositories
+// and stores the canonical list in g.repos. It is called once at gateway startup
+// and then on a 5-minute ticker to pick up new repositories or access changes.
+//
+// The function hits three endpoints in sequence:
+//
+//   - /api/v1/user/repos?limit=50       — repositories owned by the authenticated user
+//   - /api/v1/orgs/warband/repos?limit=50 — repositories owned by the warband org
+//   - /api/v1/users/kit/repos?limit=50    — repositories owned by the kit user
+//
+// Results are deduplicated by full_name, sorted alphabetically, and assigned to
+// g.repos under g.reposMu. An empty or unset giteaURL / giteaToken causes the
+// function to return immediately without any API call.
+//
+// Logging behaviour (as added in PR #155): the function now logs only when the
+// repository list actually changes — it records the new full list at INFO level.
+// On startup or a periodic tick where the list is unchanged, no log entry is
+// emitted, keeping noise low in high-frequency ticker loops.
 func (g *gateway) refreshRepos() {
 	if strings.TrimSpace(g.giteaURL) == "" || strings.TrimSpace(g.giteaToken) == "" {
 		return
