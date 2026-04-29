@@ -22,7 +22,7 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useEffect, useMemo, useRef, useState } = React;
+    const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
     const mockAgents = [
       { id: 'ragnar', name: 'Ragnar', role: 'Architect', model: 'MiniMax M2.7', status: 'active', task: 'Coordinating #211 review', surface: 'idle' },
@@ -58,9 +58,25 @@
       };
     }
 
+    function approvalQueueItems(data) {
+      if (Array.isArray(data)) return data;
+      if (data && Array.isArray(data.queues)) return data.queues;
+      return [];
+    }
+
     function countPendingApprovals(data) {
-      const queues = Array.isArray(data) ? data : Array.isArray(data && data.queues) ? data.queues : [];
+      const queues = approvalQueueItems(data);
       return queues.filter(item => item && item.status === 'pending').length;
+    }
+
+    function approvalAgentName(item) {
+      const params = item && item.params;
+      if (!params || typeof params !== 'object') return '';
+      for (const key of ['agent', 'from', 'requested_by']) {
+        const value = String(params[key] || '').trim();
+        if (value) return value;
+      }
+      return '';
     }
 
     function mockSurfaceForAgent(agent) {
@@ -131,7 +147,8 @@
     }
 
     const builderEventTypes = new Set(['file_read', 'file_write', 'git_clone', 'git_branch_create', 'git_commit', 'git_push', 'pr_create', 'exec']);
-    const typedToolEventTypes = new Set([...builderEventTypes, 'http_request']);
+    const actionEventTypes = new Set(['plan', 'plan_step_complete', 'http_request']);
+    const typedToolEventTypes = new Set([...builderEventTypes, ...actionEventTypes]);
 
     function relativeTime(value) {
       if (!value) return 'now';
@@ -156,6 +173,8 @@
     }
 
     function activityIcon(type) {
+      if (type === 'plan') return 'ListTodo';
+      if (type === 'plan_step_complete') return 'CheckCircle2';
       if (type === 'git_clone') return 'FolderGit2';
       if (type === 'git_branch_create') return 'GitBranch';
       if (type === 'git_commit') return 'GitCommit';
@@ -168,6 +187,8 @@
 
     function activitySummary(evt) {
       const type = evt.type;
+      if (type === 'plan') return `declared ${(evt.steps || []).length || 0}-step plan`;
+      if (type === 'plan_step_complete') return `completed step ${(Number(evt.step) || 0) + 1}`;
       if (type === 'file_read') return `read ${evt.path || 'file'}`;
       if (type === 'file_write') return `${evt.status === 'complete' ? 'wrote' : 'writing'} ${evt.path || 'file'}`;
       if (type === 'git_clone') return `cloned ${evt.repo || 'repo'}`;
@@ -202,6 +223,122 @@
 
     function hasBuilderActivity(timeline = []) {
       return timeline.some(item => builderEventTypes.has(item.type));
+    }
+
+    function hasActionActivity(timeline = []) {
+      return timeline.some(item => actionEventTypes.has(item.type));
+    }
+
+    function timeValue(value) {
+      if (!value) return 0;
+      if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+      const parsed = new Date(value).getTime();
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function latestTimelineTime(timeline = [], allowedTypes) {
+      return timeline.reduce((latest, item) => {
+        if (!item || !allowedTypes.has(item.type)) return latest;
+        return Math.max(latest, timeValue(item.time));
+      }, 0);
+    }
+
+    function queueSortTime(item) {
+      return timeValue(item && item.queued_at);
+    }
+
+    function selectQueueForAgent(agentName, queueItems, queueOverrides) {
+      const target = String(agentName || '').trim();
+      if (!target) return null;
+      const matchingPending = (queueItems || [])
+        .filter(item => approvalAgentName(item) === target)
+        .sort((a, b) => queueSortTime(a) - queueSortTime(b));
+      if (matchingPending.length > 0) return matchingPending[0];
+      const matchingOverrides = Object.values(queueOverrides || {})
+        .filter(item => item && approvalAgentName(item) === target)
+        .sort((a, b) => queueSortTime(a) - queueSortTime(b));
+      return matchingOverrides[0] || null;
+    }
+
+    function determineSurface(workspace, queueItem, timeline = []) {
+      const builderTime = Math.max(
+        hasWorkspaceContent(workspace) ? timeValue(workspace && workspace.last_updated) : 0,
+        latestTimelineTime(timeline, builderEventTypes)
+      );
+      const actionTime = Math.max(
+        timeValue(workspace && workspace.plan && workspace.plan.started_at),
+        timeValue(queueItem && queueItem.queued_at),
+        latestTimelineTime(timeline, actionEventTypes)
+      );
+      if (builderTime === 0 && actionTime === 0) return 'idle';
+      return actionTime >= builderTime ? 'action' : 'builder';
+    }
+
+    function isEmailAction(queueItem) {
+      const service = String(queueItem && queueItem.service || '').toLowerCase();
+      const action = String(queueItem && queueItem.action || '').toLowerCase();
+      return service === 'gmail' || /^gmail_send_/.test(action);
+    }
+
+    function isCalendarAction(queueItem) {
+      const service = String(queueItem && queueItem.service || '').toLowerCase();
+      const action = String(queueItem && queueItem.action || '').toLowerCase();
+      return service === 'calendar' || /^calendar_create/.test(action);
+    }
+
+    function triggerSourceField(source, key) {
+      if (!source || typeof source !== 'object') return '';
+      const value = source[key];
+      if (value == null) return '';
+      return String(value).trim();
+    }
+
+    function actionTimelineItems(timeline = [], plan, queueItem) {
+      const entries = [];
+      const trigger = queueItem && queueItem.trigger;
+      const triggerSummary = trigger && String(trigger.summary || '').trim();
+      if (triggerSummary) {
+        entries.push({
+          time: timeValue(trigger.occurred_at),
+          icon: trigger.type === 'email' ? 'Inbox' : trigger.type === 'schedule' ? 'Calendar' : trigger.type === 'webhook' ? 'Webhook' : 'Sparkles',
+          text: triggerSummary,
+        });
+      }
+      timeline
+        .filter(item => actionEventTypes.has(item.type))
+        .forEach(item => entries.push(item));
+      if (entries.length === 0 && plan && Array.isArray(plan.steps)) {
+        plan.steps.forEach((step, index) => {
+          const completed = index < plan.current_step;
+          const current = plan.current_step < plan.steps.length && index === plan.current_step;
+          entries.push({
+            time: timeValue(plan.started_at) + index,
+            icon: completed ? 'CheckCircle2' : current ? 'Clock' : 'Circle',
+            text: step,
+            current,
+            pending: !completed && !current,
+          });
+        });
+      }
+      if (queueItem && queueItem.status === 'pending') {
+        entries.push({
+          time: Math.max(Date.now(), queueSortTime(queueItem)),
+          icon: 'ShieldAlert',
+          text: `queued ${queueItem.action || 'action'} for approval`,
+          current: true,
+        });
+      } else if (queueItem && queueItem.status === 'revising') {
+        entries.push({
+          time: Math.max(Date.now(), queueSortTime(queueItem)),
+          icon: 'Edit3',
+          text: 'revision requested',
+          current: true,
+        });
+      }
+      return entries
+        .filter(item => item && item.text)
+        .sort((a, b) => timeValue(a.time) - timeValue(b.time))
+        .slice(-30);
     }
 
     function stateWeight(state) {
@@ -1113,74 +1250,228 @@
       );
     }
 
-    function ActionSurface({ leftRailWidth, startDragTree, isDraggingTree, activityHeight, startDragActivity, isDraggingActivity }) {
+    function ActionSurface({
+      focused,
+      plan,
+      queueItem,
+      timeline,
+      leftRailWidth,
+      startDragTree,
+      isDraggingTree,
+      activityHeight,
+      startDragActivity,
+      isDraggingActivity,
+      approvalBusy,
+      approvalError,
+      revisionOpen,
+      revisionNote,
+      setRevisionNote,
+      onApprove,
+      onReject,
+      onOpenRevise,
+      onCancelRevise,
+      onSubmitRevise,
+    }) {
+      const trigger = queueItem && queueItem.trigger;
+      const triggerSource = trigger && typeof trigger.source === 'object' ? trigger.source : null;
+      const triggerSummary = trigger && String(trigger.summary || '').trim();
+      const triggerType = trigger && String(trigger.type || '').trim();
+      const triggerFrom = triggerSourceField(triggerSource, 'from');
+      const triggerSubject = triggerSourceField(triggerSource, 'subject');
+      const triggerBody = triggerSourceField(triggerSource, 'body');
+      const planSteps = Array.isArray(plan && plan.steps) ? plan.steps : [];
+      const currentStep = Number(plan && plan.current_step);
+      const actionTimeline = actionTimelineItems(timeline, plan, queueItem);
+      const params = queueItem && typeof queueItem.params === 'object' && queueItem.params ? queueItem.params : {};
+      const hasEmailArtifact = isEmailAction(queueItem);
+      const hasCalendarArtifact = isCalendarAction(queueItem);
+      const lockboxLabel = queueItem ? `destructive_write · ${queueItem.status === 'revising' ? 'revising' : 'awaiting approval'}` : '';
+      const canSubmitRevision = queueItem && queueItem.status === 'pending' && String(revisionNote || '').trim() && !approvalBusy;
       return (
         <div className="flex-1 flex flex-col min-h-0">
           <div className="flex-1 flex min-h-0">
             <div style={{ width: `${leftRailWidth}px` }} className="border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
-              <div className="flex items-center gap-1.5 px-2 py-1 text-xs text-zinc-400 border-b border-zinc-800/60">
-                <Icon name="Mail" className="w-3 h-3 text-blue-400 shrink-0" />
-                <span className="text-zinc-300 truncate">Re: Hirdforge demo</span>
-              </div>
               <div className="p-3 border-b border-zinc-800/60">
-                <div className="flex items-center gap-2 text-[10px] text-zinc-600 mb-1.5">
-                  <span className="text-zinc-400 font-semibold">Sarah Chen</span>
-                  <span>-</span>
-                  <span>11:32</span>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-[10px] uppercase text-zinc-500">Trigger</span>
+                  {triggerType && (
+                    <span className="rounded border border-zinc-700 px-1.5 py-0.5 text-[9px] uppercase text-zinc-400">
+                      {triggerType}
+                    </span>
+                  )}
+                  <span className="ml-auto text-[9px] text-zinc-600">
+                    {trigger && trigger.occurred_at ? relativeTime(trigger.occurred_at) : 'n/a'}
+                  </span>
                 </div>
-                <div className="text-[11px] text-zinc-400 leading-relaxed">
-                  Hi Kit, we're huge fans of what you're building. Could we set up a 30-min walkthrough of Hirdforge sometime this week? I'm flexible Wed-Fri afternoons.
-                </div>
+                {trigger ? (
+                  <>
+                    <div className="text-[11px] text-zinc-200 leading-relaxed">
+                      {triggerSummary || 'trigger received'}
+                    </div>
+                    {(triggerFrom || triggerSubject || triggerBody) && (
+                      <div className="mt-3 space-y-2">
+                        {triggerFrom && (
+                          <div className="flex gap-2 text-[10px]">
+                            <span className="w-12 shrink-0 text-zinc-600">From</span>
+                            <span className="text-zinc-300 break-all">{triggerFrom}</span>
+                          </div>
+                        )}
+                        {triggerSubject && (
+                          <div className="flex gap-2 text-[10px]">
+                            <span className="w-12 shrink-0 text-zinc-600">Subject</span>
+                            <span className="text-zinc-300">{triggerSubject}</span>
+                          </div>
+                        )}
+                        {triggerBody && (
+                          <div className="mt-2 rounded border border-zinc-800 bg-zinc-950/60 p-2 text-[10px] leading-relaxed text-zinc-400 whitespace-pre-wrap">
+                            {triggerBody}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="text-[11px] text-zinc-600">no trigger context</div>
+                )}
               </div>
               <div className="px-3 py-3">
                 <div className="text-[10px] uppercase text-zinc-500 mb-2">Plan</div>
-                <ul className="space-y-1.5">
-                  <PlanStep icon="CheckCircle2" iconClass="text-emerald-400" text="Checked calendar — Fri 2pm available" />
-                  <PlanStep icon="CheckCircle2" iconClass="text-emerald-400" text="Drafted reply" />
-                  <PlanStep icon="Clock" iconClass="text-amber-400" text="Awaiting Sovereign approval" textClass="text-amber-300" />
-                  <PlanStep icon="Circle" iconClass="text-zinc-600" text="Send reply" textClass="text-zinc-600" />
-                  <PlanStep icon="Circle" iconClass="text-zinc-600" text="Send calendar invite" textClass="text-zinc-600" />
-                </ul>
+                {planSteps.length > 0 ? (
+                  <ul className="space-y-1.5">
+                    {planSteps.map((step, index) => {
+                      const completed = index < currentStep || currentStep >= planSteps.length;
+                      const current = currentStep < planSteps.length && index === currentStep;
+                      return (
+                        <PlanStep
+                          key={`${step}-${index}`}
+                          icon={completed ? 'CheckCircle2' : current ? 'Clock' : 'Circle'}
+                          iconClass={completed ? 'text-emerald-400' : current ? 'text-amber-400' : 'text-zinc-600'}
+                          text={step}
+                          textClass={completed ? 'text-zinc-300' : current ? 'text-amber-300' : 'text-zinc-600'}
+                        />
+                      );
+                    })}
+                  </ul>
+                ) : (
+                  <div className="text-[11px] text-zinc-600">no plan declared yet</div>
+                )}
               </div>
             </div>
             <ResizeRailHandle startDragTree={startDragTree} isDraggingTree={isDraggingTree} />
             <div className="flex-1 flex flex-col min-w-0">
               <div className="px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
-                <Icon name="Mail" className="w-3.5 h-3.5 text-blue-400" />
-                <span className="text-xs text-zinc-300">Compose email</span>
-                <span className="text-[10px] text-amber-400 ml-auto px-1.5 py-0.5 border border-amber-500/30 rounded flex items-center gap-1">
-                  <Icon name="ShieldAlert" className="w-2.5 h-2.5" /> destructive_write - awaiting approval
+                <Icon name={hasEmailArtifact ? 'Mail' : hasCalendarArtifact ? 'Calendar' : 'FileCode'} className={`w-3.5 h-3.5 ${hasEmailArtifact ? 'text-blue-400' : hasCalendarArtifact ? 'text-emerald-400' : 'text-zinc-400'}`} />
+                <span className="text-xs text-zinc-300">
+                  {hasEmailArtifact ? 'Compose email' : hasCalendarArtifact ? 'Calendar event' : queueItem ? (queueItem.action || 'Queued action') : 'Action artifact'}
                 </span>
+                {queueItem && (
+                  <span className="text-[10px] text-amber-400 ml-auto px-1.5 py-0.5 border border-amber-500/30 rounded flex items-center gap-1">
+                    <Icon name="ShieldAlert" className="w-2.5 h-2.5" /> {lockboxLabel}
+                  </span>
+                )}
               </div>
               <div className="flex-1 overflow-y-auto bg-zinc-950 px-6 py-4 text-xs">
-                <div className="space-y-2 mb-4">
-                  <div className="flex gap-3"><span className="text-zinc-500 w-16 shrink-0">To:</span><span className="text-zinc-300">Sarah Chen &lt;sarah@anthropic.com&gt;</span></div>
-                  <div className="flex gap-3"><span className="text-zinc-500 w-16 shrink-0">Subject:</span><span className="text-zinc-300">Re: Hirdforge demo</span></div>
-                </div>
-                <div className="border-t border-zinc-800 pt-4 text-zinc-300 leading-relaxed font-sans text-sm">
-                  Hi Sarah,<br /><br />
-                  Thanks for reaching out. I'd be glad to walk you through Hirdforge — Kit's multi-agent orchestration platform. Friday at 2pm works on his calendar; I'll send a calendar invite shortly.<br /><br />
-                  Best,<br />
-                  Jeeves <span className="text-zinc-500 italic text-xs">(on behalf of Kit)</span>
-                </div>
+                {queueItem ? (
+                  hasEmailArtifact ? (
+                    <>
+                      <div className="space-y-2 mb-4">
+                        <div className="flex gap-3"><span className="text-zinc-500 w-16 shrink-0">To:</span><span className="text-zinc-300 break-all">{String(params.to || '-')}</span></div>
+                        <div className="flex gap-3"><span className="text-zinc-500 w-16 shrink-0">Subject:</span><span className="text-zinc-300">{String(params.subject || '-')}</span></div>
+                      </div>
+                      <div className="border-t border-zinc-800 pt-4 text-zinc-300 leading-relaxed font-sans text-sm whitespace-pre-wrap">
+                        {String(params.body || '').trim() || 'No body drafted yet.'}
+                      </div>
+                    </>
+                  ) : hasCalendarArtifact ? (
+                    <div className="space-y-3 text-[12px]">
+                      <div className="text-sm text-zinc-200 font-semibold">{String(params.summary || 'Untitled event')}</div>
+                      <div className="grid grid-cols-[72px_1fr] gap-y-2 gap-x-3 text-zinc-300">
+                        <span className="text-zinc-500">Start</span>
+                        <span>{String(params.start || '-')}</span>
+                        <span className="text-zinc-500">End</span>
+                        <span>{String(params.end || '-')}</span>
+                        <span className="text-zinc-500">Location</span>
+                        <span>{String(params.location || '-')}</span>
+                      </div>
+                      {params.description && (
+                        <div className="border-t border-zinc-800 pt-4 text-zinc-300 leading-relaxed whitespace-pre-wrap">
+                          {String(params.description)}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div className="text-sm text-zinc-200 font-semibold">{queueItem.action || 'Queued action'}</div>
+                      <pre className="m-0 overflow-x-auto rounded border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-300">{JSON.stringify(params, null, 2)}</pre>
+                    </div>
+                  )
+                ) : planSteps.length > 0 ? (
+                  <div className="h-full flex items-center justify-center text-center">
+                    <div>
+                      <div className="text-sm text-zinc-400">no queued action — agent is still working</div>
+                      {focused && <div className="mt-1 text-[10px] text-zinc-600">{focused.name} has declared a plan but has not queued a write yet.</div>}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-center">
+                    <div className="text-sm text-zinc-600">No action artifact available.</div>
+                  </div>
+                )}
               </div>
-              <div className="px-4 py-3 border-t border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
-                <span className="text-[10px] text-zinc-500 flex items-center gap-1.5">
-                  <Icon name="ShieldAlert" className="w-3 h-3" /> Lockbox - #queue-7af2
-                </span>
-                <div className="ml-auto flex items-center gap-2">
-                  <button className="text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200">Reject</button>
-                  <button className="flex items-center gap-1.5 text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200">
-                    <Icon name="Edit3" className="w-3 h-3" /> Revise
-                  </button>
-                  <button className="flex items-center gap-1.5 text-xs px-4 py-1.5 bg-amber-500 text-zinc-950 rounded font-semibold hover:bg-amber-400">
-                    <Icon name="Send" className="w-3 h-3" /> Approve & send
-                  </button>
+              {revisionOpen && queueItem && queueItem.status === 'pending' && (
+                <div className="px-4 py-3 border-t border-zinc-800 bg-zinc-900/60 shrink-0">
+                  <div className="text-[10px] uppercase text-zinc-500 mb-2">Revision note</div>
+                  <textarea
+                    value={revisionNote}
+                    onChange={event => setRevisionNote(event.target.value)}
+                    placeholder="Tell the agent what to revise before re-queuing."
+                    disabled={approvalBusy}
+                    className="w-full min-h-[88px] resize-none rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-zinc-700"
+                  />
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="text-[10px] text-zinc-600 flex-1">This sends the queued action back for refinement.</div>
+                    <button onClick={onCancelRevise} disabled={approvalBusy} className="text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">
+                      Cancel
+                    </button>
+                    <button onClick={onSubmitRevise} disabled={!canSubmitRevision} className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-amber-500 text-zinc-950 rounded font-semibold hover:bg-amber-400 disabled:opacity-50">
+                      <Icon name="Edit3" className="w-3 h-3" /> Request revision
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
+              {approvalError && (
+                <div className="px-4 py-2 border-t border-zinc-900 bg-red-950/30 text-[11px] text-red-300 shrink-0">
+                  {approvalError}
+                </div>
+              )}
+              {queueItem && queueItem.status === 'pending' && (
+                <div className="px-4 py-3 border-t border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+                  <span className="text-[10px] text-zinc-500 flex items-center gap-1.5">
+                    <Icon name="ShieldAlert" className="w-3 h-3" /> Lockbox · {queueItem.queue_id || 'queue'}
+                  </span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <button onClick={onReject} disabled={approvalBusy} className="text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">Reject</button>
+                    <button onClick={onOpenRevise} disabled={approvalBusy} className="flex items-center gap-1.5 text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">
+                      <Icon name="Edit3" className="w-3 h-3" /> Revise
+                    </button>
+                    <button onClick={onApprove} disabled={approvalBusy} className="flex items-center gap-1.5 text-xs px-4 py-1.5 bg-amber-500 text-zinc-950 rounded font-semibold hover:bg-amber-400 disabled:opacity-50">
+                      <Icon name="Send" className="w-3 h-3" /> Approve & send
+                    </button>
+                  </div>
+                </div>
+              )}
+              {queueItem && queueItem.status === 'revising' && (
+                <div className="px-4 py-3 border-t border-zinc-800 bg-zinc-900/30 flex items-start gap-2 shrink-0">
+                  <Icon name="Edit3" className="w-3.5 h-3.5 text-amber-400 mt-0.5 shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-[10px] uppercase text-amber-400">Revision requested</div>
+                    <div className="mt-1 text-[11px] text-zinc-400 whitespace-pre-wrap">{String(queueItem.note || 'Awaiting updated artifact from the agent.')}</div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
-          <ActivityTimeline items={jeevesActivity} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+          <ActivityTimeline items={actionTimeline} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
         </div>
       );
     }
@@ -1203,7 +1494,22 @@
       );
     }
 
-    function IdleSurface({ surface, focused, workspace, workspaces, timeline, cursorBlink, leftRailWidth, startDragTree, isDraggingTree, activityHeight, startDragActivity, isDraggingActivity }) {
+    function IdleSurface({
+      surface,
+      focused,
+      workspace,
+      workspaces,
+      timeline,
+      plan,
+      queueItem,
+      cursorBlink,
+      leftRailWidth,
+      startDragTree,
+      isDraggingTree,
+      activityHeight,
+      startDragActivity,
+      isDraggingActivity,
+    }) {
       const hasRealBuilder = surface === 'builder' && hasWorkspaceContent(workspace);
       return (
         <div className="relative flex-1 min-h-0 bg-zinc-950">
@@ -1212,7 +1518,28 @@
           </div>
           <div className="h-full flex flex-col opacity-40 pointer-events-none grayscale">
             {surface === 'action' ? (
-              <ActionSurface leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+              <ActionSurface
+                focused={focused}
+                plan={plan}
+                queueItem={queueItem}
+                timeline={timeline}
+                leftRailWidth={leftRailWidth}
+                startDragTree={startDragTree}
+                isDraggingTree={isDraggingTree}
+                activityHeight={activityHeight}
+                startDragActivity={startDragActivity}
+                isDraggingActivity={isDraggingActivity}
+                approvalBusy={false}
+                approvalError=""
+                revisionOpen={false}
+                revisionNote=""
+                setRevisionNote={() => {}}
+                onApprove={() => {}}
+                onReject={() => {}}
+                onOpenRevise={() => {}}
+                onCancelRevise={() => {}}
+                onSubmitRevise={() => {}}
+              />
             ) : hasRealBuilder ? (
               <BuilderSurface focused={focused} workspace={workspace} workspaces={workspaces} timeline={timeline} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
             ) : (
@@ -1231,6 +1558,13 @@
       const [agentsError, setAgentsError] = useState('');
       const [fleetStates, setFleetStates] = useState([]);
       const [pendingApprovals, setPendingApprovals] = useState(0);
+      const [pendingQueueItems, setPendingQueueItems] = useState([]);
+      const [approvalOverrides, setApprovalOverrides] = useState({});
+      const [approvalBusy, setApprovalBusy] = useState(false);
+      const [approvalError, setApprovalError] = useState('');
+      const [approvalQueueID, setApprovalQueueID] = useState('');
+      const [revisionQueueID, setRevisionQueueID] = useState('');
+      const [revisionNote, setRevisionNote] = useState('');
       const [showApprovalShield, setShowApprovalShield] = useState(false);
       const [settingsOpen, setSettingsOpen] = useState(false);
       const [threads, setThreads] = useState({});
@@ -1247,10 +1581,14 @@
       const focusedFleetState = useMemo(() => fleetStates.find(state => state.id === activeAgent) || null, [fleetStates, activeAgent]);
       const focusedWorkspace = workspaces[activeAgent] || null;
       const focusedTimeline = activityByAgent[activeAgent] || [];
-      const focusedHasWorkspace = hasWorkspaceContent(focusedWorkspace);
-      const focusedHasBuilderActivity = hasBuilderActivity(focusedTimeline);
-      const focusedSurface = mockSurfaceForAgent(focused);
+      const focusedPlan = focusedWorkspace && focusedWorkspace.plan ? focusedWorkspace.plan : null;
+      const focusedQueueItem = useMemo(
+        () => selectQueueForAgent(activeAgent, pendingQueueItems, approvalOverrides),
+        [activeAgent, pendingQueueItems, approvalOverrides]
+      );
+      const focusedSurface = determineSurface(focusedWorkspace, focusedQueueItem, focusedTimeline);
       const focusedStatusText = focusedFleetState && focusedFleetState.active ? 'active' : 'idle';
+      const revisionOpen = Boolean(focusedQueueItem && focusedQueueItem.status === 'pending' && revisionQueueID === focusedQueueItem.queue_id);
 
       useEffect(() => {
         const id = setInterval(() => setCursorBlink(blink => !blink), 530);
@@ -1306,24 +1644,39 @@
         };
       }, []);
 
+      const loadApprovals = useCallback(async () => {
+        const response = await fetch('/api/v1/approvals');
+        if (!response.ok) throw new Error(`approvals request failed: ${response.status}`);
+        const data = await response.json();
+        const queues = approvalQueueItems(data);
+        setPendingQueueItems(queues);
+        setPendingApprovals(countPendingApprovals(queues));
+        setShowApprovalShield(true);
+        return queues;
+      }, []);
+
       useEffect(() => {
         let cancelled = false;
-        const fetchApprovals = () => {
-          fetch('/api/v1/approvals')
-            .then(response => {
-              if (!response.ok) throw new Error(`approvals request failed: ${response.status}`);
-              return response.json();
-            })
-            .then(data => {
-              if (cancelled) return;
-              setPendingApprovals(countPendingApprovals(data));
-              setShowApprovalShield(true);
-            })
-            .catch(() => {
-              if (cancelled) return;
-              setPendingApprovals(0);
-              setShowApprovalShield(false);
+        const fetchApprovals = async () => {
+          try {
+            const queues = await loadApprovals();
+            if (cancelled) return;
+            const pendingIDs = new Set((queues || []).map(item => item && item.queue_id).filter(Boolean));
+            setApprovalOverrides(current => {
+              const next = { ...current };
+              Object.keys(next).forEach(queueID => {
+                if (pendingIDs.has(queueID) && next[queueID] && next[queueID].status !== 'revising') {
+                  delete next[queueID];
+                }
+              });
+              return next;
             });
+          } catch (error) {
+            if (cancelled) return;
+            setPendingApprovals(0);
+            setPendingQueueItems([]);
+            setShowApprovalShield(false);
+          }
         };
         fetchApprovals();
         const id = setInterval(fetchApprovals, 10000);
@@ -1331,7 +1684,7 @@
           cancelled = true;
           clearInterval(id);
         };
-      }, []);
+      }, [loadApprovals]);
 
       useEffect(() => {
         if (agents.length === 0) return;
@@ -1582,6 +1935,59 @@
         document.addEventListener('mouseup', onUp);
       };
 
+      const runApprovalAction = async (kind) => {
+        const queueItem = focusedQueueItem;
+        if (!queueItem || approvalBusy) return;
+        setApprovalBusy(true);
+        setApprovalQueueID(queueItem.queue_id || '');
+        setApprovalError('');
+        try {
+          if (kind === 'approve' || kind === 'reject') {
+            const response = await fetch(`/api/v1/approvals/${kind}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ queue_id: queueItem.queue_id }),
+            });
+            if (!response.ok) {
+              const text = await response.text();
+              throw new Error(text || `${kind} failed`);
+            }
+            setApprovalOverrides(current => {
+              const next = { ...current };
+              delete next[queueItem.queue_id];
+              return next;
+            });
+            await loadApprovals();
+            return;
+          }
+          const response = await fetch(`/api/v1/approvals/${encodeURIComponent(queueItem.queue_id)}/revise`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ note: String(revisionNote || '').trim() }),
+          });
+          if (!response.ok) {
+            const text = await response.text();
+            throw new Error(text || 'revise failed');
+          }
+          setApprovalOverrides(current => ({
+            ...current,
+            [queueItem.queue_id]: {
+              ...queueItem,
+              status: 'revising',
+              note: String(revisionNote || '').trim(),
+            },
+          }));
+          setRevisionQueueID('');
+          setRevisionNote('');
+          await loadApprovals();
+        } catch (error) {
+          setApprovalError(error.message || 'approval request failed');
+        } finally {
+          setApprovalBusy(false);
+          setApprovalQueueID('');
+        }
+      };
+
       const dragCursorClass = isDraggingTree ? 'cursor-col-resize select-none' : isDraggingActivity ? 'cursor-row-resize select-none' : '';
 
       return (
@@ -1673,12 +2079,55 @@
                   <Icon name="Hand" className="w-2.5 h-2.5" /> Interject
                 </button>
               </div>
-              {focused && focusedFleetState && focusedFleetState.active && (focusedHasBuilderActivity || focusedHasWorkspace) ? (
+              {focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'builder' ? (
                 <BuilderSurface focused={focused} workspace={focusedWorkspace} workspaces={workspaces} timeline={focusedTimeline} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
               ) : focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'action' ? (
-                <ActionSurface leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+                <ActionSurface
+                  focused={focused}
+                  plan={focusedPlan}
+                  queueItem={focusedQueueItem}
+                  timeline={focusedTimeline}
+                  leftRailWidth={leftRailWidth}
+                  startDragTree={startDragTree}
+                  isDraggingTree={isDraggingTree}
+                  activityHeight={activityHeight}
+                  startDragActivity={startDragActivity}
+                  isDraggingActivity={isDraggingActivity}
+                  approvalBusy={approvalBusy && approvalQueueID === (focusedQueueItem && focusedQueueItem.queue_id)}
+                  approvalError={approvalError}
+                  revisionOpen={revisionOpen}
+                  revisionNote={revisionNote}
+                  setRevisionNote={setRevisionNote}
+                  onApprove={() => runApprovalAction('approve')}
+                  onReject={() => runApprovalAction('reject')}
+                  onOpenRevise={() => {
+                    setApprovalError('');
+                    setRevisionQueueID(focusedQueueItem ? focusedQueueItem.queue_id : '');
+                    setRevisionNote(focusedQueueItem && focusedQueueItem.note ? String(focusedQueueItem.note) : '');
+                  }}
+                  onCancelRevise={() => {
+                    setRevisionQueueID('');
+                    setRevisionNote('');
+                  }}
+                  onSubmitRevise={() => runApprovalAction('revise')}
+                />
               ) : (
-                <IdleSurface surface={(focusedHasBuilderActivity || focusedHasWorkspace) ? 'builder' : focusedSurface} focused={focused} workspace={focusedWorkspace} workspaces={workspaces} timeline={focusedTimeline} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+                <IdleSurface
+                  surface={focusedSurface}
+                  focused={focused}
+                  workspace={focusedWorkspace}
+                  workspaces={workspaces}
+                  timeline={focusedTimeline}
+                  plan={focusedPlan}
+                  queueItem={focusedQueueItem}
+                  cursorBlink={cursorBlink}
+                  leftRailWidth={leftRailWidth}
+                  startDragTree={startDragTree}
+                  isDraggingTree={isDraggingTree}
+                  activityHeight={activityHeight}
+                  startDragActivity={startDragActivity}
+                  isDraggingActivity={isDraggingActivity}
+                />
               )}
             </div>
           </div>
