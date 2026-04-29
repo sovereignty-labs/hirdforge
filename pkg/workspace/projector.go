@@ -1,0 +1,204 @@
+package workspace
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+type AgentWorkspace struct {
+	AgentName     string               `json:"agent_name"`
+	CurrentRepo   string               `json:"current_repo"`
+	CurrentBranch string               `json:"current_branch"`
+	CurrentFile   string               `json:"current_file"`
+	FilesTouched  map[string]FileState `json:"files_touched"`
+	LastUpdated   time.Time            `json:"last_updated"`
+}
+
+type FileState struct {
+	Path       string    `json:"path"`
+	State      string    `json:"state"`
+	LastAccess time.Time `json:"last_access"`
+	LineCursor int       `json:"line_cursor"`
+}
+
+type Projector struct {
+	mu         sync.RWMutex
+	workspaces map[string]*AgentWorkspace
+}
+
+func NewProjector() *Projector {
+	return &Projector{workspaces: map[string]*AgentWorkspace{}}
+}
+
+func IsTypedEvent(eventType string) bool {
+	switch eventType {
+	case "file_read", "file_write", "git_clone", "git_branch_create", "git_commit", "git_push", "pr_create", "exec", "http_request":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Projector) Apply(agentName string, eventType string, payload map[string]interface{}) {
+	if p == nil || agentName == "" || !IsTypedEvent(eventType) {
+		return
+	}
+	now := time.Now()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ws := p.ensureLocked(agentName)
+	ws.LastUpdated = now
+
+	switch eventType {
+	case "file_read":
+		path := stringPayload(payload, "path")
+		if path == "" {
+			return
+		}
+		p.applyRepoBranch(ws, payload)
+		state := ws.FilesTouched[path]
+		if state.State != "writing" {
+			state.State = "read"
+			state.LineCursor = 0
+		}
+		state.Path = path
+		state.LastAccess = now
+		ws.FilesTouched[path] = state
+	case "file_write":
+		path := stringPayload(payload, "path")
+		if path == "" {
+			return
+		}
+		p.applyRepoBranch(ws, payload)
+		status := stringPayload(payload, "status")
+		state := ws.FilesTouched[path]
+		state.Path = path
+		state.LastAccess = now
+		switch status {
+		case "writing":
+			ws.CurrentFile = path
+			state.State = "writing"
+			state.LineCursor = intPayload(payload, "line_end")
+		case "complete":
+			if ws.CurrentFile == path {
+				ws.CurrentFile = ""
+			}
+			state.State = "read"
+			state.LineCursor = 0
+		default:
+			return
+		}
+		ws.FilesTouched[path] = state
+	case "git_clone":
+		repo := stringPayload(payload, "repo")
+		if repo != "" {
+			ws.CurrentRepo = repo
+		}
+		branch := stringPayload(payload, "branch")
+		if branch != "" {
+			ws.CurrentBranch = branch
+		}
+	case "git_branch_create":
+		branch := stringPayload(payload, "branch_new")
+		if branch != "" {
+			ws.CurrentBranch = branch
+		}
+		repo := stringPayload(payload, "repo")
+		if repo != "" {
+			ws.CurrentRepo = repo
+		}
+	case "git_commit", "git_push", "pr_create", "exec", "http_request":
+		p.applyRepoBranch(ws, payload)
+	}
+}
+
+func (p *Projector) Get(agentName string) AgentWorkspace {
+	if p == nil {
+		return AgentWorkspace{AgentName: agentName, FilesTouched: map[string]FileState{}}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	ws, ok := p.workspaces[agentName]
+	if !ok || ws == nil {
+		return AgentWorkspace{AgentName: agentName, FilesTouched: map[string]FileState{}}
+	}
+	return cloneWorkspace(ws)
+}
+
+func (p *Projector) ensureLocked(agentName string) *AgentWorkspace {
+	ws := p.workspaces[agentName]
+	if ws == nil {
+		ws = &AgentWorkspace{
+			AgentName:    agentName,
+			FilesTouched: map[string]FileState{},
+		}
+		p.workspaces[agentName] = ws
+	}
+	if ws.FilesTouched == nil {
+		ws.FilesTouched = map[string]FileState{}
+	}
+	return ws
+}
+
+func (p *Projector) applyRepoBranch(ws *AgentWorkspace, payload map[string]interface{}) {
+	repo := stringPayload(payload, "repo")
+	if repo != "" {
+		ws.CurrentRepo = repo
+	}
+	branch := stringPayload(payload, "branch")
+	if branch != "" {
+		ws.CurrentBranch = branch
+	}
+}
+
+func cloneWorkspace(ws *AgentWorkspace) AgentWorkspace {
+	out := *ws
+	out.FilesTouched = make(map[string]FileState, len(ws.FilesTouched))
+	for path, state := range ws.FilesTouched {
+		out.FilesTouched[path] = state
+	}
+	return out
+}
+
+func stringPayload(payload map[string]interface{}, key string) string {
+	v, ok := payload[key]
+	if !ok || v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
+}
+
+func intPayload(payload map[string]interface{}, key string) int {
+	v, ok := payload[key]
+	if !ok || v == nil {
+		return 0
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case float32:
+		return int(n)
+	case jsonNumber:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		var out int
+		_, _ = fmt.Sscanf(fmt.Sprint(v), "%d", &out)
+		return out
+	}
+}
+
+type jsonNumber interface {
+	Int64() (int64, error)
+}
