@@ -868,7 +868,6 @@ func (g *gateway) fetchTasks(ctx context.Context, status, from, agentFilter stri
 	if g == nil {
 		return nil
 	}
-	client := &http.Client{Timeout: agentRequestTimeout}
 	agentsToQuery := g.snapshotAgents()
 	tasksOut := make([]taskspkg.Task, 0)
 	var mu sync.Mutex
@@ -880,42 +879,7 @@ func (g *gateway) fetchTasks(ctx context.Context, status, from, agentFilter stri
 		wg.Add(1)
 		go func(agent Agent) {
 			defer wg.Done()
-			u := strings.TrimRight(agent.URL, "/") + "/tasks"
-			params := url.Values{}
-			if status != "" {
-				params.Set("status", status)
-			}
-			if agentFilter != "" {
-				params.Set("agent", agentFilter)
-			}
-			if q := params.Encode(); q != "" {
-				u += "?" + q
-			}
-			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-			if err != nil {
-				return
-			}
-			resp, err := client.Do(req)
-			if err != nil {
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				return
-			}
-			var tasks []taskspkg.Task
-			if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
-				return
-			}
-			if from != "" {
-				filtered := tasks[:0]
-				for _, t := range tasks {
-					if t.From == from {
-						filtered = append(filtered, t)
-					}
-				}
-				tasks = filtered
-			}
+			tasks := g.fetchTasksFromAgent(ctx, agent, status, from)
 			mu.Lock()
 			tasksOut = append(tasksOut, tasks...)
 			mu.Unlock()
@@ -924,6 +888,50 @@ func (g *gateway) fetchTasks(ctx context.Context, status, from, agentFilter stri
 	wg.Wait()
 	sort.Slice(tasksOut, func(i, j int) bool { return tasksOut[i].CreatedAt.After(tasksOut[j].CreatedAt) })
 	return tasksOut
+}
+
+// fetchTasksFromAgent fetches tasks from a single agent. This is more efficient
+// than fetchTasks when the target agent is already known, avoiding N-1 unnecessary
+// HTTP calls when only one agent's task list is needed.
+func (g *gateway) fetchTasksFromAgent(ctx context.Context, agent Agent, status, from string) []taskspkg.Task {
+	if g == nil {
+		return nil
+	}
+	u := strings.TrimRight(agent.URL, "/") + "/tasks"
+	params := url.Values{}
+	if status != "" {
+		params.Set("status", status)
+	}
+	if q := params.Encode(); q != "" {
+		u += "?" + q
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil
+	}
+	client := &http.Client{Timeout: agentRequestTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	var tasks []taskspkg.Task
+	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+		return nil
+	}
+	if from != "" {
+		filtered := tasks[:0]
+		for _, t := range tasks {
+			if t.From == from {
+				filtered = append(filtered, t)
+			}
+		}
+		tasks = filtered
+	}
+	return tasks
 }
 
 func (g *gateway) refreshArchitectWorkspace(agentName string) workspacepkg.AgentWorkspace {
@@ -935,9 +943,16 @@ func (g *gateway) refreshArchitectWorkspace(agentName string) workspacepkg.Agent
 	if sessionID == "" {
 		return g.projector.SetArchitectSessionData(agentName, "", nil, nil)
 	}
+	// Get the architect's own agent info to fetch their task list directly,
+	// avoiding N-1 HTTP calls when only one agent's tasks are needed.
+	architect, ok := g.getAgent(agentName)
+	if !ok {
+		return workspacepkg.AgentWorkspace{AgentName: agentName, FilesTouched: map[string]workspacepkg.FileState{}}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	tasks := g.fetchTasks(ctx, "", agentName, "")
+	// Architect's tasks are those where architect is the From field in their session.
+	tasks := g.fetchTasksFromAgent(ctx, *architect, "", "")
 	refs := make([]workspacepkg.TaskRef, 0, len(tasks))
 	for _, task := range tasks {
 		if strings.TrimSpace(task.SessionID) != sessionID {
