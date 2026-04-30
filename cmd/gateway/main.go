@@ -2256,12 +2256,13 @@ func registerGiteaPRRoutes(mux *http.ServeMux, gw *gateway, giteaClient *http.Cl
 				}
 				for _, comment := range reviewComments {
 					comments = append(comments, map[string]interface{}{
-						"path":       asString(comment["path"]),
-						"line":       asInt64(comment["line"]),
-						"body":       asString(comment["body"]),
-						"user":       asMap(comment["user"]),
-						"created_at": asString(comment["created_at"]),
-						"review_id":  reviewID,
+						"path":          asString(comment["path"]),
+						"line":          asInt64(comment["line"]),
+						"original_line": asInt64(comment["original_line"]),
+						"body":          asString(comment["body"]),
+						"user":          asMap(comment["user"]),
+						"created_at":    asString(comment["created_at"]),
+						"review_id":     reviewID,
 					})
 				}
 			}
@@ -3082,6 +3083,28 @@ func main() {
 			}
 			if in.Type == "" {
 				in.Type = "task"
+			}
+			if in.Type == "workspace_update" && strings.TrimSpace(in.Agent) != "" {
+				meta := asMap(in.Metadata["workspace"])
+				var pr *workspacepkg.PRRef
+				if prMap := asMap(meta["current_pr"]); len(prMap) > 0 {
+					owner := strings.TrimSpace(asString(prMap["owner"]))
+					repo := strings.TrimSpace(asString(prMap["repo"]))
+					index := int(asInt64(prMap["index"]))
+					if owner != "" && repo != "" && index > 0 {
+						pr = &workspacepkg.PRRef{Owner: owner, Repo: repo, Index: index}
+					}
+				}
+				ws := gw.projector.SetReviewContext(in.Agent, pr, asString(meta["current_review_file"]))
+				now := time.Now().Format(time.RFC3339)
+				gw.broadcastPayload(map[string]interface{}{
+					"type":      "workspace_update",
+					"agent":     in.Agent,
+					"timestamp": now,
+					"workspace": ws,
+				})
+				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				return
 			}
 			// Also add to the legacy flat event feed.
 			msg, _ := in.Metadata["message"].(string)

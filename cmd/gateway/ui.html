@@ -81,11 +81,16 @@
       return '';
     }
 
+    function isReviewerAgent(agent) {
+      return String((agent && agent.role) || '').toLowerCase().includes('review');
+    }
+
     function mockSurfaceForAgent(agent) {
       const key = String((agent && (agent.id || agent.name)) || '').toLowerCase();
       const mock = mockAgents.find(item => item.id === key || item.name.toLowerCase() === key);
       if (mock && (mock.surface === 'builder' || mock.surface === 'action')) return mock.surface;
       const role = String((agent && agent.role) || '').toLowerCase();
+      if (role.includes('review')) return 'reviewer';
       if (role.includes('pa') || role.includes('assistant') || role.includes('action')) return 'action';
       return 'builder';
     }
@@ -172,6 +177,122 @@
       const head = Math.ceil((max - 1) / 2);
       const tail = Math.floor((max - 1) / 2);
       return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
+    }
+
+    function parseOwnerRepo(ownerValue, repoValue, htmlURL) {
+      let owner = String(ownerValue || '').trim();
+      let repo = String(repoValue || '').trim();
+      if (!owner && repo.includes('/')) {
+        const parts = repo.split('/').filter(Boolean);
+        if (parts.length >= 2) {
+          owner = parts[0];
+          repo = parts.slice(1).join('/');
+        }
+      }
+      if ((!owner || !repo) && htmlURL) {
+        try {
+          const parsed = new URL(String(htmlURL));
+          const parts = parsed.pathname.split('/').filter(Boolean);
+          if (parts.length >= 2) {
+            owner = owner || parts[0];
+            repo = repo || parts[1];
+          }
+        } catch (error) {}
+      }
+      return { owner, repo };
+    }
+
+    function normalizeReviewPR(pr) {
+      if (!pr || typeof pr !== 'object') return null;
+      const { owner, repo } = parseOwnerRepo(pr.owner, pr.repo, pr.html_url);
+      const index = Number(pr.index != null ? pr.index : pr.number);
+      if (!owner || !repo || !Number.isFinite(index) || index <= 0) return null;
+      return {
+        owner,
+        repo,
+        index,
+        title: String(pr.title || '').trim(),
+        state: String(pr.state || '').trim(),
+        html_url: String(pr.html_url || '').trim(),
+      };
+    }
+
+    function reviewPRKey(pr) {
+      if (!pr) return '';
+      return `${pr.owner}/${pr.repo}#${pr.index}`;
+    }
+
+    function buildReviewTree(files) {
+      const folders = new Map();
+      const root = [];
+      const ensureFolder = (parts) => {
+        let children = root;
+        let prefix = '';
+        let folder = null;
+        parts.forEach(part => {
+          prefix = prefix ? `${prefix}/${part}` : part;
+          if (!folders.has(prefix)) {
+            folder = { name: part, type: 'folder', path: prefix, expanded: true, children: [] };
+            folders.set(prefix, folder);
+            children.push(folder);
+          }
+          folder = folders.get(prefix);
+          children = folder.children;
+        });
+        return folder;
+      };
+      (files || []).forEach(file => {
+        const path = String(file.filename || file.path || '').trim();
+        if (!path) return;
+        const parts = path.split('/').filter(Boolean);
+        const parent = ensureFolder(parts.slice(0, -1));
+        const children = parent ? parent.children : root;
+        children.push({
+          type: 'file',
+          path,
+          name: parts[parts.length - 1],
+          additions: Number(file.additions) || 0,
+          deletions: Number(file.deletions) || 0,
+        });
+      });
+      return root;
+    }
+
+    function parseUnifiedDiffPatch(patch) {
+      const text = String(patch || '');
+      if (!text.trim()) return [];
+      let oldLine = 0;
+      let newLine = 0;
+      return text.split('\n').map(line => {
+        const hunkMatch = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@.*$/);
+        if (hunkMatch) {
+          oldLine = Number(hunkMatch[1]);
+          newLine = Number(hunkMatch[2]);
+          return { kind: 'hunk', text: line };
+        }
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+          const entry = { kind: 'add', oldLine: '', newLine, text: line };
+          newLine += 1;
+          return entry;
+        }
+        if (line.startsWith('-') && !line.startsWith('---')) {
+          const entry = { kind: 'remove', oldLine, newLine: '', text: line };
+          oldLine += 1;
+          return entry;
+        }
+        if (line.startsWith(' ')) {
+          const entry = { kind: 'context', oldLine, newLine, text: line };
+          oldLine += 1;
+          newLine += 1;
+          return entry;
+        }
+        return { kind: line.startsWith('\\') ? 'meta' : 'context', oldLine: '', newLine: '', text: line };
+      });
+    }
+
+    function reviewFileState(state, selected) {
+      if (state) return state;
+      return selected ? 'viewing' : 'unread';
     }
 
     function activityIcon(type) {
@@ -586,6 +707,72 @@
               <span className="text-[9px] text-zinc-600 w-7 text-right shrink-0">{node.age}</span>
             </>
           )}
+        </div>
+      );
+    }
+
+    function ReviewTreeNode({ node, depth = 0, selectedPath, fileStates, onSelectFile }) {
+      const indent = { paddingLeft: `${depth * 12 + 8}px` };
+      if (node.type === 'folder') {
+        return (
+          <div>
+            <div style={indent} className="flex items-center gap-1 py-0.5 text-xs text-zinc-500">
+              <Icon name="ChevronDown" className="w-3 h-3 shrink-0" />
+              <Icon name="FolderOpen" className="w-3 h-3 shrink-0" />
+              <span className="truncate">{node.name}</span>
+            </div>
+            {node.children.map((child, index) => (
+              <ReviewTreeNode
+                key={`${child.path || child.name}-${index}`}
+                node={child}
+                depth={depth + 1}
+                selectedPath={selectedPath}
+                fileStates={fileStates}
+                onSelectFile={onSelectFile}
+              />
+            ))}
+          </div>
+        );
+      }
+      const selected = selectedPath === node.path;
+      const state = reviewFileState(fileStates[node.path], selected);
+      const stateClass =
+        state === 'reviewed-approved' ? 'border-emerald-400/30 text-emerald-300'
+        : state === 'reviewed-comment' ? 'border-blue-400/30 text-blue-300'
+        : state === 'reviewed-blocking' ? 'border-amber-400/30 text-amber-300'
+        : state === 'viewing' ? 'border-blue-400/40 text-blue-300'
+        : 'border-zinc-800 text-zinc-600';
+      return (
+        <button
+          type="button"
+          onClick={() => onSelectFile(node.path)}
+          style={indent}
+          className={`w-full flex items-center gap-1.5 py-0.5 text-xs text-left cursor-pointer ${selected ? 'bg-blue-500/10 border-l-2 border-blue-400' : 'border-l-2 border-transparent hover:bg-zinc-900/60'} ${selected ? 'text-blue-200' : 'text-zinc-400'}`}
+        >
+          <span className="w-3 shrink-0" />
+          <Icon name="FileCode" className="w-3 h-3 opacity-70 shrink-0" />
+          <span className="flex-1 truncate">{node.name}</span>
+          <span className="text-[9px] text-emerald-400 shrink-0">+{node.additions}</span>
+          <span className="text-[9px] text-red-300 shrink-0">-{node.deletions}</span>
+          <span className={`rounded border px-1 py-px text-[8px] uppercase shrink-0 ${stateClass}`}>
+            {state}
+          </span>
+        </button>
+      );
+    }
+
+    function ReviewCommentThread({ comments }) {
+      return (
+        <div className="rounded border-l border-zinc-700 bg-zinc-900/50 px-3 py-2 space-y-2">
+          {comments.map((comment, index) => {
+            const user = comment && comment.user && comment.user.login ? comment.user.login : 'reviewer';
+            return (
+              <div key={`${comment.review_id || 'review'}-${index}`} className="space-y-1">
+                <div className="text-[11px] leading-relaxed text-zinc-300 whitespace-pre-wrap">{comment.body || ''}</div>
+                <div className="text-[9px] text-zinc-600">{user} · {relativeTime(comment.created_at)}</div>
+              </div>
+            );
+          })}
         </div>
       );
     }
@@ -1252,6 +1439,496 @@
       );
     }
 
+    function ReviewerSurface({
+      focused,
+      workspace,
+      timeline,
+      leftRailWidth,
+      startDragTree,
+      isDraggingTree,
+      activityHeight,
+      startDragActivity,
+      isDraggingActivity,
+    }) {
+      const [prs, setPRs] = useState([]);
+      const [filesByPR, setFilesByPR] = useState({});
+      const [commentsByPR, setCommentsByPR] = useState({});
+      const [diffByFile, setDiffByFile] = useState({});
+      const [loadingByPR, setLoadingByPR] = useState({});
+      const [commentsLoadingByPR, setCommentsLoadingByPR] = useState({});
+      const [errorsByPR, setErrorsByPR] = useState({});
+      const [commentErrorsByPR, setCommentErrorsByPR] = useState({});
+      const [diffLoadingByFile, setDiffLoadingByFile] = useState({});
+      const [diffErrorsByFile, setDiffErrorsByFile] = useState({});
+      const [selectedFileByPR, setSelectedFileByPR] = useState({});
+      const [selectedFileSourceByPR, setSelectedFileSourceByPR] = useState({});
+      const [fileStatesByPR, setFileStatesByPR] = useState({});
+      const [diffModeByPR, setDiffModeByPR] = useState({});
+      const [reviewDraftByPR, setReviewDraftByPR] = useState({});
+      const [reviewIntentByPR, setReviewIntentByPR] = useState({});
+      const [reviewBusyByPR, setReviewBusyByPR] = useState({});
+      const [reviewErrorByPR, setReviewErrorByPR] = useState({});
+
+      const activePR = useMemo(() => normalizeReviewPR(workspace && workspace.current_pr), [workspace]);
+      const activePRKey = reviewPRKey(activePR);
+      const runtimeReviewFile = String(workspace && workspace.current_review_file || '').trim();
+      const activeFiles = activePRKey ? (filesByPR[activePRKey] || []) : [];
+      const activeComments = activePRKey ? (commentsByPR[activePRKey] || []) : [];
+      const activeFileStates = activePRKey ? (fileStatesByPR[activePRKey] || {}) : {};
+      const activeTitle = useMemo(() => {
+        if (!activePR) return '';
+        const match = asArrayPayload(prs, 'prs')
+          .map(normalizeReviewPR)
+          .find(pr => pr && pr.owner === activePR.owner && pr.repo === activePR.repo && pr.index === activePR.index);
+        return match ? match.title : '';
+      }, [prs, activePR]);
+      const selectedFilePath = activePRKey ? (selectedFileByPR[activePRKey] || '') : '';
+      const fileDiffKey = activePRKey && selectedFilePath ? `${activePRKey}:${selectedFilePath}` : '';
+      const activeDiff = fileDiffKey ? diffByFile[fileDiffKey] : null;
+      const diffMode = activePRKey && diffModeByPR[activePRKey] ? diffModeByPR[activePRKey] : 'unified';
+      const reviewDraft = activePRKey ? (reviewDraftByPR[activePRKey] || '') : '';
+      const reviewIntent = activePRKey ? (reviewIntentByPR[activePRKey] || '') : '';
+      const reviewBusy = Boolean(activePRKey && reviewBusyByPR[activePRKey]);
+      const reviewError = activePRKey ? (reviewErrorByPR[activePRKey] || '') : '';
+      const visibleTimeline = (timeline || []).slice(-30);
+      const reviewTree = useMemo(() => buildReviewTree(activeFiles), [activeFiles]);
+      const parsedPatch = useMemo(() => parseUnifiedDiffPatch(activeDiff && activeDiff.patch), [activeDiff]);
+
+      useEffect(() => {
+        let cancelled = false;
+        fetch('/api/v1/gitea/prs')
+          .then(response => {
+            if (!response.ok) throw new Error('failed to load pull requests');
+            return response.json();
+          })
+          .then(data => {
+            if (!cancelled) setPRs(asArrayPayload(data, 'prs'));
+          })
+          .catch(() => {
+            if (!cancelled) setPRs([]);
+          });
+        return () => { cancelled = true; };
+      }, []);
+
+      useEffect(() => {
+        if (!activePR || !activePRKey) return;
+        let cancelled = false;
+        setLoadingByPR(current => ({ ...current, [activePRKey]: true }));
+        setCommentsLoadingByPR(current => ({ ...current, [activePRKey]: true }));
+        setErrorsByPR(current => ({ ...current, [activePRKey]: '' }));
+        setCommentErrorsByPR(current => ({ ...current, [activePRKey]: '' }));
+        Promise.allSettled([
+          fetch(`/api/v1/gitea/prs/${encodeURIComponent(activePR.owner)}/${encodeURIComponent(activePR.repo)}/${encodeURIComponent(activePR.index)}/files`).then(response => {
+            if (!response.ok) throw new Error('failed to load PR files');
+            return response.json();
+          }),
+          fetch(`/api/v1/gitea/prs/${encodeURIComponent(activePR.owner)}/${encodeURIComponent(activePR.repo)}/${encodeURIComponent(activePR.index)}/comments`).then(response => {
+            if (!response.ok) throw new Error('failed to load PR comments');
+            return response.json();
+          }),
+        ]).then(([filesResult, commentsResult]) => {
+          if (cancelled) return;
+          if (filesResult.status === 'fulfilled') {
+            setFilesByPR(current => ({ ...current, [activePRKey]: asArrayPayload(filesResult.value, 'files') }));
+          } else {
+            setFilesByPR(current => ({ ...current, [activePRKey]: [] }));
+            setErrorsByPR(current => ({ ...current, [activePRKey]: filesResult.reason.message || 'failed to load PR files' }));
+          }
+          if (commentsResult.status === 'fulfilled') {
+            setCommentsByPR(current => ({ ...current, [activePRKey]: asArrayPayload(commentsResult.value, 'comments') }));
+          } else {
+            setCommentsByPR(current => ({ ...current, [activePRKey]: [] }));
+            setCommentErrorsByPR(current => ({ ...current, [activePRKey]: commentsResult.reason.message || 'failed to load PR comments' }));
+          }
+        }).finally(() => {
+          if (!cancelled) {
+            setLoadingByPR(current => ({ ...current, [activePRKey]: false }));
+            setCommentsLoadingByPR(current => ({ ...current, [activePRKey]: false }));
+          }
+        });
+        return () => { cancelled = true; };
+      }, [activePR, activePRKey]);
+
+      useEffect(() => {
+        if (!activePRKey || !runtimeReviewFile) return;
+        if (selectedFileSourceByPR[activePRKey] === 'user') return;
+        setSelectedFileByPR(current => current[activePRKey] === runtimeReviewFile ? current : ({ ...current, [activePRKey]: runtimeReviewFile }));
+        setSelectedFileSourceByPR(current => ({ ...current, [activePRKey]: 'runtime' }));
+      }, [activePRKey, runtimeReviewFile, selectedFileSourceByPR]);
+
+      useEffect(() => {
+        if (!activePR || !activePRKey || !selectedFilePath) return;
+        const diffKey = `${activePRKey}:${selectedFilePath}`;
+        if (diffByFile[diffKey] || diffLoadingByFile[diffKey]) return;
+        let cancelled = false;
+        setDiffLoadingByFile(current => ({ ...current, [diffKey]: true }));
+        setDiffErrorsByFile(current => ({ ...current, [diffKey]: '' }));
+        fetch(`/api/v1/gitea/prs/${encodeURIComponent(activePR.owner)}/${encodeURIComponent(activePR.repo)}/${encodeURIComponent(activePR.index)}/diff?file=${encodeURIComponent(selectedFilePath)}`)
+          .then(response => {
+            if (!response.ok) throw new Error('failed to load file diff');
+            return response.json();
+          })
+          .then(data => {
+            if (!cancelled) setDiffByFile(current => ({ ...current, [diffKey]: data }));
+          })
+          .catch(error => {
+            if (!cancelled) {
+              setDiffByFile(current => ({ ...current, [diffKey]: null }));
+              setDiffErrorsByFile(current => ({ ...current, [diffKey]: error.message || 'failed to load file diff' }));
+            }
+          })
+          .finally(() => {
+            if (!cancelled) setDiffLoadingByFile(current => ({ ...current, [diffKey]: false }));
+          });
+        return () => { cancelled = true; };
+      }, [activePR, activePRKey, selectedFilePath, diffByFile, diffLoadingByFile]);
+
+      const onSelectFile = (path) => {
+        if (!activePRKey) return;
+        setSelectedFileByPR(current => ({ ...current, [activePRKey]: path }));
+        setSelectedFileSourceByPR(current => ({ ...current, [activePRKey]: 'user' }));
+      };
+
+      const activeReviewState = (path) => reviewFileState(activeFileStates[path], selectedFilePath === path);
+
+      const reviewCommentsForFile = activeComments.filter(comment => String(comment.path || '').trim() === selectedFilePath);
+      const commentThreadsByLine = reviewCommentsForFile.reduce((acc, comment) => {
+        const line = Number(comment.line || 0);
+        const originalLine = Number(comment.original_line || 0);
+        if (line > 0) {
+          const key = `new:${line}`;
+          acc[key] = acc[key] || [];
+          acc[key].push(comment);
+        }
+        if (originalLine > 0) {
+          const key = `old:${originalLine}`;
+          acc[key] = acc[key] || [];
+          acc[key].push(comment);
+        }
+        return acc;
+      }, {});
+
+      const threadedCommentKeys = new Set();
+      parsedPatch.forEach(line => {
+        if (line.kind === 'add' || line.kind === 'context') {
+          const key = `new:${line.newLine}`;
+          if (line.newLine && commentThreadsByLine[key]) threadedCommentKeys.add(key);
+        }
+        if (line.kind === 'remove') {
+          const key = `old:${line.oldLine}`;
+          if (line.oldLine && commentThreadsByLine[key]) threadedCommentKeys.add(key);
+        }
+      });
+      const generalComments = activeComments.filter(comment => {
+        const path = String(comment.path || '').trim();
+        if (path && path !== selectedFilePath) return false;
+        const line = Number(comment.line || 0);
+        const originalLine = Number(comment.original_line || 0);
+        if (line > 0 && threadedCommentKeys.has(`new:${line}`)) return false;
+        if (originalLine > 0 && threadedCommentKeys.has(`old:${originalLine}`)) return false;
+        return true;
+      });
+
+      const commentThreadForLine = (line) => {
+        if (line.kind === 'remove') return commentThreadsByLine[`old:${line.oldLine}`] || [];
+        if (line.kind === 'add' || line.kind === 'context') return commentThreadsByLine[`new:${line.newLine}`] || [];
+        return [];
+      };
+
+      const refreshComments = () => {
+        if (!activePR || !activePRKey) return Promise.resolve();
+        return fetch(`/api/v1/gitea/prs/${encodeURIComponent(activePR.owner)}/${encodeURIComponent(activePR.repo)}/${encodeURIComponent(activePR.index)}/comments`)
+          .then(response => {
+            if (!response.ok) throw new Error('failed to refresh PR comments');
+            return response.json();
+          })
+          .then(data => {
+            setCommentsByPR(current => ({ ...current, [activePRKey]: asArrayPayload(data, 'comments') }));
+            setCommentErrorsByPR(current => ({ ...current, [activePRKey]: '' }));
+          });
+      };
+
+      const submitReview = () => {
+        if (!activePR || !activePRKey || !selectedFilePath || !reviewIntent) return;
+        setReviewBusyByPR(current => ({ ...current, [activePRKey]: true }));
+        setReviewErrorByPR(current => ({ ...current, [activePRKey]: '' }));
+        fetch(`/api/v1/gitea/prs/${encodeURIComponent(activePR.owner)}/${encodeURIComponent(activePR.repo)}/${encodeURIComponent(activePR.index)}/review`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ event: reviewIntent, body: reviewDraft }),
+        })
+          .then(response => {
+            if (!response.ok) throw new Error(`review submit failed: ${response.status}`);
+            return response.json();
+          })
+          .then(() => refreshComments())
+          .then(() => {
+            const nextState =
+              reviewIntent === 'APPROVED' ? 'reviewed-approved'
+              : reviewIntent === 'REQUEST_CHANGES' ? 'reviewed-blocking'
+              : 'reviewed-comment';
+            setFileStatesByPR(current => ({
+              ...current,
+              [activePRKey]: {
+                ...(current[activePRKey] || {}),
+                [selectedFilePath]: nextState,
+              },
+            }));
+            setReviewDraftByPR(current => ({ ...current, [activePRKey]: '' }));
+            setReviewIntentByPR(current => ({ ...current, [activePRKey]: '' }));
+          })
+          .catch(error => {
+            setReviewErrorByPR(current => ({ ...current, [activePRKey]: error.message || 'review submit failed' }));
+          })
+          .finally(() => {
+            setReviewBusyByPR(current => ({ ...current, [activePRKey]: false }));
+          });
+      };
+
+      const renderUnifiedLine = (line, index) => {
+        if (line.kind === 'hunk') {
+          return (
+            <div key={`${line.text}-${index}`} className="px-4 py-1 font-mono text-[11px] leading-5 bg-zinc-800/40 text-zinc-500 border-b border-zinc-900/60">
+              {line.text}
+            </div>
+          );
+        }
+        const lineClasses =
+          line.kind === 'add' ? 'bg-emerald-500/10 text-emerald-200'
+          : line.kind === 'remove' ? 'bg-red-500/10 text-red-200'
+          : 'text-zinc-400';
+        const thread = commentThreadForLine(line);
+        return (
+          <React.Fragment key={`${line.text}-${index}`}>
+            <div className={`flex font-mono text-[11px] leading-5 ${lineClasses}`}>
+              <span className="w-10 text-right pr-3 text-zinc-700 select-none shrink-0">{line.oldLine || ''}</span>
+              <span className="w-10 text-right pr-3 text-zinc-700 select-none shrink-0">{line.newLine || ''}</span>
+              <span className="flex-1 whitespace-pre-wrap break-all">{line.text || ' '}</span>
+            </div>
+            {thread.length > 0 && (
+              <div className="px-4 py-2">
+                <ReviewCommentThread comments={thread} />
+              </div>
+            )}
+          </React.Fragment>
+        );
+      };
+
+      const renderSideBySideLine = (line, index) => {
+        if (line.kind === 'hunk') {
+          return (
+            <div key={`${line.text}-${index}`} className="px-4 py-1 font-mono text-[11px] leading-5 bg-zinc-800/40 text-zinc-500 border-b border-zinc-900/60">
+              {line.text}
+            </div>
+          );
+        }
+        const thread = commentThreadForLine(line);
+        const leftClass = line.kind === 'remove' ? 'bg-red-500/10 text-red-200' : line.kind === 'context' ? 'text-zinc-400' : 'text-zinc-700';
+        const rightClass = line.kind === 'add' ? 'bg-emerald-500/10 text-emerald-200' : line.kind === 'context' ? 'text-zinc-400' : 'text-zinc-700';
+        const leftText = line.kind === 'remove' || line.kind === 'context' ? line.text : '';
+        const rightText = line.kind === 'add' || line.kind === 'context' ? line.text : '';
+        const anchorSide = line.kind === 'remove' ? 'left' : line.kind === 'add' ? 'right' : 'both';
+        return (
+          <React.Fragment key={`${line.text}-${index}`}>
+            <div className="grid grid-cols-2 border-b border-zinc-900/20">
+              <div className={`flex font-mono text-[11px] leading-5 ${leftClass}`}>
+                <span className="w-10 text-right pr-3 text-zinc-700 select-none shrink-0">{line.oldLine || ''}</span>
+                <span className="flex-1 whitespace-pre-wrap break-all">{leftText}</span>
+              </div>
+              <div className={`flex font-mono text-[11px] leading-5 border-l border-zinc-900/40 ${rightClass}`}>
+                <span className="w-10 text-right pr-3 text-zinc-700 select-none shrink-0">{line.newLine || ''}</span>
+                <span className="flex-1 whitespace-pre-wrap break-all">{rightText}</span>
+              </div>
+            </div>
+            {thread.length > 0 && (
+              <div className="grid grid-cols-2 px-4 py-2 gap-4">
+                <div>{anchorSide === 'left' || anchorSide === 'both' ? <ReviewCommentThread comments={thread} /> : null}</div>
+                <div>{anchorSide === 'right' || anchorSide === 'both' ? <ReviewCommentThread comments={thread} /> : null}</div>
+              </div>
+            )}
+          </React.Fragment>
+        );
+      };
+
+      return (
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex min-h-0">
+            <div style={{ width: `${leftRailWidth}px` }} className="border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
+              <div className="p-3 border-b border-zinc-800/60">
+                <div className="text-[10px] uppercase text-zinc-500">Pull Request</div>
+                {activePR ? (
+                  <>
+                    <div className="mt-2 text-xs text-zinc-200">{activePR.repo} #{activePR.index}</div>
+                    <div className="mt-1 text-[11px] text-zinc-400 leading-relaxed">
+                      {activeTitle || `${activePR.owner}/${activePR.repo}`}
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-2 text-[11px] text-zinc-600">No active PR</div>
+                )}
+              </div>
+              <div className="px-3 py-2 border-b border-zinc-800/60 flex items-center gap-2 text-[10px] uppercase text-zinc-500">
+                <Icon name="GitPullRequest" className="w-3 h-3" />
+                <span>Changed Files</span>
+                <span className="ml-auto text-zinc-600">{activeFiles.length}</span>
+              </div>
+              {!activePR ? (
+                <div className="px-3 py-3 text-[11px] text-zinc-600">This surface activates when {focused ? focused.name : 'the agent'} picks up review work.</div>
+              ) : loadingByPR[activePRKey] ? (
+                <div className="px-3 py-3 text-[11px] text-zinc-600">Loading changed files...</div>
+              ) : errorsByPR[activePRKey] ? (
+                <div className="px-3 py-3 text-[11px] text-red-300">{errorsByPR[activePRKey]}</div>
+              ) : reviewTree.length === 0 ? (
+                <div className="px-3 py-3 text-[11px] text-zinc-600">No changed files returned.</div>
+              ) : (
+                <div className="py-1">
+                  {reviewTree.map((node, index) => (
+                    <ReviewTreeNode
+                      key={`${node.path || node.name}-${index}`}
+                      node={node}
+                      selectedPath={selectedFilePath}
+                      fileStates={activeFileStates}
+                      onSelectFile={onSelectFile}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+            <ResizeRailHandle startDragTree={startDragTree} isDraggingTree={isDraggingTree} />
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+                <Icon name="GitPullRequest" className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-xs text-zinc-300 truncate">
+                  {selectedFilePath || (activePR ? `${activePR.repo} #${activePR.index}` : 'Reviewer surface')}
+                </span>
+                {selectedFilePath && (
+                  <button
+                    onClick={() => setDiffModeByPR(current => ({ ...current, [activePRKey]: diffMode === 'unified' ? 'side-by-side' : 'unified' }))}
+                    className="ml-auto flex items-center gap-1 rounded border border-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                  >
+                    <Icon name="Columns2" className="w-3 h-3" />
+                    <span>{diffMode === 'unified' ? 'Unified' : 'Side-by-side'}</span>
+                  </button>
+                )}
+              </div>
+              <div className="flex-1 overflow-y-auto bg-zinc-950">
+                {!activePR ? (
+                  <div className="h-full flex items-center justify-center text-center px-6">
+                    <div>
+                      <div className="text-sm text-zinc-400">No PR currently under review by {focused ? focused.name : 'this agent'}</div>
+                      <div className="mt-1 text-[10px] text-zinc-600">The surface activates when the runtime sets `workspace.current_pr` during review work.</div>
+                    </div>
+                  </div>
+                ) : !selectedFilePath ? (
+                  <div className="h-full flex items-center justify-center text-center px-6">
+                    <div>
+                      <div className="text-sm text-zinc-400">No file currently in focus</div>
+                      <div className="mt-1 text-[10px] text-zinc-600">The runtime will follow `workspace.current_review_file`, or you can click a file in the tree.</div>
+                    </div>
+                  </div>
+                ) : diffLoadingByFile[fileDiffKey] ? (
+                  <div className="h-full flex items-center justify-center text-sm text-zinc-600">Loading diff...</div>
+                ) : diffErrorsByFile[fileDiffKey] ? (
+                  <div className="h-full flex items-center justify-center text-sm text-red-300 px-6 text-center">{diffErrorsByFile[fileDiffKey]}</div>
+                ) : !activeDiff || !String(activeDiff.patch || '').trim() ? (
+                  <div className="h-full flex items-center justify-center text-center px-6">
+                    <div>
+                      <div className="text-sm text-zinc-400">no preview available</div>
+                      <div className="mt-1 text-[10px] text-zinc-600">This file does not include a renderable patch.</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="min-h-full">
+                    {(generalComments.length > 0 || commentErrorsByPR[activePRKey] || commentsLoadingByPR[activePRKey]) && (
+                      <div className="px-4 py-3 border-b border-zinc-800/60 space-y-2">
+                        <div className="text-[10px] uppercase text-zinc-500">General comments</div>
+                        {commentsLoadingByPR[activePRKey] && <div className="text-[10px] text-zinc-600">Refreshing comments...</div>}
+                        {commentErrorsByPR[activePRKey] && <div className="text-[10px] text-red-300">{commentErrorsByPR[activePRKey]}</div>}
+                        {generalComments.map((comment, index) => (
+                          <ReviewCommentThread key={`general-${index}`} comments={[comment]} />
+                        ))}
+                      </div>
+                    )}
+                    {diffMode === 'unified'
+                      ? parsedPatch.map(renderUnifiedLine)
+                      : parsedPatch.map(renderSideBySideLine)}
+                  </div>
+                )}
+              </div>
+              {reviewError && (
+                <div className="px-4 py-2 border-t border-zinc-900 bg-red-950/30 text-[11px] text-red-300 shrink-0">
+                  {reviewError}
+                </div>
+              )}
+              {activePR && selectedFilePath && reviewIntent && (
+                <div className="px-4 py-3 border-t border-zinc-800 bg-zinc-900/60 shrink-0">
+                  <div className="text-[10px] uppercase text-zinc-500 mb-2">{reviewIntent.toLowerCase().replace('_', ' ')}</div>
+                  <textarea
+                    value={reviewDraft}
+                    onChange={event => setReviewDraftByPR(current => ({ ...current, [activePRKey]: event.target.value }))}
+                    disabled={reviewBusy}
+                    className="w-full min-h-[88px] resize-none rounded border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-zinc-700"
+                    placeholder="Review body"
+                  />
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="text-[10px] text-zinc-600 flex-1">Review body for {selectedFilePath}</div>
+                    <button
+                      onClick={() => {
+                        setReviewIntentByPR(current => ({ ...current, [activePRKey]: '' }));
+                        setReviewErrorByPR(current => ({ ...current, [activePRKey]: '' }));
+                      }}
+                      disabled={reviewBusy}
+                      className="text-xs px-3 py-1.5 border border-zinc-700 text-zinc-400 rounded hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={submitReview}
+                      disabled={reviewBusy}
+                      className="text-xs px-3 py-1.5 bg-amber-500 text-zinc-950 rounded font-semibold hover:bg-amber-400 disabled:opacity-50"
+                    >
+                      Submit
+                    </button>
+                  </div>
+                </div>
+              )}
+              {activePR && selectedFilePath && (
+                <div className="px-4 py-3 border-t border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+                  <span className="text-[10px] text-zinc-500 flex items-center gap-1.5">
+                    <Icon name="GitPullRequest" className="w-3 h-3" /> {activePR.repo} #{activePR.index}
+                  </span>
+                  <div className="ml-auto flex items-center gap-2">
+                    <button
+                      onClick={() => setReviewIntentByPR(current => ({ ...current, [activePRKey]: 'COMMENT' }))}
+                      disabled={reviewBusy}
+                      className="text-xs px-3 py-1.5 border border-zinc-700 text-zinc-300 rounded hover:bg-zinc-800 disabled:opacity-50"
+                    >
+                      Comment
+                    </button>
+                    <button
+                      onClick={() => setReviewIntentByPR(current => ({ ...current, [activePRKey]: 'REQUEST_CHANGES' }))}
+                      disabled={reviewBusy}
+                      className="text-xs px-3 py-1.5 border border-amber-500/30 text-amber-300 rounded hover:bg-amber-500/10 disabled:opacity-50"
+                    >
+                      Request Changes
+                    </button>
+                    <button
+                      onClick={() => setReviewIntentByPR(current => ({ ...current, [activePRKey]: 'APPROVED' }))}
+                      disabled={reviewBusy}
+                      className="text-xs px-4 py-1.5 bg-emerald-500 text-zinc-950 rounded font-semibold hover:bg-emerald-400 disabled:opacity-50"
+                    >
+                      Approve
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+          <ActivityTimeline items={visibleTimeline} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+        </div>
+      );
+    }
+
     function ActionSurface({
       focused,
       plan,
@@ -1584,6 +2261,7 @@
       const focusedWorkspace = workspaces[activeAgent] || null;
       const focusedTimeline = activityByAgent[activeAgent] || [];
       const focusedPlan = focusedWorkspace && focusedWorkspace.plan ? focusedWorkspace.plan : null;
+      const reviewerAgent = isReviewerAgent(focused);
       const focusedQueueItem = useMemo(
         () => selectQueueForAgent(activeAgent, pendingQueueItems, approvalOverrides),
         [activeAgent, pendingQueueItems, approvalOverrides]
@@ -2081,7 +2759,19 @@
                   <Icon name="Hand" className="w-2.5 h-2.5" /> Interject
                 </button>
               </div>
-              {focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'builder' ? (
+              {focused && reviewerAgent ? (
+                <ReviewerSurface
+                  focused={focused}
+                  workspace={focusedWorkspace}
+                  timeline={focusedTimeline}
+                  leftRailWidth={leftRailWidth}
+                  startDragTree={startDragTree}
+                  isDraggingTree={isDraggingTree}
+                  activityHeight={activityHeight}
+                  startDragActivity={startDragActivity}
+                  isDraggingActivity={isDraggingActivity}
+                />
+              ) : focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'builder' ? (
                 <BuilderSurface focused={focused} workspace={focusedWorkspace} workspaces={workspaces} timeline={focusedTimeline} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
               ) : focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'action' ? (
                 <ActionSurface
