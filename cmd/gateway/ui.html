@@ -1493,6 +1493,28 @@
       const visibleTimeline = (timeline || []).slice(-30);
       const reviewTree = useMemo(() => buildReviewTree(activeFiles), [activeFiles]);
       const parsedPatch = useMemo(() => parseUnifiedDiffPatch(activeDiff && activeDiff.patch), [activeDiff]);
+      const fetchDiff = (path) => {
+        if (!activePR || !activePRKey || !path) return;
+        const diffKey = `${activePRKey}:${path}`;
+        if (diffByFile[diffKey] || diffLoadingByFile[diffKey]) return;
+        setDiffLoadingByFile(current => ({ ...current, [diffKey]: true }));
+        setDiffErrorsByFile(current => ({ ...current, [diffKey]: '' }));
+        fetch(`/api/v1/gitea/prs/${encodeURIComponent(activePR.owner)}/${encodeURIComponent(activePR.repo)}/${encodeURIComponent(activePR.index)}/diff?file=${encodeURIComponent(path)}`)
+          .then(response => {
+            if (!response.ok) throw new Error('failed to load file diff');
+            return response.json();
+          })
+          .then(data => {
+            setDiffByFile(current => ({ ...current, [diffKey]: data }));
+          })
+          .catch(error => {
+            setDiffByFile(current => ({ ...current, [diffKey]: null }));
+            setDiffErrorsByFile(current => ({ ...current, [diffKey]: error.message || 'failed to load file diff' }));
+          })
+          .finally(() => {
+            setDiffLoadingByFile(current => ({ ...current, [diffKey]: false }));
+          });
+      };
 
       useEffect(() => {
         let cancelled = false;
@@ -1554,39 +1576,14 @@
         if (selectedFileSourceByPR[activePRKey] === 'user') return;
         setSelectedFileByPR(current => current[activePRKey] === runtimeReviewFile ? current : ({ ...current, [activePRKey]: runtimeReviewFile }));
         setSelectedFileSourceByPR(current => ({ ...current, [activePRKey]: 'runtime' }));
-      }, [activePRKey, runtimeReviewFile, selectedFileSourceByPR]);
-
-      useEffect(() => {
-        if (!activePR || !activePRKey || !selectedFilePath) return;
-        const diffKey = `${activePRKey}:${selectedFilePath}`;
-        if (diffByFile[diffKey] || diffLoadingByFile[diffKey]) return;
-        let cancelled = false;
-        setDiffLoadingByFile(current => ({ ...current, [diffKey]: true }));
-        setDiffErrorsByFile(current => ({ ...current, [diffKey]: '' }));
-        fetch(`/api/v1/gitea/prs/${encodeURIComponent(activePR.owner)}/${encodeURIComponent(activePR.repo)}/${encodeURIComponent(activePR.index)}/diff?file=${encodeURIComponent(selectedFilePath)}`)
-          .then(response => {
-            if (!response.ok) throw new Error('failed to load file diff');
-            return response.json();
-          })
-          .then(data => {
-            if (!cancelled) setDiffByFile(current => ({ ...current, [diffKey]: data }));
-          })
-          .catch(error => {
-            if (!cancelled) {
-              setDiffByFile(current => ({ ...current, [diffKey]: null }));
-              setDiffErrorsByFile(current => ({ ...current, [diffKey]: error.message || 'failed to load file diff' }));
-            }
-          })
-          .finally(() => {
-            if (!cancelled) setDiffLoadingByFile(current => ({ ...current, [diffKey]: false }));
-          });
-        return () => { cancelled = true; };
-      }, [activePR, activePRKey, selectedFilePath, diffByFile, diffLoadingByFile]);
+        fetchDiff(runtimeReviewFile);
+      }, [activePR, activePRKey, runtimeReviewFile, selectedFileSourceByPR, diffByFile, diffLoadingByFile]);
 
       const onSelectFile = (path) => {
-        if (!activePRKey) return;
+        if (!activePRKey || !path) return;
         setSelectedFileByPR(current => ({ ...current, [activePRKey]: path }));
         setSelectedFileSourceByPR(current => ({ ...current, [activePRKey]: 'user' }));
+        fetchDiff(path);
       };
 
       const activeReviewState = (path) => reviewFileState(activeFileStates[path], selectedFilePath === path);
