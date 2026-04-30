@@ -4834,12 +4834,12 @@ func main() {
 			if !emit(sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false}) {
 				return toolpkg.ToolResult{Error: "stream closed"}
 			}
-			for _, event := range toolpkg.TypedToolStartEvents(tc.Function.Name, args, *workspace) {
+			typedEventContext := toolpkg.CaptureTypedToolEventContext(tc.Function.Name, args, *workspace, agentName)
+			for _, event := range toolpkg.TypedToolStartEvents(tc.Function.Name, args, *workspace, typedEventContext) {
 				if !emit(event) {
 					return toolpkg.ToolResult{Error: "stream closed"}
 				}
 			}
-			typedEventContext := toolpkg.CaptureTypedToolEventContext(tc.Function.Name, args, *workspace, agentName)
 
 			runToolAttempt := func() toolpkg.ToolResult {
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}

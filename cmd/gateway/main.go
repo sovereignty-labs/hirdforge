@@ -511,6 +511,18 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 		return
 	}
 	g.projector.Apply(agentName, eventType, evt)
+	if eventType == "delegate" {
+		sessionID := strings.TrimSpace(asString(evt["session_id"]))
+		if sessionID != "" {
+			objective := strings.TrimSpace(asString(evt["objective_summary"]))
+			if sess, ok := g.sessionStore.get(sessionID); ok {
+				if derived := objectiveFromSession(sess); derived != "" {
+					objective = derived
+				}
+			}
+			g.projector.SetArchitectContext(agentName, sessionID, objective)
+		}
+	}
 	now := time.Now().Format(time.RFC3339)
 	typed := make(map[string]interface{}, len(evt)+2)
 	for k, v := range evt {
@@ -518,6 +530,14 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 	}
 	typed["agent"] = agentName
 	typed["timestamp"] = now
+	if sessionID := strings.TrimSpace(asString(evt["session_id"])); sessionID != "" {
+		g.addDelegationTimelineEvent(sessionID, delegationTimelineEvent{
+			Type:      eventType,
+			Agent:     agentName,
+			Metadata:  typed,
+			Timestamp: now,
+		})
+	}
 	g.broadcastPayload(typed)
 	g.broadcastPayload(map[string]interface{}{
 		"type":      "workspace_update",
@@ -2753,6 +2773,37 @@ func main() {
 	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
 		switch {
+		case strings.HasSuffix(path, "/objective"):
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/objective")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown agent"})
+				return
+			}
+			sessionID := gw.activeSessionID(name)
+			if sessionID == "" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			sess, ok := gw.sessionStore.get(sessionID)
+			if !ok {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			objective := objectiveFromSession(sess)
+			if objective == "" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"objective": objective})
 		case strings.HasSuffix(path, "/workspace"):
 			if r.Method != http.MethodGet {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3144,6 +3195,11 @@ func main() {
 					if owner != "" && repo != "" && index > 0 {
 						pr = &workspacepkg.PRRef{Owner: owner, Repo: repo, Index: index}
 					}
+				}
+				sessionID := asString(meta["current_session_id"])
+				objective := asString(meta["current_objective"])
+				if sessionID != "" || objective != "" {
+					gw.projector.SetArchitectContext(in.Agent, sessionID, objective)
 				}
 				ws := gw.projector.SetReviewContext(in.Agent, pr, asString(meta["current_review_file"]))
 				now := time.Now().Format(time.RFC3339)
@@ -4260,11 +4316,16 @@ func main() {
 				if sessionID == "" {
 					sessionID = fmt.Sprintf("mcp-%s-%d", agentName, time.Now().UnixNano())
 				}
+				sess := gw.sessionStore.ensureSession(sessionID, agentName)
+				if sess.TaskSummary == "" {
+					sess.TaskSummary = extractTaskSummary(content)
+				}
+				if sess.TaskRef == "" {
+					sess.TaskRef = extractTaskRef(content)
+				}
 				// If caller explicitly set a source, create the session with that source
 				if explicitSource != "" {
-					sess := gw.sessionStore.ensureSession(sessionID, agentName)
 					sess.Source = explicitSource
-					sess.TaskSummary = extractTaskSummary(content)
 				}
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
 				defer agentCancel()
@@ -4371,6 +4432,13 @@ func main() {
 		}
 		if sessionID == "" {
 			sessionID = fmt.Sprintf("hirdforge-%s-%d", in.Agent, time.Now().UnixNano())
+		}
+		sess := gw.sessionStore.ensureSession(sessionID, in.Agent)
+		if sess.TaskSummary == "" {
+			sess.TaskSummary = extractTaskSummary(in.Content)
+		}
+		if sess.TaskRef == "" {
+			sess.TaskRef = extractTaskRef(in.Content)
 		}
 		gw.lastSessionMu.Lock()
 		gw.lastSession[in.Agent] = sessionID

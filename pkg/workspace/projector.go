@@ -8,15 +8,18 @@ import (
 )
 
 type AgentWorkspace struct {
-	AgentName         string               `json:"agent_name"`
-	CurrentRepo       string               `json:"current_repo"`
-	CurrentBranch     string               `json:"current_branch"`
-	CurrentFile       string               `json:"current_file"`
-	CurrentPR         *PRRef               `json:"current_pr,omitempty"`
-	CurrentReviewFile string               `json:"current_review_file,omitempty"`
-	FilesTouched      map[string]FileState `json:"files_touched"`
-	Plan              *Plan                `json:"plan,omitempty"`
-	LastUpdated       time.Time            `json:"last_updated"`
+	AgentName          string               `json:"agent_name"`
+	CurrentRepo        string               `json:"current_repo"`
+	CurrentBranch      string               `json:"current_branch"`
+	CurrentFile        string               `json:"current_file"`
+	CurrentSessionID   string               `json:"current_session_id,omitempty"`
+	CurrentObjective   string               `json:"current_objective,omitempty"`
+	CurrentObjectiveAt time.Time            `json:"current_objective_at,omitempty"`
+	CurrentPR          *PRRef               `json:"current_pr,omitempty"`
+	CurrentReviewFile  string               `json:"current_review_file,omitempty"`
+	FilesTouched       map[string]FileState `json:"files_touched"`
+	Plan               *Plan                `json:"plan,omitempty"`
+	LastUpdated        time.Time            `json:"last_updated"`
 }
 
 type PRRef struct {
@@ -49,7 +52,7 @@ func NewProjector() *Projector {
 
 func IsTypedEvent(eventType string) bool {
 	switch eventType {
-	case "file_read", "file_write", "git_clone", "git_branch_create", "git_commit", "git_push", "pr_create", "exec", "http_request", "plan", "plan_step_complete":
+	case "file_read", "file_write", "git_clone", "git_branch_create", "git_commit", "git_push", "pr_create", "exec", "http_request", "plan", "plan_step_complete", "delegate":
 		return true
 	default:
 		return false
@@ -69,6 +72,16 @@ func (p *Projector) Apply(agentName string, eventType string, payload map[string
 	ws.LastUpdated = now
 
 	switch eventType {
+	case "delegate":
+		sessionID := stringPayload(payload, "session_id")
+		objective := stringPayload(payload, "objective_summary")
+		if sessionID != "" {
+			ws.CurrentSessionID = sessionID
+		}
+		if objective != "" {
+			ws.CurrentObjective = objective
+		}
+		ws.CurrentObjectiveAt = now
 	case "plan":
 		steps := stringSlicePayload(payload, "steps")
 		if len(steps) == 0 {
@@ -185,6 +198,21 @@ func (p *Projector) SetReviewContext(agentName string, pr *PRRef, reviewFile str
 	prCopy := *pr
 	ws.CurrentPR = &prCopy
 	ws.CurrentReviewFile = strings.TrimSpace(reviewFile)
+	return cloneWorkspace(ws)
+}
+
+func (p *Projector) SetArchitectContext(agentName, sessionID, objective string) AgentWorkspace {
+	if p == nil {
+		return AgentWorkspace{AgentName: agentName, FilesTouched: map[string]FileState{}}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ws := p.ensureLocked(agentName)
+	ws.LastUpdated = time.Now()
+	ws.CurrentSessionID = strings.TrimSpace(sessionID)
+	ws.CurrentObjective = strings.TrimSpace(objective)
+	ws.CurrentObjectiveAt = ws.LastUpdated
 	return cloneWorkspace(ws)
 }
 

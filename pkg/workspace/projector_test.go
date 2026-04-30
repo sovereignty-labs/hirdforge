@@ -109,12 +109,15 @@ func TestProjectorSnapshotDeepCopiesFilesTouched(t *testing.T) {
 	p.Apply("ivar", "file_read", map[string]interface{}{"path": "README.md"})
 	p.Apply("ivar", "plan", map[string]interface{}{"steps": []interface{}{"one", "two"}})
 	p.SetReviewContext("ivar", &PRRef{Owner: "kit", Repo: "hirdforge", Index: 167}, "cmd/gateway/main.go")
+	p.SetArchitectContext("ivar", "sess-1", "Coordinate rollout")
 
 	first := p.Get("ivar")
 	first.FilesTouched["README.md"] = FileState{Path: "README.md", State: "writing", LineCursor: 99}
 	first.Plan.Steps[0] = "mutated"
 	first.CurrentPR.Owner = "mutated"
 	first.CurrentReviewFile = "changed.go"
+	first.CurrentSessionID = "changed"
+	first.CurrentObjective = "changed"
 
 	second := p.Get("ivar")
 	state := second.FilesTouched["README.md"]
@@ -129,6 +132,9 @@ func TestProjectorSnapshotDeepCopiesFilesTouched(t *testing.T) {
 	}
 	if second.CurrentPR == nil || second.CurrentPR.Owner != "kit" || second.CurrentReviewFile != "cmd/gateway/main.go" {
 		t.Fatalf("review context snapshot mutation leaked into projector: %+v file=%q", second.CurrentPR, second.CurrentReviewFile)
+	}
+	if second.CurrentSessionID != "sess-1" || second.CurrentObjective != "Coordinate rollout" {
+		t.Fatalf("architect context snapshot mutation leaked: session=%q objective=%q", second.CurrentSessionID, second.CurrentObjective)
 	}
 }
 
@@ -149,5 +155,28 @@ func TestProjectorSetReviewContext(t *testing.T) {
 	}
 	if ws.CurrentReviewFile != "" {
 		t.Fatalf("CurrentReviewFile after clear = %q", ws.CurrentReviewFile)
+	}
+}
+
+func TestProjectorDelegateSetsArchitectContext(t *testing.T) {
+	p := NewProjector()
+
+	p.Apply("rune", "delegate", map[string]interface{}{
+		"session_id":        "sess-77",
+		"objective_summary": "Split rollout into builder and reviewer tracks",
+		"target_repo":       "kit/hirdforge",
+		"from_agent":        "rune",
+		"to_agent":          "ivar",
+	})
+
+	ws := p.Get("rune")
+	if ws.CurrentSessionID != "sess-77" {
+		t.Fatalf("CurrentSessionID = %q", ws.CurrentSessionID)
+	}
+	if ws.CurrentObjective != "Split rollout into builder and reviewer tracks" {
+		t.Fatalf("CurrentObjective = %q", ws.CurrentObjective)
+	}
+	if ws.CurrentObjectiveAt.IsZero() {
+		t.Fatalf("CurrentObjectiveAt was not set")
 	}
 }
