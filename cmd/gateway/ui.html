@@ -1485,7 +1485,7 @@
       const selectedFilePath = activePRKey ? (selectedFileByPR[activePRKey] || '') : '';
       const fileDiffKey = activePRKey && selectedFilePath ? `${activePRKey}:${selectedFilePath}` : '';
       const activeDiff = fileDiffKey ? diffByFile[fileDiffKey] : null;
-      const diffMode = activePRKey && diffModeByPR[activePRKey] ? diffModeByPR[activePRKey] : 'side-by-side';
+      const diffMode = activePRKey && diffModeByPR[activePRKey] ? diffModeByPR[activePRKey] : 'unified';
       const reviewDraft = activePRKey ? (reviewDraftByPR[activePRKey] || '') : '';
       const reviewIntent = activePRKey ? (reviewIntentByPR[activePRKey] || '') : '';
       const reviewBusy = Boolean(activePRKey && reviewBusyByPR[activePRKey]);

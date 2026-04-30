@@ -629,7 +629,13 @@ func directPRToolContext(toolName string, args map[string]interface{}) (*prRef, 
 	if !ok {
 		return nil, "", false
 	}
-	if strings.Contains(toolName, "pr") || strings.Contains(toolName, "pull") || toolName == "create-review" {
+	knownPRTools := map[string]bool{
+		"create-pr":     true,
+		"create-review": true,
+		"list-pr-files": true,
+		"merge-pr":      true,
+	}
+	if strings.Contains(toolName, "pr") || strings.Contains(toolName, "pull") || knownPRTools[toolName] {
 		reviewFile := strings.TrimSpace(fmt.Sprint(args["file"]))
 		if reviewFile == "" || reviewFile == "<nil>" {
 			reviewFile = strings.TrimSpace(fmt.Sprint(args["path"]))
@@ -643,12 +649,12 @@ func directPRToolContext(toolName string, args map[string]interface{}) (*prRef, 
 }
 
 func ambiguousPRTool(toolName string) bool {
-	switch toolName {
-	case "comment", "get-issue", "close-issue":
-		return true
-	default:
-		return false
+	knownAmbiguousPRTools := map[string]bool{
+		"close-issue": true,
+		"comment":     true,
+		"get-issue":   true,
 	}
+	return knownAmbiguousPRTools[toolName]
 }
 
 func parseGatewayPRRequest(args map[string]interface{}) (*prRef, string, bool) {
