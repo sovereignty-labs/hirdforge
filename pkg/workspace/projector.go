@@ -17,6 +17,8 @@ type AgentWorkspace struct {
 	CurrentObjectiveAt time.Time            `json:"current_objective_at,omitempty"`
 	CurrentPR          *PRRef               `json:"current_pr,omitempty"`
 	CurrentReviewFile  string               `json:"current_review_file,omitempty"`
+	SessionTasks       []TaskRef            `json:"session_tasks,omitempty"`
+	SessionTimeline    []TimelineEvent      `json:"session_timeline,omitempty"`
 	FilesTouched       map[string]FileState `json:"files_touched"`
 	Plan               *Plan                `json:"plan,omitempty"`
 	LastUpdated        time.Time            `json:"last_updated"`
@@ -39,6 +41,24 @@ type Plan struct {
 	Steps       []string  `json:"steps"`
 	CurrentStep int       `json:"current_step"`
 	StartedAt   time.Time `json:"started_at"`
+}
+
+type TaskRef struct {
+	ID        string    `json:"id"`
+	Agent     string    `json:"agent"`
+	Status    string    `json:"status"`
+	Content   string    `json:"content"`
+	SessionID string    `json:"session_id,omitempty"`
+	PRNumber  int       `json:"pr_number,omitempty"`
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+type TimelineEvent struct {
+	Type      string                 `json:"type"`
+	Agent     string                 `json:"agent"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Timestamp string                 `json:"timestamp"`
 }
 
 type Projector struct {
@@ -216,6 +236,21 @@ func (p *Projector) SetArchitectContext(agentName, sessionID, objective string) 
 	return cloneWorkspace(ws)
 }
 
+func (p *Projector) SetArchitectSessionData(agentName, sessionID string, tasks []TaskRef, timeline []TimelineEvent) AgentWorkspace {
+	if p == nil {
+		return AgentWorkspace{AgentName: agentName, FilesTouched: map[string]FileState{}}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ws := p.ensureLocked(agentName)
+	ws.LastUpdated = time.Now()
+	ws.CurrentSessionID = strings.TrimSpace(sessionID)
+	ws.SessionTasks = cloneTaskRefs(tasks)
+	ws.SessionTimeline = cloneTimelineEvents(timeline)
+	return cloneWorkspace(ws)
+}
+
 func (p *Projector) ensureLocked(agentName string) *AgentWorkspace {
 	ws := p.workspaces[agentName]
 	if ws == nil {
@@ -256,6 +291,35 @@ func cloneWorkspace(ws *AgentWorkspace) AgentWorkspace {
 	if ws.CurrentPR != nil {
 		pr := *ws.CurrentPR
 		out.CurrentPR = &pr
+	}
+	out.SessionTasks = cloneTaskRefs(ws.SessionTasks)
+	out.SessionTimeline = cloneTimelineEvents(ws.SessionTimeline)
+	return out
+}
+
+func cloneTaskRefs(in []TaskRef) []TaskRef {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]TaskRef, len(in))
+	copy(out, in)
+	return out
+}
+
+func cloneTimelineEvents(in []TimelineEvent) []TimelineEvent {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]TimelineEvent, len(in))
+	for i, evt := range in {
+		out[i] = evt
+		if len(evt.Metadata) > 0 {
+			meta := make(map[string]interface{}, len(evt.Metadata))
+			for k, v := range evt.Metadata {
+				meta[k] = v
+			}
+			out[i].Metadata = meta
+		}
 	}
 	return out
 }

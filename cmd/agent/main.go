@@ -379,8 +379,9 @@ type (
 		SessionID string `json:"session_id"`
 	}
 	taskSendRequest struct {
-		Content string `json:"content"`
-		From    string `json:"from"`
+		Content   string `json:"content"`
+		From      string `json:"from"`
+		SessionID string `json:"session_id,omitempty"`
 	}
 	sseChunk struct {
 		Type      string      `json:"type"`
@@ -789,7 +790,7 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
-	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, formatted)
+	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, formatted, taskID)
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
@@ -858,11 +859,12 @@ func fetchPeerModel(peerURL string) string {
 	return strings.TrimSpace(out.Model)
 }
 
-func sendPeerAgentTask(agentName, peerURL, from, task string) (string, error) {
+func sendPeerAgentTask(agentName, peerURL, from, task, sessionID string) (string, error) {
 	logJSON("info", "delegating", map[string]interface{}{"target_agent": agentName})
 	body, _ := json.Marshal(taskSendRequest{
-		Content: task,
-		From:    from,
+		Content:   task,
+		From:      from,
+		SessionID: strings.TrimSpace(sessionID),
 	})
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(peerURL, "/")+"/tasks/send", bytes.NewReader(body))
 	if err != nil {
@@ -985,7 +987,7 @@ func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult 
 		wg.Add(1)
 		go func(peerName string) {
 			defer wg.Done()
-			resp, err := sendPeerAgentTask(peerName, t.peers[peerName], "broadcast", task)
+			resp, err := sendPeerAgentTask(peerName, t.peers[peerName], "broadcast", task, "")
 			results <- out{name: peerName, resp: resp, err: err}
 		}(name)
 	}
@@ -4935,6 +4937,7 @@ func main() {
 						"target_agent": targetAgent,
 						"task_id":      taskID,
 						"summary":      truncateMemoryValue(taskBrief, 100),
+						"session_id":   taskID,
 					})
 				}
 				if tc.Function.Name == "git-clone" {
@@ -5667,11 +5670,12 @@ func main() {
 		}
 		reviewTracker.ClearIfTaskWithoutPR(req.Content)
 		task := taskStore.Create(taskspkg.Task{
-			ID:      newTaskID(),
-			Agent:   agentName,
-			From:    strings.TrimSpace(req.From),
-			Content: req.Content,
-			Status:  "submitted",
+			ID:        newTaskID(),
+			Agent:     agentName,
+			From:      strings.TrimSpace(req.From),
+			SessionID: strings.TrimSpace(req.SessionID),
+			Content:   req.Content,
+			Status:    "submitted",
 		})
 		ctx, cancel := context.WithCancel(context.Background())
 		taskCancelMu.Lock()
@@ -5693,7 +5697,8 @@ func main() {
 				current.Error = "completion_tracker_init_failed"
 				taskStore.Update(current)
 				notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
-					"message": fmt.Sprintf("failed task %s (from %s): %s", current.ID, current.From, current.Error),
+					"message":    fmt.Sprintf("failed task %s (from %s): %s", current.ID, current.From, current.Error),
+					"session_id": current.SessionID,
 				})
 				return
 			}
@@ -5701,7 +5706,8 @@ func main() {
 			current.Error = ""
 			taskStore.Update(current)
 			notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
-				"message": fmt.Sprintf("started task %s (from %s)", current.ID, current.From),
+				"message":    fmt.Sprintf("started task %s (from %s)", current.ID, current.From),
+				"session_id": current.SessionID,
 			})
 			reportTrackedState := func(record tasklifepkg.TaskRecord) {
 				if !sovereignStateEnabled(sovereignStates, record.State) {
@@ -5821,7 +5827,8 @@ func main() {
 				cur.Error = "cancelled"
 				taskStore.Update(cur)
 				notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
-					"message": fmt.Sprintf("cancelled task %s (from %s)", cur.ID, cur.From),
+					"message":    fmt.Sprintf("cancelled task %s (from %s)", cur.ID, cur.From),
+					"session_id": cur.SessionID,
 				})
 				return
 			}
@@ -5830,7 +5837,8 @@ func main() {
 				cur.Error = err.Error()
 				taskStore.Update(cur)
 				notifyGateway(*gatewayURL, "task", agentName, map[string]interface{}{
-					"message": fmt.Sprintf("failed task %s (from %s): %s", cur.ID, cur.From, cur.Error),
+					"message":    fmt.Sprintf("failed task %s (from %s): %s", cur.ID, cur.From, cur.Error),
+					"session_id": cur.SessionID,
 				})
 				return
 			}
@@ -5848,9 +5856,10 @@ func main() {
 				summary = summary[:200] + "..."
 			}
 			notifyGateway(*gatewayURL, "task_completed", agentName, map[string]interface{}{
-				"task_id": cur.ID,
-				"from":    cur.From,
-				"summary": summary,
+				"task_id":    cur.ID,
+				"from":       cur.From,
+				"summary":    summary,
+				"session_id": cur.SessionID,
 			})
 		}(task.ID, req.Content)
 		w.Header().Set("Content-Type", "application/json")

@@ -438,10 +438,6 @@
       };
     }
 
-    function taskSessionID(task) {
-      return parseDelegatedTask(task && task.content).taskID;
-    }
-
     function extractPRNumberFromText(text) {
       const raw = String(text || '');
       let match = raw.match(/\/pulls\/(\d+)\b/i);
@@ -2308,26 +2304,20 @@
       isDraggingActivity,
     }) {
       const [prs, setPRs] = useState([]);
-      const [objectiveBySession, setObjectiveBySession] = useState({});
-      const [tasksBySession, setTasksBySession] = useState({});
-      const [eventsBySession, setEventsBySession] = useState({});
-      const [loadingBySession, setLoadingBySession] = useState({});
-      const [errorsBySession, setErrorsBySession] = useState({});
       const [selectedTaskBySession, setSelectedTaskBySession] = useState({});
 
       const activeSessionID = String(workspace && workspace.current_session_id || '').trim();
-      const fallbackObjective = String(workspace && workspace.current_objective || '').trim();
-      const activeObjective = activeSessionID ? (objectiveBySession[activeSessionID] || fallbackObjective) : fallbackObjective;
-      const sessionEvents = activeSessionID ? (eventsBySession[activeSessionID] || []) : [];
+      const activeObjective = String(workspace && workspace.current_objective || '').trim();
+      const sessionEvents = Array.isArray(workspace && workspace.session_timeline) ? workspace.session_timeline : [];
       const architectTimeline = useMemo(() => architectTimelineItems(sessionEvents).slice(-30), [sessionEvents]);
       const prList = useMemo(() => asArrayPayload(prs, 'prs'), [prs]);
       const sessionTasks = useMemo(() => {
         if (!activeSessionID) return [];
-        return (tasksBySession[activeSessionID] || [])
-          .filter(task => taskSessionID(task) === activeSessionID)
+        return (Array.isArray(workspace && workspace.session_tasks) ? workspace.session_tasks : [])
+          .filter(task => String(task && task.session_id || '') === activeSessionID)
           .map(task => {
             const parsed = parseDelegatedTask(task.content);
-            const prNumber = extractPRNumberFromText(collectTaskText(task));
+            const prNumber = Number(task && task.pr_number) || extractPRNumberFromText(collectTaskText(task));
             const prInfo = prList.find(pr => Number(pr.number) === prNumber) || null;
             return {
               ...task,
@@ -2340,12 +2330,10 @@
             };
           })
           .sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
-      }, [activeSessionID, tasksBySession, prList]);
+      }, [activeSessionID, workspace, prList]);
       const selectedTaskID = activeSessionID ? (selectedTaskBySession[activeSessionID] || '') : '';
       const selectedTask = sessionTasks.find(task => task.id === selectedTaskID) || null;
       const selectedTaskEvents = useMemo(() => taskEventsForAgent(sessionEvents, selectedTask), [sessionEvents, selectedTask]);
-      const activeError = activeSessionID ? (errorsBySession[activeSessionID] || '') : '';
-      const activeLoading = Boolean(activeSessionID && loadingBySession[activeSessionID]);
 
       useEffect(() => {
         let cancelled = false;
@@ -2369,50 +2357,6 @@
           clearInterval(id);
         };
       }, []);
-
-      useEffect(() => {
-        if (!focused || !activeSessionID) return;
-        let cancelled = false;
-        const load = async () => {
-          setLoadingBySession(current => ({ ...current, [activeSessionID]: true }));
-          setErrorsBySession(current => ({ ...current, [activeSessionID]: '' }));
-          try {
-            const [objectiveResp, tasksResp, eventsResp] = await Promise.all([
-              fetch(`/api/v1/agents/${encodeURIComponent(focused.id)}/objective`),
-              fetch(`/api/v1/tasks?from=${encodeURIComponent(focused.name)}`),
-              fetch(`/api/v1/delegation-timeline?session_id=${encodeURIComponent(activeSessionID)}`),
-            ]);
-            if (cancelled) return;
-            let nextObjective = fallbackObjective;
-            if (objectiveResp.status === 204) {
-              nextObjective = fallbackObjective;
-            } else if (objectiveResp.ok) {
-              const objectiveData = await objectiveResp.json();
-              nextObjective = String(objectiveData && objectiveData.objective || fallbackObjective).trim();
-            } else {
-              throw new Error(`objective request failed: ${objectiveResp.status}`);
-            }
-            if (!tasksResp.ok) throw new Error(`tasks request failed: ${tasksResp.status}`);
-            if (!eventsResp.ok) throw new Error(`timeline request failed: ${eventsResp.status}`);
-            const [tasksData, eventsData] = await Promise.all([tasksResp.json(), eventsResp.json()]);
-            if (cancelled) return;
-            setObjectiveBySession(current => ({ ...current, [activeSessionID]: nextObjective }));
-            setTasksBySession(current => ({ ...current, [activeSessionID]: Array.isArray(tasksData) ? tasksData : [] }));
-            setEventsBySession(current => ({ ...current, [activeSessionID]: asArrayPayload(eventsData, 'events') }));
-          } catch (error) {
-            if (cancelled) return;
-            setErrorsBySession(current => ({ ...current, [activeSessionID]: error.message || 'failed to load architect session' }));
-          } finally {
-            if (!cancelled) setLoadingBySession(current => ({ ...current, [activeSessionID]: false }));
-          }
-        };
-        load();
-        const id = setInterval(load, 5000);
-        return () => {
-          cancelled = true;
-          clearInterval(id);
-        };
-      }, [focused, activeSessionID, fallbackObjective]);
 
       useEffect(() => {
         if (!activeSessionID) return;
@@ -2459,10 +2403,6 @@
               </div>
               {!activeSessionID ? (
                 <div className="px-3 py-3 text-[11px] text-zinc-600">This surface activates when delegation activity establishes a current objective.</div>
-              ) : activeLoading ? (
-                <div className="px-3 py-3 text-[11px] text-zinc-600">Loading objective graph...</div>
-              ) : activeError ? (
-                <div className="px-3 py-3 text-[11px] text-red-300">{activeError}</div>
               ) : sessionTasks.length === 0 ? (
                 <div className="px-3 py-3 text-[11px] text-zinc-600">No delegated tasks found for this session yet.</div>
               ) : (
@@ -2565,7 +2505,7 @@
                   <div className="p-4 space-y-4">
                     <div className="rounded border border-zinc-800 bg-zinc-900/40 p-4">
                       <div className="text-[10px] uppercase text-zinc-500">Objective</div>
-                      <div className="mt-2 text-sm text-zinc-200 leading-relaxed">{activeObjective || fallbackObjective || 'No objective available.'}</div>
+                      <div className="mt-2 text-sm text-zinc-200 leading-relaxed">{activeObjective || 'No objective available.'}</div>
                     </div>
                     <div className="rounded border border-zinc-800 bg-zinc-900/30 p-4">
                       <div className="text-[10px] uppercase text-zinc-500 mb-3">Coordination narrative</div>

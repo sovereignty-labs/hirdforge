@@ -15,6 +15,7 @@ type Task struct {
 	ID        string    `json:"id"`
 	Agent     string    `json:"agent"`
 	From      string    `json:"from"`
+	SessionID string    `json:"session_id"`
 	Content   string    `json:"content"`
 	Status    string    `json:"status"`
 	Result    string    `json:"result"`
