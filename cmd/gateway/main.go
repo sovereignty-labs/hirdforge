@@ -2110,6 +2110,34 @@ func writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, limit int
 	}
 }
 
+func extractFileFromUnifiedDiff(rawDiff string, filename string) string {
+	target := strings.TrimSpace(filename)
+	if target == "" || rawDiff == "" {
+		return ""
+	}
+	lines := strings.Split(rawDiff, "\n")
+	sectionStart := -1
+	sectionPath := ""
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "diff --git ") {
+			continue
+		}
+		if sectionStart >= 0 && sectionPath == target {
+			return strings.Join(lines[sectionStart:i], "\n")
+		}
+		sectionStart = i
+		sectionPath = ""
+		parts := strings.Fields(line)
+		if len(parts) >= 4 {
+			sectionPath = strings.TrimPrefix(parts[3], "b/")
+		}
+	}
+	if sectionStart >= 0 && sectionPath == target {
+		return strings.Join(lines[sectionStart:], "\n")
+	}
+	return ""
+}
+
 func registerGiteaPRRoutes(mux *http.ServeMux, gw *gateway, giteaClient *http.Client) {
 	mux.HandleFunc("/api/v1/gitea/prs/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodGet {
@@ -2201,13 +2229,35 @@ func registerGiteaPRRoutes(mux *http.ServeMux, gw *gateway, giteaClient *http.Cl
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Gitea files response"})
 				return
 			}
+			var matchedFile map[string]interface{}
 			for _, file := range files {
 				if asString(file["filename"]) == targetFile {
-					writeJSON(w, http.StatusOK, file)
-					return
+					matchedFile = file
+					break
 				}
 			}
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found in pull request"})
+			if matchedFile == nil {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found in pull request"})
+				return
+			}
+			diffPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s.diff", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			diffResp, diffReqErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, diffPath, nil)
+			if diffReqErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			diffBody, _ := io.ReadAll(io.LimitReader(diffResp.Body, 8<<20))
+			diffResp.Body.Close()
+			if diffResp.StatusCode < 200 || diffResp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(diffBody))})
+				return
+			}
+			out := make(map[string]interface{}, len(matchedFile)+1)
+			for k, v := range matchedFile {
+				out[k] = v
+			}
+			out["patch"] = extractFileFromUnifiedDiff(string(diffBody), targetFile)
+			writeJSON(w, http.StatusOK, out)
 			return
 		case "comments":
 			if r.Method != http.MethodGet {

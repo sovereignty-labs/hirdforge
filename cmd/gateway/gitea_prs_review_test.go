@@ -22,7 +22,7 @@ func newGiteaPRTestMux(t *testing.T, upstream http.HandlerFunc) (*http.ServeMux,
 }
 
 func TestGiteaPRFilesReturnsUpstreamJSON(t *testing.T) {
-	const body = `[{"filename":"cmd/gateway/main.go","status":"modified","additions":10,"deletions":2,"patch":"@@ -1 +1 @@"}]`
+	const body = `[{"filename":"cmd/gateway/main.go","status":"modified","additions":10,"deletions":2}]`
 	mux, cleanup := newGiteaPRTestMux(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("method=%s want GET", r.Method)
@@ -100,8 +100,11 @@ func TestGiteaPRDiffMissingOrEmptyFileParam(t *testing.T) {
 
 func TestGiteaPRDiffUnknownFileReturns404(t *testing.T) {
 	mux, cleanup := newGiteaPRTestMux(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/repos/kit/hirdforge/pulls/7/files" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"filename":"README.md","patch":"..."},{"filename":"cmd/gateway/main.go","patch":"..."}]`))
+		_, _ = w.Write([]byte(`[{"filename":"README.md","status":"modified","additions":1,"deletions":0},{"filename":"cmd/gateway/main.go","status":"modified","additions":4,"deletions":1}]`))
 	})
 	defer cleanup()
 
@@ -118,9 +121,33 @@ func TestGiteaPRDiffUnknownFileReturns404(t *testing.T) {
 }
 
 func TestGiteaPRDiffReturnsMatchingEntry(t *testing.T) {
+	const rawDiff = `diff --git a/README.md b/README.md
+index 1111111..2222222 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+diff --git a/cmd/gateway/main.go b/cmd/gateway/main.go
+index 3333333..4444444 100644
+--- a/cmd/gateway/main.go
++++ b/cmd/gateway/main.go
+@@ -10,2 +10,3 @@ func example() {
+-before
++after
++extra
+ }`
 	mux, cleanup := newGiteaPRTestMux(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"filename":"README.md","patch":"..."},{"filename":"cmd/gateway/main.go","status":"modified","additions":4,"deletions":1,"patch":"@@ -1 +1 @@"}]`))
+		switch r.URL.Path {
+		case "/api/v1/repos/kit/hirdforge/pulls/7/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"filename":"README.md","status":"modified","additions":1,"deletions":1},{"filename":"cmd/gateway/main.go","status":"modified","additions":4,"deletions":1}]`))
+		case "/api/v1/repos/kit/hirdforge/pulls/7.diff":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(rawDiff))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
 	})
 	defer cleanup()
 
@@ -137,6 +164,141 @@ func TestGiteaPRDiffReturnsMatchingEntry(t *testing.T) {
 	}
 	if out["filename"] != "cmd/gateway/main.go" {
 		t.Fatalf("filename=%#v", out["filename"])
+	}
+	if out["status"] != "modified" {
+		t.Fatalf("status=%#v", out["status"])
+	}
+	if out["additions"] != float64(4) {
+		t.Fatalf("additions=%#v", out["additions"])
+	}
+	patch := strings.TrimSpace(asString(out["patch"]))
+	if !strings.Contains(patch, "diff --git a/cmd/gateway/main.go b/cmd/gateway/main.go") {
+		t.Fatalf("patch=%q", patch)
+	}
+	if strings.Contains(patch, "diff --git a/README.md b/README.md") {
+		t.Fatalf("patch bled other file: %q", patch)
+	}
+}
+
+func TestGiteaPRDiffParsesMultiFileDiff(t *testing.T) {
+	const rawDiff = `diff --git a/a.txt b/a.txt
+index 1111111..2222222 100644
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-a
++b
+diff --git a/subdir/target.txt b/subdir/target.txt
+index 3333333..4444444 100644
+--- a/subdir/target.txt
++++ b/subdir/target.txt
+@@ -2 +2 @@
+-before
++after
+diff --git a/z.txt b/z.txt
+index 5555555..6666666 100644
+--- a/z.txt
++++ b/z.txt
+@@ -1 +1 @@
+-x
++y`
+	mux, cleanup := newGiteaPRTestMux(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/kit/hirdforge/pulls/7/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"filename":"a.txt","status":"modified","additions":1,"deletions":1},{"filename":"subdir/target.txt","status":"modified","additions":1,"deletions":1},{"filename":"z.txt","status":"modified","additions":1,"deletions":1}]`))
+		case "/api/v1/repos/kit/hirdforge/pulls/7.diff":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(rawDiff))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	})
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gitea/prs/kit/hirdforge/7/diff?file=subdir%2Ftarget.txt", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	patch := strings.TrimSpace(asString(out["patch"]))
+	if !strings.Contains(patch, "diff --git a/subdir/target.txt b/subdir/target.txt") {
+		t.Fatalf("patch=%q", patch)
+	}
+	if strings.Contains(patch, "diff --git a/a.txt b/a.txt") || strings.Contains(patch, "diff --git a/z.txt b/z.txt") {
+		t.Fatalf("patch bled other sections: %q", patch)
+	}
+}
+
+func TestGiteaPRDiffBinaryFile(t *testing.T) {
+	const rawDiff = `diff --git a/assets/logo.png b/assets/logo.png
+new file mode 100644
+index 0000000..1234567
+Binary files /dev/null and b/assets/logo.png differ`
+	mux, cleanup := newGiteaPRTestMux(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/kit/hirdforge/pulls/7/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"filename":"assets/logo.png","status":"added","additions":0,"deletions":0}]`))
+		case "/api/v1/repos/kit/hirdforge/pulls/7.diff":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(rawDiff))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	})
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gitea/prs/kit/hirdforge/7/diff?file=assets%2Flogo.png", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out["status"] != "added" {
+		t.Fatalf("status=%#v", out["status"])
+	}
+	patch := strings.TrimSpace(asString(out["patch"]))
+	if !strings.Contains(patch, "Binary files /dev/null and b/assets/logo.png differ") {
+		t.Fatalf("patch=%q", patch)
+	}
+}
+
+func TestGiteaPRDiffRawDiffUpstreamError(t *testing.T) {
+	mux, cleanup := newGiteaPRTestMux(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/repos/kit/hirdforge/pulls/7/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"filename":"cmd/gateway/main.go","status":"modified","additions":4,"deletions":1}]`))
+		case "/api/v1/repos/kit/hirdforge/pulls/7.diff":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("diff endpoint failed"))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	})
+	defer cleanup()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/gitea/prs/kit/hirdforge/7/diff?file=cmd%2Fgateway%2Fmain.go", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "diff endpoint failed") {
+		t.Fatalf("body=%s", rec.Body.String())
 	}
 }
 
