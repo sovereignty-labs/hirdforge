@@ -3,6 +3,29 @@
 ## Project Overview
 This repo contains Valhalla source code: Go binaries for agent, gateway, and lockbox; Python source for Seidr; Dockerfiles for each service; and the Gitea CI workflow that builds and publishes images.
 
+## UI 1.0 Status (12-phase plan)
+Phase 11 (**Architect surface**) shipped in PR #173. UI 1.0 is now **11/12** phases complete.
+
+### Phase checklist
+- [x] Phase 0 — Snapshot
+- [x] Phase 0.5 — Obliterate Temporal (Asgard scope only)
+- [x] Phase 1 — Shell at /ui/
+- [x] Phase 2 — Comms (Left Half)
+- [x] Phase 3 — Active Strip + Context Bar + Idle Surface
+- [x] Phase 4 — Settings Menu + Realm Tab
+- [x] Phase 5 — Backend: Typed Tool Events + Workspace Projector
+- [x] Phase 6 — Builder Surface
+- [x] Phase 7 — Backend: Lockbox Trigger Context + Plan Structure + Revise Endpoint
+- [x] Phase 8 — Action Surface
+- [x] Phase 9 — Backend: PR Review Endpoints
+- [x] Phase 10 — Reviewer Surface
+- [x] Phase 11 — Architect Surface (PR #173)
+- [ ] **Phase 12 — Cutover (NEXT)**
+
+### Next milestone: Phase 12 — Cutover
+- Make new UI the default (`/` redirects to `/ui/` or serves the new bundle at `/`).
+- Remove legacy UI from `cmd/gateway/index.html` (snapshot remains on `legacy-ui-snapshot`).
+
 ## Directory Structure
 - `cmd/agent/` — agent binary entrypoint and tool wiring
 - `cmd/gateway/` — gateway binary entrypoint, routes, and embedded UI
