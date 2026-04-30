@@ -2092,6 +2092,282 @@ func approvalAgentName(item approvalQueueItem) string {
 	return "unknown"
 }
 
+func writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, limit int64) {
+	if resp == nil {
+		return
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
+	for k, vv := range resp.Header {
+		if strings.EqualFold(k, "Content-Type") && len(vv) > 0 {
+			w.Header().Set("Content-Type", vv[0])
+			break
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if len(respBody) > 0 {
+		_, _ = w.Write(respBody)
+	}
+}
+
+func registerGiteaPRRoutes(mux *http.ServeMux, gw *gateway, giteaClient *http.Client) {
+	mux.HandleFunc("/api/v1/gitea/prs/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost && r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if strings.TrimSpace(gw.giteaURL) == "" {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/api/v1/gitea/prs/")
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		if len(parts) != 4 {
+			http.NotFound(w, r)
+			return
+		}
+		owner, repo, idxRaw, action := parts[0], parts[1], parts[2], parts[3]
+		if owner == "" || repo == "" || idxRaw == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := strconv.Atoi(idxRaw); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		var (
+			resp *http.Response
+			err  error
+		)
+		switch action {
+		case "merge":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			body, _ := json.Marshal(map[string]string{
+				"Do":                  "merge",
+				"merge_message_field": "Merged via Hirdforge UI",
+			})
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/merge", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodPost, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
+		case "close":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			body, _ := json.Marshal(map[string]string{"state": "closed"})
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodPatch, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
+		case "approve":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			body, _ := json.Marshal(map[string]string{"event": "APPROVED", "body": "Approved via Hirdforge UI"})
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/reviews", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodPost, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
+		case "files":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/files", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, uPath, nil)
+		case "diff":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			targetFile := strings.TrimSpace(r.URL.Query().Get("file"))
+			if targetFile == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file query parameter is required"})
+				return
+			}
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/files", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			filesResp, reqErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, uPath, nil)
+			if reqErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			filesBody, _ := io.ReadAll(io.LimitReader(filesResp.Body, 2<<20))
+			filesResp.Body.Close()
+			if filesResp.StatusCode < 200 || filesResp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(filesBody))})
+				return
+			}
+			var files []map[string]interface{}
+			if err := json.Unmarshal(filesBody, &files); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Gitea files response"})
+				return
+			}
+			for _, file := range files {
+				if asString(file["filename"]) == targetFile {
+					writeJSON(w, http.StatusOK, file)
+					return
+				}
+			}
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found in pull request"})
+			return
+		case "comments":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			reviewsPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/reviews", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			reviewsResp, reqErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, reviewsPath, nil)
+			if reqErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			reviewsBody, _ := io.ReadAll(io.LimitReader(reviewsResp.Body, 2<<20))
+			reviewsResp.Body.Close()
+			if reviewsResp.StatusCode < 200 || reviewsResp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(reviewsBody))})
+				return
+			}
+			var reviews []map[string]interface{}
+			if err := json.Unmarshal(reviewsBody, &reviews); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Gitea reviews response"})
+				return
+			}
+			comments := make([]map[string]interface{}, 0)
+			for _, review := range reviews {
+				reviewID := asInt64(review["id"])
+				if reviewID <= 0 {
+					continue
+				}
+				commentsPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/reviews/%d/comments", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw), reviewID)
+				commentsResp, commentsErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, commentsPath, nil)
+				if commentsErr != nil {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+					return
+				}
+				commentBody, _ := io.ReadAll(io.LimitReader(commentsResp.Body, 2<<20))
+				commentsResp.Body.Close()
+				if commentsResp.StatusCode < 200 || commentsResp.StatusCode >= 300 {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(commentBody))})
+					return
+				}
+				var reviewComments []map[string]interface{}
+				if err := json.Unmarshal(commentBody, &reviewComments); err != nil {
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Gitea review comments response"})
+					return
+				}
+				for _, comment := range reviewComments {
+					comments = append(comments, map[string]interface{}{
+						"path":       asString(comment["path"]),
+						"line":       asInt64(comment["line"]),
+						"body":       asString(comment["body"]),
+						"user":       asMap(comment["user"]),
+						"created_at": asString(comment["created_at"]),
+						"review_id":  reviewID,
+					})
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"comments": comments})
+			return
+		case "review":
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			body, readErr := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+			if readErr != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid review body"})
+				return
+			}
+			var payload map[string]interface{}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+				return
+			}
+			event := strings.ToUpper(strings.TrimSpace(asString(payload["event"])))
+			if event != "APPROVED" && event != "REQUEST_CHANGES" && event != "COMMENT" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "event must be one of APPROVED, REQUEST_CHANGES, COMMENT"})
+				return
+			}
+			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/reviews", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			resp, err = giteaRequest(giteaClient, http.MethodPost, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
+		case "status":
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			prPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
+			prResp, prErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, prPath, nil)
+			if prErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			prBody, _ := io.ReadAll(io.LimitReader(prResp.Body, 2<<20))
+			prResp.Body.Close()
+			if prResp.StatusCode < 200 || prResp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(prBody))})
+				return
+			}
+			var pr map[string]interface{}
+			if err := json.Unmarshal(prBody, &pr); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Gitea PR response"})
+				return
+			}
+			headSHA := asString(asMap(pr["head"])["sha"])
+			if strings.TrimSpace(headSHA) == "" {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "unknown"})
+				return
+			}
+			statusPath := fmt.Sprintf("/api/v1/repos/%s/%s/commits/%s/status", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(headSHA))
+			statusResp, statusErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, statusPath, nil)
+			if statusErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+				return
+			}
+			statusBody, _ := io.ReadAll(io.LimitReader(statusResp.Body, 2<<20))
+			statusResp.Body.Close()
+			if statusResp.StatusCode < 200 || statusResp.StatusCode >= 300 {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(statusBody))})
+				return
+			}
+			var statusPayload map[string]interface{}
+			if err := json.Unmarshal(statusBody, &statusPayload); err != nil {
+				writeJSON(w, http.StatusOK, map[string]string{"status": "unknown"})
+				return
+			}
+			overall := strings.TrimSpace(asString(statusPayload["state"]))
+			if overall == "" {
+				overall = "unknown"
+			}
+			result := map[string]string{"status": overall}
+			statuses := asSlice(statusPayload["statuses"])
+			if len(statuses) > 0 {
+				first := asMap(statuses[0])
+				if workflow := strings.TrimSpace(asString(first["context"])); workflow != "" {
+					result["workflow"] = workflow
+				}
+				started := strings.TrimSpace(asString(first["created_at"]))
+				finished := strings.TrimSpace(asString(first["updated_at"]))
+				if started != "" && finished != "" {
+					if startTime, err := time.Parse(time.RFC3339, started); err == nil {
+						if endTime, err := time.Parse(time.RFC3339, finished); err == nil && !endTime.Before(startTime) {
+							result["duration"] = endTime.Sub(startTime).String()
+						}
+					}
+				}
+			}
+			writeJSON(w, http.StatusOK, result)
+			return
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
+			return
+		}
+		writeUpstreamResponse(w, resp, 2<<20)
+	})
+}
+
 func resolveApprovalHuntID(ctx context.Context, lockboxURL, queueID string) (string, error) {
 	base := strings.TrimSpace(lockboxURL)
 	if base == "" {
@@ -3549,150 +3825,7 @@ func main() {
 		sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 		writeJSON(w, http.StatusOK, out)
 	})
-	mux.HandleFunc("/api/v1/gitea/prs/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost && r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if strings.TrimSpace(gw.giteaURL) == "" {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
-			return
-		}
-		path := strings.TrimPrefix(r.URL.Path, "/api/v1/gitea/prs/")
-		parts := strings.Split(strings.Trim(path, "/"), "/")
-		if len(parts) != 4 {
-			http.NotFound(w, r)
-			return
-		}
-		owner, repo, idxRaw, action := parts[0], parts[1], parts[2], parts[3]
-		if owner == "" || repo == "" || idxRaw == "" {
-			http.NotFound(w, r)
-			return
-		}
-		if _, err := strconv.Atoi(idxRaw); err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		var (
-			resp *http.Response
-			err  error
-		)
-		switch action {
-		case "merge":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			body, _ := json.Marshal(map[string]string{
-				"Do":                  "merge",
-				"merge_message_field": "Merged via Hirdforge UI",
-			})
-			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/merge", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
-			resp, err = giteaRequest(giteaClient, http.MethodPost, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
-		case "close":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			body, _ := json.Marshal(map[string]string{"state": "closed"})
-			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
-			resp, err = giteaRequest(giteaClient, http.MethodPatch, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
-		case "approve":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			body, _ := json.Marshal(map[string]string{"event": "APPROVED", "body": "Approved via Hirdforge UI"})
-			uPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s/reviews", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
-			resp, err = giteaRequest(giteaClient, http.MethodPost, gw.giteaURL, gw.giteaToken, uPath, bytes.NewReader(body))
-		case "status":
-			if r.Method != http.MethodGet {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			prPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%s", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(idxRaw))
-			prResp, prErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, prPath, nil)
-			if prErr != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
-				return
-			}
-			prBody, _ := io.ReadAll(io.LimitReader(prResp.Body, 2<<20))
-			prResp.Body.Close()
-			if prResp.StatusCode < 200 || prResp.StatusCode >= 300 {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(prBody))})
-				return
-			}
-			var pr map[string]interface{}
-			if err := json.Unmarshal(prBody, &pr); err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "invalid Gitea PR response"})
-				return
-			}
-			headSHA := asString(asMap(pr["head"])["sha"])
-			if strings.TrimSpace(headSHA) == "" {
-				writeJSON(w, http.StatusOK, map[string]string{"status": "unknown"})
-				return
-			}
-			statusPath := fmt.Sprintf("/api/v1/repos/%s/%s/commits/%s/status", url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(headSHA))
-			statusResp, statusErr := giteaRequest(giteaClient, http.MethodGet, gw.giteaURL, gw.giteaToken, statusPath, nil)
-			if statusErr != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
-				return
-			}
-			statusBody, _ := io.ReadAll(io.LimitReader(statusResp.Body, 2<<20))
-			statusResp.Body.Close()
-			if statusResp.StatusCode < 200 || statusResp.StatusCode >= 300 {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(statusBody))})
-				return
-			}
-			var statusPayload map[string]interface{}
-			if err := json.Unmarshal(statusBody, &statusPayload); err != nil {
-				writeJSON(w, http.StatusOK, map[string]string{"status": "unknown"})
-				return
-			}
-			overall := strings.TrimSpace(asString(statusPayload["state"]))
-			if overall == "" {
-				overall = "unknown"
-			}
-			result := map[string]string{"status": overall}
-			statuses := asSlice(statusPayload["statuses"])
-			if len(statuses) > 0 {
-				first := asMap(statuses[0])
-				if workflow := strings.TrimSpace(asString(first["context"])); workflow != "" {
-					result["workflow"] = workflow
-				}
-				started := strings.TrimSpace(asString(first["created_at"]))
-				finished := strings.TrimSpace(asString(first["updated_at"]))
-				if started != "" && finished != "" {
-					if startTime, err := time.Parse(time.RFC3339, started); err == nil {
-						if endTime, err := time.Parse(time.RFC3339, finished); err == nil && !endTime.Before(startTime) {
-							result["duration"] = endTime.Sub(startTime).String()
-						}
-					}
-				}
-			}
-			writeJSON(w, http.StatusOK, result)
-			return
-		default:
-			http.NotFound(w, r)
-			return
-		}
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
-			return
-		}
-		defer resp.Body.Close()
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		for k, vv := range resp.Header {
-			if strings.EqualFold(k, "Content-Type") && len(vv) > 0 {
-				w.Header().Set("Content-Type", vv[0])
-				break
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		if len(respBody) > 0 {
-			_, _ = w.Write(respBody)
-		}
-	})
+	registerGiteaPRRoutes(mux, gw, giteaClient)
 	mux.HandleFunc("/api/v1/seidr/memories", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
