@@ -89,28 +89,38 @@ type PlanStepCompleteEvent struct {
 	Step int    `json:"step"`
 }
 
+type DelegateEvent struct {
+	Type             string `json:"type"`
+	FromAgent        string `json:"from_agent"`
+	ToAgent          string `json:"to_agent"`
+	SessionID        string `json:"session_id"`
+	ObjectiveSummary string `json:"objective_summary"`
+	TargetRepo       string `json:"target_repo"`
+}
+
 type ToolEventContext struct {
 	GitBranchFrom string
 	GitBranchNew  string
+	AgentName     string
 }
 
 func CaptureTypedToolEventContext(toolName string, args map[string]interface{}, workDir, agentName string) ToolEventContext {
+	ctx := ToolEventContext{AgentName: strings.TrimSpace(agentName)}
 	if toolName != "git-commit" {
-		return ToolEventContext{}
+		return ctx
 	}
 	repo := stringArg(args, "repo")
 	branch := stringArg(args, "branch")
 	if repo == "" {
-		return ToolEventContext{}
+		return ctx
 	}
 	repoDir := filepath.Join(workDir, repo)
-	return ToolEventContext{
-		GitBranchFrom: currentGitBranch(repoDir),
-		GitBranchNew:  formatNewBranchName(agentName, branch),
-	}
+	ctx.GitBranchFrom = currentGitBranch(repoDir)
+	ctx.GitBranchNew = formatNewBranchName(agentName, branch)
+	return ctx
 }
 
-func TypedToolStartEvents(toolName string, args map[string]interface{}, workDir string) []interface{} {
+func TypedToolStartEvents(toolName string, args map[string]interface{}, workDir string, ctx ToolEventContext) []interface{} {
 	switch toolName {
 	case "write", "edit":
 		path := stringArg(args, "path")
@@ -145,6 +155,20 @@ func TypedToolStartEvents(toolName string, args map[string]interface{}, workDir 
 		return []interface{}{PlanStepCompleteEvent{
 			Type: "plan_step_complete",
 			Step: step,
+		}}
+	case "delegate":
+		toAgent := stringArg(args, "agent")
+		task := stringArg(args, "task")
+		if toAgent == "" || task == "" {
+			return nil
+		}
+		return []interface{}{DelegateEvent{
+			Type:             "delegate",
+			FromAgent:        ctx.AgentName,
+			ToAgent:          toAgent,
+			SessionID:        stringArg(args, "_task_id"),
+			ObjectiveSummary: summarizeDelegateObjective(task),
+			TargetRepo:       extractRepoRef(task),
 		}}
 	default:
 		return nil
@@ -432,4 +456,37 @@ func parseHTTPStatusCode(output string) int {
 	}
 	n, _ := strconv.Atoi(match[1])
 	return n
+}
+
+func summarizeDelegateObjective(task string) string {
+	text := strings.TrimSpace(task)
+	if text == "" {
+		return ""
+	}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "TASK:"))
+		line = strings.TrimSpace(strings.TrimPrefix(line, "Task:"))
+		if line == "" {
+			continue
+		}
+		if len(line) > 140 {
+			return line[:140] + "..."
+		}
+		return line
+	}
+	return ""
+}
+
+var repoRefRE = regexp.MustCompile(`\b([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b`)
+
+func extractRepoRef(task string) string {
+	match := repoRefRE.FindStringSubmatch(task)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
 }

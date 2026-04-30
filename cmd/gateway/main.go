@@ -286,8 +286,9 @@ type dispatchReq struct {
 }
 
 type taskSendRequest struct {
-	Content string `json:"content"`
-	From    string `json:"from"`
+	Content   string `json:"content"`
+	From      string `json:"from"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type dispatchResp struct {
@@ -422,6 +423,9 @@ func (s *settingsStore) GetString(key, fallback string) string {
 var (
 	taskCompleteRE = regexp.MustCompile(`^completed task (task-[a-f0-9]+) \(from ([^)]+)\):\s*(.*)$`)
 	taskFailedRE   = regexp.MustCompile(`^failed task (task-[a-f0-9]+) \(from ([^)]+)\):\s*(.*)$`)
+	taskPRURLRE    = regexp.MustCompile(`/pulls/(\d+)\b`)
+	taskPRRefRE    = regexp.MustCompile(`\bPR\s*#(\d+)\b`)
+	taskPullRefRE  = regexp.MustCompile(`\bpull request\s*#?(\d+)\b`)
 )
 
 type wsClient struct {
@@ -511,6 +515,18 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 		return
 	}
 	g.projector.Apply(agentName, eventType, evt)
+	if eventType == "delegate" {
+		sessionID := strings.TrimSpace(asString(evt["session_id"]))
+		if sessionID != "" {
+			objective := strings.TrimSpace(asString(evt["objective_summary"]))
+			if sess, ok := g.sessionStore.get(sessionID); ok {
+				if derived := objectiveFromSession(sess); derived != "" {
+					objective = derived
+				}
+			}
+			g.projector.SetArchitectContext(agentName, sessionID, objective)
+		}
+	}
 	now := time.Now().Format(time.RFC3339)
 	typed := make(map[string]interface{}, len(evt)+2)
 	for k, v := range evt {
@@ -518,12 +534,24 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 	}
 	typed["agent"] = agentName
 	typed["timestamp"] = now
+	if sessionID := strings.TrimSpace(asString(evt["session_id"])); sessionID != "" {
+		g.addDelegationTimelineEvent(sessionID, delegationTimelineEvent{
+			Type:      eventType,
+			Agent:     agentName,
+			Metadata:  typed,
+			Timestamp: now,
+		})
+	}
 	g.broadcastPayload(typed)
+	workspace := g.projector.Get(agentName)
+	if eventType == "delegate" {
+		workspace = g.refreshArchitectWorkspace(agentName)
+	}
 	g.broadcastPayload(map[string]interface{}{
 		"type":      "workspace_update",
 		"agent":     agentName,
 		"timestamp": now,
-		"workspace": g.projector.Get(agentName),
+		"workspace": workspace,
 	})
 }
 
@@ -770,6 +798,175 @@ func (g *gateway) delegationTimeline(sessionID string) []delegationTimelineEvent
 	out := make([]delegationTimelineEvent, len(events))
 	copy(out, events)
 	return out
+}
+
+func collectGatewayTaskText(task taskspkg.Task) string {
+	parts := []string{task.Content, task.Result}
+	for _, tool := range task.Tools {
+		parts = append(parts, tool.Input, tool.Output)
+	}
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.TrimSpace(part) != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	return strings.Join(filtered, "\n")
+}
+
+func gatewayTaskPRNumber(task taskspkg.Task) int {
+	raw := collectGatewayTaskText(task)
+	if match := taskPRURLRE.FindStringSubmatch(raw); len(match) == 2 {
+		n, _ := strconv.Atoi(match[1])
+		return n
+	}
+	if match := taskPRRefRE.FindStringSubmatch(raw); len(match) == 2 {
+		n, _ := strconv.Atoi(match[1])
+		return n
+	}
+	if match := taskPullRefRE.FindStringSubmatch(raw); len(match) == 2 {
+		n, _ := strconv.Atoi(match[1])
+		return n
+	}
+	return 0
+}
+
+func workspaceTaskRef(task taskspkg.Task) workspacepkg.TaskRef {
+	return workspacepkg.TaskRef{
+		ID:        task.ID,
+		Agent:     task.Agent,
+		Status:    task.Status,
+		Content:   task.Content,
+		SessionID: task.SessionID,
+		PRNumber:  gatewayTaskPRNumber(task),
+		CreatedAt: task.CreatedAt,
+		UpdatedAt: task.UpdatedAt,
+	}
+}
+
+func workspaceTimelineEvents(events []delegationTimelineEvent) []workspacepkg.TimelineEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]workspacepkg.TimelineEvent, 0, len(events))
+	for _, evt := range events {
+		metadata := map[string]interface{}{}
+		for k, v := range evt.Metadata {
+			metadata[k] = v
+		}
+		out = append(out, workspacepkg.TimelineEvent{
+			Type:      evt.Type,
+			Agent:     evt.Agent,
+			Metadata:  metadata,
+			Timestamp: evt.Timestamp,
+		})
+	}
+	return out
+}
+
+func (g *gateway) fetchTasks(ctx context.Context, status, from, agentFilter string) []taskspkg.Task {
+	if g == nil {
+		return nil
+	}
+	client := &http.Client{Timeout: agentRequestTimeout}
+	agentsToQuery := g.snapshotAgents()
+	tasksOut := make([]taskspkg.Task, 0)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, a := range agentsToQuery {
+		if agentFilter != "" && a.Name != agentFilter {
+			continue
+		}
+		wg.Add(1)
+		go func(agent Agent) {
+			defer wg.Done()
+			u := strings.TrimRight(agent.URL, "/") + "/tasks"
+			params := url.Values{}
+			if status != "" {
+				params.Set("status", status)
+			}
+			if agentFilter != "" {
+				params.Set("agent", agentFilter)
+			}
+			if q := params.Encode(); q != "" {
+				u += "?" + q
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+			if err != nil {
+				return
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return
+			}
+			var tasks []taskspkg.Task
+			if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+				return
+			}
+			if from != "" {
+				filtered := tasks[:0]
+				for _, t := range tasks {
+					if t.From == from {
+						filtered = append(filtered, t)
+					}
+				}
+				tasks = filtered
+			}
+			mu.Lock()
+			tasksOut = append(tasksOut, tasks...)
+			mu.Unlock()
+		}(a)
+	}
+	wg.Wait()
+	sort.Slice(tasksOut, func(i, j int) bool { return tasksOut[i].CreatedAt.After(tasksOut[j].CreatedAt) })
+	return tasksOut
+}
+
+func (g *gateway) refreshArchitectWorkspace(agentName string) workspacepkg.AgentWorkspace {
+	if g == nil || g.projector == nil {
+		return workspacepkg.AgentWorkspace{AgentName: agentName, FilesTouched: map[string]workspacepkg.FileState{}}
+	}
+	ws := g.projector.Get(agentName)
+	sessionID := strings.TrimSpace(ws.CurrentSessionID)
+	if sessionID == "" {
+		return g.projector.SetArchitectSessionData(agentName, "", nil, nil)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tasks := g.fetchTasks(ctx, "", agentName, "")
+	refs := make([]workspacepkg.TaskRef, 0, len(tasks))
+	for _, task := range tasks {
+		if strings.TrimSpace(task.SessionID) != sessionID {
+			continue
+		}
+		refs = append(refs, workspaceTaskRef(task))
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].CreatedAt.Before(refs[j].CreatedAt) })
+	return g.projector.SetArchitectSessionData(agentName, sessionID, refs, workspaceTimelineEvents(g.delegationTimeline(sessionID)))
+}
+
+func (g *gateway) refreshArchitectWorkspacesBySession(sessionID string) {
+	if g == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	now := time.Now().Format(time.RFC3339)
+	for _, agent := range g.snapshotAgents() {
+		ws := g.projector.Get(agent.Name)
+		if strings.TrimSpace(ws.CurrentSessionID) != sessionID {
+			continue
+		}
+		updated := g.refreshArchitectWorkspace(agent.Name)
+		g.broadcastPayload(map[string]interface{}{
+			"type":      "workspace_update",
+			"agent":     agent.Name,
+			"timestamp": now,
+			"workspace": updated,
+		})
+	}
 }
 
 func (g *gateway) snapshotAgents() []Agent {
@@ -2753,6 +2950,37 @@ func main() {
 	mux.HandleFunc("/api/v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/api/v1/agents/")
 		switch {
+		case strings.HasSuffix(path, "/objective"):
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/objective")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown agent"})
+				return
+			}
+			sessionID := gw.activeSessionID(name)
+			if sessionID == "" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			sess, ok := gw.sessionStore.get(sessionID)
+			if !ok {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			objective := objectiveFromSession(sess)
+			if objective == "" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"objective": objective})
 		case strings.HasSuffix(path, "/workspace"):
 			if r.Method != http.MethodGet {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -3145,7 +3373,15 @@ func main() {
 						pr = &workspacepkg.PRRef{Owner: owner, Repo: repo, Index: index}
 					}
 				}
+				sessionID := asString(meta["current_session_id"])
+				objective := asString(meta["current_objective"])
+				if sessionID != "" || objective != "" {
+					gw.projector.SetArchitectContext(in.Agent, sessionID, objective)
+				}
 				ws := gw.projector.SetReviewContext(in.Agent, pr, asString(meta["current_review_file"]))
+				if sessionID != "" || objective != "" {
+					ws = gw.refreshArchitectWorkspace(in.Agent)
+				}
 				now := time.Now().Format(time.RFC3339)
 				gw.broadcastPayload(map[string]interface{}{
 					"type":      "workspace_update",
@@ -3171,6 +3407,7 @@ func main() {
 				// Broadcast the typed event over WebSocket so subscribed clients
 				// receive the full event payload (not just the legacy flat Event).
 				gw.broadcastPayload(evt)
+				gw.refreshArchitectWorkspacesBySession(sessionID)
 			}
 
 			// Delegation visibility: track target agent as active in fleet_state
@@ -4140,61 +4377,7 @@ func main() {
 		status := strings.TrimSpace(r.URL.Query().Get("status"))
 		from := strings.TrimSpace(r.URL.Query().Get("from"))
 		agentFilter := strings.TrimSpace(r.URL.Query().Get("agent"))
-		agentsToQuery := gw.snapshotAgents()
-		tasksOut := make([]taskspkg.Task, 0)
-		var mu sync.Mutex
-		var wg sync.WaitGroup
-		for _, a := range agentsToQuery {
-			if agentFilter != "" && a.Name != agentFilter {
-				continue
-			}
-			wg.Add(1)
-			go func(agent Agent) {
-				defer wg.Done()
-				u := strings.TrimRight(agent.URL, "/") + "/tasks"
-				params := url.Values{}
-				if status != "" {
-					params.Set("status", status)
-				}
-				if agentFilter != "" {
-					params.Set("agent", agentFilter)
-				}
-				if q := params.Encode(); q != "" {
-					u += "?" + q
-				}
-				req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
-				if err != nil {
-					return
-				}
-				resp, err := proxyClient.Do(req)
-				if err != nil {
-					return
-				}
-				defer resp.Body.Close()
-				if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-					return
-				}
-				var tasks []taskspkg.Task
-				if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
-					return
-				}
-				if from != "" {
-					filtered := tasks[:0]
-					for _, t := range tasks {
-						if t.From == from {
-							filtered = append(filtered, t)
-						}
-					}
-					tasks = filtered
-				}
-				mu.Lock()
-				tasksOut = append(tasksOut, tasks...)
-				mu.Unlock()
-			}(a)
-		}
-		wg.Wait()
-		sort.Slice(tasksOut, func(i, j int) bool { return tasksOut[i].CreatedAt.After(tasksOut[j].CreatedAt) })
-		writeJSON(w, http.StatusOK, tasksOut)
+		writeJSON(w, http.StatusOK, gw.fetchTasks(r.Context(), status, from, agentFilter))
 	})
 	mux.HandleFunc("/api/v1/tasks/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -4260,11 +4443,16 @@ func main() {
 				if sessionID == "" {
 					sessionID = fmt.Sprintf("mcp-%s-%d", agentName, time.Now().UnixNano())
 				}
+				sess := gw.sessionStore.ensureSession(sessionID, agentName)
+				if sess.TaskSummary == "" {
+					sess.TaskSummary = extractTaskSummary(content)
+				}
+				if sess.TaskRef == "" {
+					sess.TaskRef = extractTaskRef(content)
+				}
 				// If caller explicitly set a source, create the session with that source
 				if explicitSource != "" {
-					sess := gw.sessionStore.ensureSession(sessionID, agentName)
 					sess.Source = explicitSource
-					sess.TaskSummary = extractTaskSummary(content)
 				}
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
 				defer agentCancel()
@@ -4371,6 +4559,13 @@ func main() {
 		}
 		if sessionID == "" {
 			sessionID = fmt.Sprintf("hirdforge-%s-%d", in.Agent, time.Now().UnixNano())
+		}
+		sess := gw.sessionStore.ensureSession(sessionID, in.Agent)
+		if sess.TaskSummary == "" {
+			sess.TaskSummary = extractTaskSummary(in.Content)
+		}
+		if sess.TaskRef == "" {
+			sess.TaskRef = extractTaskRef(in.Content)
 		}
 		gw.lastSessionMu.Lock()
 		gw.lastSession[in.Agent] = sessionID

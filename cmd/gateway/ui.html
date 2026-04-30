@@ -155,7 +155,8 @@
 
     const builderEventTypes = new Set(['file_read', 'file_write', 'git_clone', 'git_branch_create', 'git_commit', 'git_push', 'pr_create', 'exec']);
     const actionEventTypes = new Set(['plan', 'plan_step_complete', 'http_request']);
-    const typedToolEventTypes = new Set([...builderEventTypes, ...actionEventTypes]);
+    const architectEventTypes = new Set(['delegate']);
+    const typedToolEventTypes = new Set([...builderEventTypes, ...actionEventTypes, ...architectEventTypes]);
 
     function relativeTime(value) {
       if (!value) return 'now';
@@ -298,6 +299,7 @@
     function activityIcon(type) {
       if (type === 'plan') return 'ListTodo';
       if (type === 'plan_step_complete') return 'CheckCircle2';
+      if (type === 'delegate') return 'Send';
       if (type === 'git_clone') return 'FolderGit2';
       if (type === 'git_branch_create') return 'GitBranch';
       if (type === 'git_commit') return 'GitCommit';
@@ -319,6 +321,7 @@
       if (type === 'git_commit') return `committed ${evt.files_changed || 0} files`;
       if (type === 'git_push') return `pushed ${evt.branch || 'branch'} to ${evt.remote || 'origin'}`;
       if (type === 'pr_create') return `opened PR #${evt.number || ''} ${evt.title || ''}`.trim();
+      if (type === 'delegate') return `delegated ${evt.objective_summary || 'task'} to ${evt.to_agent || 'agent'}`;
       if (type === 'exec') return `exec ${truncateMiddle(evt.command || 'command', 42)}`;
       if (type === 'http_request') return `${evt.method || 'GET'} ${truncateMiddle(evt.url || 'url', 44)} ${evt.status_code || ''}`.trim();
       return type;
@@ -350,6 +353,13 @@
 
     function hasActionActivity(timeline = []) {
       return timeline.some(item => actionEventTypes.has(item.type));
+    }
+
+    function hasArchitectActivity(workspace, timeline = []) {
+      return Boolean(
+        String(workspace && workspace.current_session_id || '').trim() ||
+        timeline.some(item => architectEventTypes.has(item.type))
+      );
     }
 
     function timeValue(value) {
@@ -384,6 +394,10 @@
     }
 
     function determineSurface(workspace, queueItem, timeline = []) {
+      const architectTime = Math.max(
+        hasArchitectActivity(workspace, timeline) ? timeValue(workspace && workspace.current_objective_at) : 0,
+        latestTimelineTime(timeline, architectEventTypes)
+      );
       const builderTime = Math.max(
         hasWorkspaceContent(workspace) ? timeValue(workspace && workspace.last_updated) : 0,
         latestTimelineTime(timeline, builderEventTypes)
@@ -393,8 +407,134 @@
         timeValue(queueItem && queueItem.queued_at),
         latestTimelineTime(timeline, actionEventTypes)
       );
-      if (builderTime === 0 && actionTime === 0) return 'idle';
+      if (architectTime === 0 && builderTime === 0 && actionTime === 0) return 'idle';
+      if (architectTime >= builderTime && architectTime >= actionTime) return 'architect';
       return actionTime >= builderTime ? 'action' : 'builder';
+    }
+
+    function parseDelegatedTask(content) {
+      const text = String(content || '').replace(/\\n/g, '\n');
+      const sections = {};
+      const matches = [...text.matchAll(/^(TASK|ISSUE|STEPS|DONE WHEN|TASK_ID|FROM|GATES|GIT_IDENTITY|CLONE_URL)\s*:\s*(.*)$/gim)];
+      matches.forEach((match, index) => {
+        const header = String(match[1] || '').toUpperCase();
+        const start = match.index + match[0].length;
+        const end = index + 1 < matches.length ? matches[index + 1].index : text.length;
+        const inline = String(match[2] || '').trim();
+        const tail = text.slice(start, end).trim();
+        sections[header] = [inline, tail].filter(Boolean).join(inline && tail ? '\n' : '');
+      });
+      const stepsRaw = String(sections['STEPS'] || '');
+      const steps = stepsRaw.split('\n')
+        .map(line => String(line || '').trim().replace(/^[-*]\s*/, '').replace(/^\d+\.\s*/, ''))
+        .filter(Boolean);
+      return {
+        task: String(sections['TASK'] || text.trim()).trim(),
+        issue: String(sections['ISSUE'] || '').trim(),
+        steps,
+        doneWhen: String(sections['DONE WHEN'] || '').trim(),
+        taskID: String(sections['TASK_ID'] || '').trim(),
+        from: String(sections['FROM'] || '').trim(),
+      };
+    }
+
+    function extractPRNumberFromText(text) {
+      const raw = String(text || '');
+      let match = raw.match(/\/pulls\/(\d+)\b/i);
+      if (match) return Number(match[1]);
+      match = raw.match(/\bPR\s*#(\d+)\b/i) || raw.match(/\bpull request\s*#?(\d+)\b/i);
+      if (match) return Number(match[1]);
+      return 0;
+    }
+
+    function extractIssueRef(task, parsed) {
+      const explicit = String(parsed && parsed.issue || '').trim();
+      if (explicit) return explicit;
+      const match = String(task && task.content || '').match(/#(\d+)/);
+      return match ? `#${match[1]}` : '';
+    }
+
+    function collectTaskText(task) {
+      const parts = [task && task.content, task && task.result];
+      ((task && task.tools) || []).forEach(tool => {
+        parts.push(tool && tool.input);
+        parts.push(tool && tool.output);
+      });
+      return parts.filter(Boolean).join('\n');
+    }
+
+    function architectTaskStatus(task, prInfo) {
+      const status = String(task && task.status || '').toLowerCase();
+      if (status === 'failed') return 'failed';
+      if (status === 'submitted') return 'queued';
+      if (status === 'working') return 'running';
+      if (status === 'completed') {
+        if (prInfo && String(prInfo.state || '').toLowerCase() === 'open') return 'reviewing';
+        if (prInfo && String(prInfo.state || '').toLowerCase() !== 'open') return 'merged';
+        return 'running';
+      }
+      return status || 'queued';
+    }
+
+    function architectLifecycleState(task, prInfo) {
+      const status = String(task && task.status || '').toLowerCase();
+      if (status === 'failed') return 'ESCALATE';
+      if (status === 'submitted') return 'DISPATCH';
+      if (status === 'working') return 'BUILD';
+      if (status === 'completed') {
+        if (prInfo && String(prInfo.state || '').toLowerCase() === 'open') return 'REVIEW';
+        if (prInfo && String(prInfo.state || '').toLowerCase() !== 'open') return 'CLOSE';
+        return 'VERIFY';
+      }
+      return 'INTAKE';
+    }
+
+    function architectStatusClass(status) {
+      if (status === 'merged') return 'border-emerald-400/30 text-emerald-300';
+      if (status === 'reviewing') return 'border-blue-400/30 text-blue-300';
+      if (status === 'running') return 'border-amber-400/30 text-amber-300';
+      if (status === 'failed') return 'border-red-400/30 text-red-300';
+      return 'border-zinc-800 text-zinc-500';
+    }
+
+    function architectEventText(evt) {
+      const metadata = evt && evt.metadata && typeof evt.metadata === 'object' ? evt.metadata : {};
+      if (evt.type === 'delegate') return `delegated ${metadata.objective_summary || 'task'} to ${metadata.to_agent || 'agent'}`;
+      if (evt.type === 'delegation_started') return `opened delegation channel to ${metadata.target_agent || 'agent'}`;
+      if (evt.type === 'delegation_ended') return `closed delegation channel to ${metadata.target_agent || 'agent'}`;
+      if (evt.type === 'task_dispatched') return `dispatched ${metadata.summary || 'task'} to ${metadata.target_agent || 'agent'}`;
+      if (evt.type === 'repo_cloned') return `cloned ${metadata.repo || 'repo'}`;
+      if (evt.type === 'pr_created') return `opened PR ${metadata.pr_url || metadata.branch || ''}`.trim();
+      if (evt.type === 'task') return String(metadata.message || 'task update');
+      if (evt.type === 'task_completed') return `completed task ${metadata.task_id || ''}`.trim();
+      return String(evt.type || 'event');
+    }
+
+    function architectEventIcon(type) {
+      if (type === 'delegate' || type === 'task_dispatched') return 'Send';
+      if (type === 'delegation_started' || type === 'delegation_ended') return 'Workflow';
+      if (type === 'repo_cloned') return 'FolderGit2';
+      if (type === 'pr_created') return 'GitPullRequest';
+      if (type === 'task_completed') return 'CheckCircle2';
+      return 'Activity';
+    }
+
+    function architectTimelineItems(events = []) {
+      return (events || []).map(evt => ({
+        time: evt.timestamp,
+        type: evt.type,
+        text: architectEventText(evt),
+        icon: architectEventIcon(evt.type),
+      }));
+    }
+
+    function taskEventsForAgent(events = [], task) {
+      const targetAgent = String(task && task.agent || '').trim();
+      if (!targetAgent) return [];
+      return (events || []).filter(evt => {
+        const metadata = evt && evt.metadata && typeof evt.metadata === 'object' ? evt.metadata : {};
+        return String(evt.agent || '').trim() === targetAgent || String(metadata.target_agent || metadata.to_agent || '').trim() === targetAgent;
+      });
     }
 
     function isEmailAction(queueItem) {
@@ -2152,6 +2292,247 @@
       );
     }
 
+    function ArchitectSurface({
+      focused,
+      workspace,
+      timeline,
+      leftRailWidth,
+      startDragTree,
+      isDraggingTree,
+      activityHeight,
+      startDragActivity,
+      isDraggingActivity,
+    }) {
+      const [prs, setPRs] = useState([]);
+      const [selectedTaskBySession, setSelectedTaskBySession] = useState({});
+
+      const activeSessionID = String(workspace && workspace.current_session_id || '').trim();
+      const activeObjective = String(workspace && workspace.current_objective || '').trim();
+      const sessionEvents = Array.isArray(workspace && workspace.session_timeline) ? workspace.session_timeline : [];
+      const architectTimeline = useMemo(() => architectTimelineItems(sessionEvents).slice(-30), [sessionEvents]);
+      const prList = useMemo(() => asArrayPayload(prs, 'prs'), [prs]);
+      const sessionTasks = useMemo(() => {
+        if (!activeSessionID) return [];
+        return (Array.isArray(workspace && workspace.session_tasks) ? workspace.session_tasks : [])
+          .filter(task => String(task && task.session_id || '') === activeSessionID)
+          .map(task => {
+            const parsed = parseDelegatedTask(task.content);
+            const prNumber = Number(task && task.pr_number) || extractPRNumberFromText(collectTaskText(task));
+            const prInfo = prList.find(pr => Number(pr.number) === prNumber) || null;
+            return {
+              ...task,
+              parsed,
+              prNumber,
+              prInfo,
+              issueRef: extractIssueRef(task, parsed),
+              displayStatus: architectTaskStatus(task, prInfo),
+              lifecycleState: architectLifecycleState(task, prInfo),
+            };
+          })
+          .sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
+      }, [activeSessionID, workspace, prList]);
+      const selectedTaskID = activeSessionID ? (selectedTaskBySession[activeSessionID] || '') : '';
+      const selectedTask = sessionTasks.find(task => task.id === selectedTaskID) || null;
+      const selectedTaskEvents = useMemo(() => taskEventsForAgent(sessionEvents, selectedTask), [sessionEvents, selectedTask]);
+
+      useEffect(() => {
+        let cancelled = false;
+        const loadPRs = () => {
+          fetch('/api/v1/gitea/prs')
+            .then(response => {
+              if (!response.ok) throw new Error('failed to load pull requests');
+              return response.json();
+            })
+            .then(data => {
+              if (!cancelled) setPRs(asArrayPayload(data, 'prs'));
+            })
+            .catch(() => {
+              if (!cancelled) setPRs([]);
+            });
+        };
+        loadPRs();
+        const id = setInterval(loadPRs, 30000);
+        return () => {
+          cancelled = true;
+          clearInterval(id);
+        };
+      }, []);
+
+      useEffect(() => {
+        if (!activeSessionID) return;
+        if (!selectedTaskID) return;
+        if (sessionTasks.some(task => task.id === selectedTaskID)) return;
+        setSelectedTaskBySession(current => ({ ...current, [activeSessionID]: '' }));
+      }, [activeSessionID, selectedTaskID, sessionTasks]);
+
+      const narrativeItems = useMemo(() => {
+        const items = [];
+        if (activeObjective) {
+          items.push({ icon: 'Target', text: activeObjective, t: 'objective' });
+        }
+        if (sessionTasks.length > 0) {
+          items.push({ icon: 'GitBranch', text: `decomposed into ${sessionTasks.length} delegated task${sessionTasks.length === 1 ? '' : 's'}`, t: 'tasks' });
+        }
+        sessionEvents.slice(-6).forEach(evt => {
+          items.push({
+            icon: architectEventIcon(evt.type),
+            text: architectEventText(evt),
+            t: relativeTime(evt.timestamp),
+          });
+        });
+        return items;
+      }, [activeObjective, sessionTasks, sessionEvents]);
+
+      return (
+        <div className="flex-1 flex flex-col min-h-0">
+          <div className="flex-1 flex min-h-0">
+            <div style={{ width: `${leftRailWidth}px` }} className="border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
+              <div className="p-3 border-b border-zinc-800/60">
+                <div className="text-[10px] uppercase text-zinc-500">Strategic objective</div>
+                <div className="mt-2 text-[11px] leading-relaxed text-zinc-300">
+                  {activeObjective || 'No active objective yet.'}
+                </div>
+                {activeSessionID && (
+                  <div className="mt-2 text-[9px] text-zinc-600">session {truncateMiddle(activeSessionID, 30)}</div>
+                )}
+              </div>
+              <div className="px-3 py-2 border-b border-zinc-800/60 flex items-center gap-2 text-[10px] uppercase text-zinc-500">
+                <Icon name="GitBranch" className="w-3 h-3" />
+                <span>Dispatched Tasks</span>
+                <span className="ml-auto text-zinc-600">{sessionTasks.length}</span>
+              </div>
+              {!activeSessionID ? (
+                <div className="px-3 py-3 text-[11px] text-zinc-600">This surface activates when delegation activity establishes a current objective.</div>
+              ) : sessionTasks.length === 0 ? (
+                <div className="px-3 py-3 text-[11px] text-zinc-600">No delegated tasks found for this session yet.</div>
+              ) : (
+                <div className="relative px-3 py-3">
+                  <div className="absolute left-6 top-0 bottom-0 border-l border-zinc-800/80" />
+                  <div className="space-y-2">
+                    {sessionTasks.map(task => (
+                      <button
+                        key={task.id}
+                        type="button"
+                        onClick={() => setSelectedTaskBySession(current => ({ ...current, [activeSessionID]: task.id }))}
+                        className={`relative w-full text-left rounded border px-3 py-2 ml-4 ${selectedTask && selectedTask.id === task.id ? 'border-amber-500/40 bg-amber-500/5' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'}`}
+                      >
+                        <span className="absolute -left-[15px] top-3 w-2 h-2 rounded-full bg-amber-400/80" />
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-zinc-200 truncate">{task.agent}</span>
+                          <span className={`rounded border px-1 py-px text-[8px] uppercase shrink-0 ${architectStatusClass(task.displayStatus)}`}>
+                            {task.displayStatus}
+                          </span>
+                          {task.prNumber > 0 && <span className="ml-auto text-[10px] text-blue-300">PR #{task.prNumber}</span>}
+                        </div>
+                        <div className="mt-1 text-[11px] text-zinc-500 leading-relaxed">
+                          {task.parsed.task || task.content}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <ResizeRailHandle startDragTree={startDragTree} isDraggingTree={isDraggingTree} />
+            <div className="flex-1 flex flex-col min-w-0">
+              <div className="px-4 py-1.5 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
+                <Icon name="Workflow" className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-xs text-zinc-300 truncate">
+                  {selectedTask ? `${selectedTask.agent} · ${selectedTask.parsed.task || selectedTask.id}` : 'Decomposition view'}
+                </span>
+              </div>
+              <div className="flex-1 overflow-y-auto bg-zinc-950">
+                {!activeSessionID ? (
+                  <div className="h-full flex items-center justify-center text-center px-6">
+                    <div>
+                      <div className="text-sm text-zinc-400">No active objective for {focused ? focused.name : 'this agent'}</div>
+                      <div className="mt-1 text-[10px] text-zinc-600">The architect surface appears when delegate activity establishes a strategic objective.</div>
+                    </div>
+                  </div>
+                ) : selectedTask ? (
+                  <div className="p-4 space-y-4">
+                    <div className="rounded border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+                      <div className="flex items-start gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[10px] uppercase text-zinc-500">Dispatch</div>
+                          <div className="mt-1 text-sm text-zinc-200 leading-relaxed">{selectedTask.parsed.task || selectedTask.content}</div>
+                        </div>
+                        <span className={`rounded border px-2 py-1 text-[9px] uppercase shrink-0 ${architectStatusClass(selectedTask.displayStatus)}`}>
+                          {selectedTask.lifecycleState}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-[11px] text-zinc-400">
+                        <div><span className="text-zinc-600">assigned</span> · {selectedTask.agent}</div>
+                        <div><span className="text-zinc-600">dispatched</span> · {relativeTime(selectedTask.created_at)}</div>
+                        <div><span className="text-zinc-600">issue</span> · {selectedTask.issueRef || '-'}</div>
+                        <div><span className="text-zinc-600">PR</span> · {selectedTask.prNumber > 0 ? `#${selectedTask.prNumber}` : '-'}</div>
+                      </div>
+                      <div className="space-y-2">
+                        <div className="text-[10px] uppercase text-zinc-500">Acceptance criteria</div>
+                        <div className="text-[11px] text-zinc-300 leading-relaxed">
+                          {selectedTask.parsed.doneWhen || 'No explicit acceptance criteria declared.'}
+                        </div>
+                      </div>
+                      {selectedTask.parsed.steps.length > 0 && (
+                        <div className="space-y-2">
+                          <div className="text-[10px] uppercase text-zinc-500">Decomposition</div>
+                          <ol className="space-y-1">
+                            {selectedTask.parsed.steps.map((step, index) => (
+                              <PlanStep key={`${step}-${index}`} icon="ChevronRight" iconClass="text-zinc-600" text={step} />
+                            ))}
+                          </ol>
+                        </div>
+                      )}
+                    </div>
+                    <div className="rounded border border-zinc-800 bg-zinc-900/30 p-4">
+                      <div className="text-[10px] uppercase text-zinc-500 mb-3">Live status feed</div>
+                      {selectedTaskEvents.length === 0 ? (
+                        <div className="text-[11px] text-zinc-600">No coordination events scoped to this assignee yet.</div>
+                      ) : (
+                        <div className="space-y-2">
+                          {selectedTaskEvents.slice(-12).map((evt, index) => (
+                            <div key={`${evt.type}-${evt.timestamp}-${index}`} className="flex items-start gap-2 text-[11px] text-zinc-400">
+                              <span className="text-[9px] text-zinc-600 w-12 shrink-0">{relativeTime(evt.timestamp)}</span>
+                              <Icon name={architectEventIcon(evt.type)} className="w-3 h-3 text-zinc-500 mt-0.5 shrink-0" />
+                              <span className="leading-relaxed">{architectEventText(evt)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-4 space-y-4">
+                    <div className="rounded border border-zinc-800 bg-zinc-900/40 p-4">
+                      <div className="text-[10px] uppercase text-zinc-500">Objective</div>
+                      <div className="mt-2 text-sm text-zinc-200 leading-relaxed">{activeObjective || 'No objective available.'}</div>
+                    </div>
+                    <div className="rounded border border-zinc-800 bg-zinc-900/30 p-4">
+                      <div className="text-[10px] uppercase text-zinc-500 mb-3">Coordination narrative</div>
+                      {narrativeItems.length === 0 ? (
+                        <div className="text-[11px] text-zinc-600">No coordination events captured for this session yet.</div>
+                      ) : (
+                        <div className="space-y-2">
+                          {narrativeItems.map((item, index) => (
+                            <div key={`${item.text}-${index}`} className="flex items-start gap-2 text-[11px] text-zinc-400">
+                              <span className="text-[9px] text-zinc-600 w-12 shrink-0">{item.t || ''}</span>
+                              <Icon name={item.icon} className="w-3 h-3 text-zinc-500 mt-0.5 shrink-0" />
+                              <span className="leading-relaxed">{item.text}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+          <ActivityTimeline items={architectTimeline} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+        </div>
+      );
+    }
+
     function PlanStep({ icon, iconClass, text, textClass = 'text-zinc-400' }) {
       return (
         <li className="flex items-start gap-2 text-[11px]">
@@ -2756,7 +3137,19 @@
                   <Icon name="Hand" className="w-2.5 h-2.5" /> Interject
                 </button>
               </div>
-              {focused && reviewerAgent ? (
+              {focused && focusedSurface === 'architect' ? (
+                <ArchitectSurface
+                  focused={focused}
+                  workspace={focusedWorkspace}
+                  timeline={focusedTimeline}
+                  leftRailWidth={leftRailWidth}
+                  startDragTree={startDragTree}
+                  isDraggingTree={isDraggingTree}
+                  activityHeight={activityHeight}
+                  startDragActivity={startDragActivity}
+                  isDraggingActivity={isDraggingActivity}
+                />
+              ) : focused && reviewerAgent ? (
                 <ReviewerSurface
                   focused={focused}
                   workspace={focusedWorkspace}

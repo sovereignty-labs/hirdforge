@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+var objectiveSentenceRE = regexp.MustCompile(`(?s)^(.+?[.!?])(?:\s|$)`)
+
 type ChatMessage struct {
 	Role      string `json:"role"`
 	Content   string `json:"content"`
@@ -21,8 +23,8 @@ type ChatMessage struct {
 type Session struct {
 	ID          string        `json:"id"`
 	Agent       string        `json:"agent"`
-	Source      string        `json:"source"`   // "comms", "cronjob", "delegation"
-	TaskRef     string        `json:"task_ref"` // Gitea issue ref if detected, e.g. "#24"
+	Source      string        `json:"source"`       // "comms", "cronjob", "delegation"
+	TaskRef     string        `json:"task_ref"`     // Gitea issue ref if detected, e.g. "#24"
 	TaskSummary string        `json:"task_summary"` // First line of task content, truncated to ~60 chars
 	Messages    []ChatMessage `json:"messages"`
 	CreatedAt   int64         `json:"created_at"`
@@ -92,6 +94,62 @@ func extractTaskSummary(content string) string {
 		return firstLine[:maxLen] + "..."
 	}
 	return firstLine
+}
+
+func extractObjectiveSentence(content string) string {
+	text := strings.TrimSpace(content)
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	candidates := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToUpper(line), "FROM:") ||
+			strings.HasPrefix(strings.ToUpper(line), "TASK_ID:") ||
+			strings.HasPrefix(strings.ToUpper(line), "GATES:") ||
+			strings.HasPrefix(strings.ToUpper(line), "GIT_IDENTITY:") ||
+			strings.HasPrefix(strings.ToUpper(line), "CLONE_URL:") {
+			continue
+		}
+		line = strings.TrimSpace(strings.TrimPrefix(line, "TASK:"))
+		line = strings.TrimSpace(strings.TrimPrefix(line, "Task:"))
+		if line != "" {
+			candidates = append(candidates, line)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	first := candidates[0]
+	if match := objectiveSentenceRE.FindStringSubmatch(first); len(match) >= 2 {
+		first = strings.TrimSpace(match[1])
+	}
+	if len(first) > 220 {
+		first = first[:220] + "..."
+	}
+	return strings.TrimSpace(first)
+}
+
+func objectiveFromSession(sess *Session) string {
+	if sess == nil {
+		return ""
+	}
+	for _, msg := range sess.Messages {
+		if msg.Role != "user" {
+			continue
+		}
+		if objective := extractObjectiveSentence(msg.Content); objective != "" {
+			return objective
+		}
+	}
+	if objective := extractObjectiveSentence(sess.TaskSummary); objective != "" {
+		return objective
+	}
+	return ""
 }
 
 func (s *sessionStore) ensureSession(id, agent string) *Session {
@@ -169,8 +227,8 @@ func (s *sessionStore) get(id string) (*Session, bool) {
 		TaskRef:     sess.TaskRef,
 		TaskSummary: sess.TaskSummary,
 		Messages:    append([]ChatMessage(nil), sess.Messages...),
-		CreatedAt:  sess.CreatedAt,
-		UpdatedAt:  sess.UpdatedAt,
+		CreatedAt:   sess.CreatedAt,
+		UpdatedAt:   sess.UpdatedAt,
 	}
 	return out, true
 }
@@ -264,6 +322,16 @@ func (g *gateway) clearActiveRequest(agent string, cancel context.CancelFunc) {
 	if _, ok := g.activeRequests[agent]; ok {
 		delete(g.activeRequests, agent)
 	}
+}
+
+func (g *gateway) activeSessionID(agent string) string {
+	g.arMu.RLock()
+	defer g.arMu.RUnlock()
+	ar, ok := g.activeRequests[agent]
+	if !ok || ar == nil {
+		return ""
+	}
+	return strings.TrimSpace(ar.SessionID)
 }
 
 func (g *gateway) stopAgent(name string) bool {
