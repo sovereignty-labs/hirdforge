@@ -8,13 +8,21 @@ import (
 )
 
 type AgentWorkspace struct {
-	AgentName     string               `json:"agent_name"`
-	CurrentRepo   string               `json:"current_repo"`
-	CurrentBranch string               `json:"current_branch"`
-	CurrentFile   string               `json:"current_file"`
-	FilesTouched  map[string]FileState `json:"files_touched"`
-	Plan          *Plan                `json:"plan,omitempty"`
-	LastUpdated   time.Time            `json:"last_updated"`
+	AgentName         string               `json:"agent_name"`
+	CurrentRepo       string               `json:"current_repo"`
+	CurrentBranch     string               `json:"current_branch"`
+	CurrentFile       string               `json:"current_file"`
+	CurrentPR         *PRRef               `json:"current_pr,omitempty"`
+	CurrentReviewFile string               `json:"current_review_file,omitempty"`
+	FilesTouched      map[string]FileState `json:"files_touched"`
+	Plan              *Plan                `json:"plan,omitempty"`
+	LastUpdated       time.Time            `json:"last_updated"`
+}
+
+type PRRef struct {
+	Owner string `json:"owner"`
+	Repo  string `json:"repo"`
+	Index int    `json:"index"`
 }
 
 type FileState struct {
@@ -160,6 +168,26 @@ func (p *Projector) Get(agentName string) AgentWorkspace {
 	return cloneWorkspace(ws)
 }
 
+func (p *Projector) SetReviewContext(agentName string, pr *PRRef, reviewFile string) AgentWorkspace {
+	if p == nil {
+		return AgentWorkspace{AgentName: agentName, FilesTouched: map[string]FileState{}}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	ws := p.ensureLocked(agentName)
+	ws.LastUpdated = time.Now()
+	if pr == nil {
+		ws.CurrentPR = nil
+		ws.CurrentReviewFile = ""
+		return cloneWorkspace(ws)
+	}
+	prCopy := *pr
+	ws.CurrentPR = &prCopy
+	ws.CurrentReviewFile = strings.TrimSpace(reviewFile)
+	return cloneWorkspace(ws)
+}
+
 func (p *Projector) ensureLocked(agentName string) *AgentWorkspace {
 	ws := p.workspaces[agentName]
 	if ws == nil {
@@ -196,6 +224,10 @@ func cloneWorkspace(ws *AgentWorkspace) AgentWorkspace {
 		plan := *ws.Plan
 		plan.Steps = append([]string(nil), ws.Plan.Steps...)
 		out.Plan = &plan
+	}
+	if ws.CurrentPR != nil {
+		pr := *ws.CurrentPR
+		out.CurrentPR = &pr
 	}
 	return out
 }

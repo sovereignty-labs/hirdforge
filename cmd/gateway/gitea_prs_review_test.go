@@ -147,7 +147,7 @@ func TestGiteaPRCommentsAggregatesReviews(t *testing.T) {
 		case "/api/v1/repos/kit/hirdforge/pulls/7/reviews":
 			_, _ = w.Write([]byte(`[{"id":11},{"id":12}]`))
 		case "/api/v1/repos/kit/hirdforge/pulls/7/reviews/11/comments":
-			_, _ = w.Write([]byte(`[{"path":"a.go","line":10,"body":"nit","user":{"login":"alice"},"created_at":"2026-04-29T00:00:00Z"}]`))
+			_, _ = w.Write([]byte(`[{"path":"a.go","line":10,"original_line":8,"body":"nit","user":{"login":"alice"},"created_at":"2026-04-29T00:00:00Z"}]`))
 		case "/api/v1/repos/kit/hirdforge/pulls/7/reviews/12/comments":
 			_, _ = w.Write([]byte(`[{"path":"a.go","line":10,"body":"follow-up","user":{"login":"bob"},"created_at":"2026-04-29T00:01:00Z"},{"path":"b.go","line":7,"body":"blocker","user":{"login":"bob"},"created_at":"2026-04-29T00:02:00Z"}]`))
 		default:
@@ -174,6 +174,9 @@ func TestGiteaPRCommentsAggregatesReviews(t *testing.T) {
 	}
 	if out.Comments[0]["review_id"] != float64(11) {
 		t.Fatalf("first review_id=%#v", out.Comments[0]["review_id"])
+	}
+	if out.Comments[0]["original_line"] != float64(8) {
+		t.Fatalf("first original_line=%#v", out.Comments[0]["original_line"])
 	}
 	if out.Comments[2]["path"] != "b.go" {
 		t.Fatalf("last path=%#v", out.Comments[2]["path"])

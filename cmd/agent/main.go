@@ -391,6 +391,15 @@ type (
 		Done      bool        `json:"done"`
 		SessionID string      `json:"session_id,omitempty"`
 	}
+	prRef struct {
+		Owner string `json:"owner"`
+		Repo  string `json:"repo"`
+		Index int    `json:"index"`
+	}
+	agentWorkspaceState struct {
+		CurrentPR         *prRef `json:"current_pr,omitempty"`
+		CurrentReviewFile string `json:"current_review_file,omitempty"`
+	}
 )
 
 var sessionsMu sync.Mutex
@@ -435,6 +444,300 @@ var (
 	selfImproveMu             sync.Mutex
 	selfImproveLastRun        = map[string]time.Time{}
 )
+
+type reviewContextTracker struct {
+	mu          sync.Mutex
+	agentName   string
+	gatewayURL  string
+	idleTimeout time.Duration
+	state       agentWorkspaceState
+	lastPRTouch time.Time
+	stopCh      chan struct{}
+	prLookup    func(*prRef) bool
+}
+
+func newReviewContextTracker(agentName, gatewayURL string, idleTimeout time.Duration) *reviewContextTracker {
+	tracker := &reviewContextTracker{
+		agentName:   agentName,
+		gatewayURL:  strings.TrimSpace(gatewayURL),
+		idleTimeout: idleTimeout,
+		stopCh:      make(chan struct{}),
+		prLookup:    func(*prRef) bool { return false },
+	}
+	go tracker.runIdleLoop()
+	return tracker
+}
+
+func (t *reviewContextTracker) Stop() {
+	if t == nil {
+		return
+	}
+	close(t.stopCh)
+}
+
+func (t *reviewContextTracker) SetPRLookup(fn func(*prRef) bool) {
+	if t == nil || fn == nil {
+		return
+	}
+	t.mu.Lock()
+	t.prLookup = fn
+	t.mu.Unlock()
+}
+
+func (t *reviewContextTracker) UpdateFromTool(toolName string, args map[string]interface{}, result toolpkg.ToolResult) {
+	if t == nil || result.Error != "" {
+		return
+	}
+	ref, reviewFile, matched := t.capture(toolName, args)
+	if !matched {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.lastPRTouch = time.Now()
+	changed := false
+	if ref != nil {
+		if t.state.CurrentPR == nil || *t.state.CurrentPR != *ref {
+			refCopy := *ref
+			t.state.CurrentPR = &refCopy
+			t.state.CurrentReviewFile = ""
+			changed = true
+		}
+	}
+	if reviewFile != "" && strings.TrimSpace(t.state.CurrentReviewFile) != reviewFile {
+		t.state.CurrentReviewFile = reviewFile
+		changed = true
+	}
+	if changed {
+		t.emitLocked()
+	}
+}
+
+func (t *reviewContextTracker) ClearIfTaskWithoutPR(content string) {
+	if t == nil || taskMentionsPR(content) {
+		return
+	}
+	t.clear()
+}
+
+func (t *reviewContextTracker) shouldClearForIdle() bool {
+	if t == nil || t.idleTimeout <= 0 {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state.CurrentPR == nil || t.lastPRTouch.IsZero() {
+		return false
+	}
+	return time.Since(t.lastPRTouch) >= t.idleTimeout
+}
+
+func (t *reviewContextTracker) runIdleLoop() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if t.shouldClearForIdle() {
+				t.clear()
+			}
+		case <-t.stopCh:
+			return
+		}
+	}
+}
+
+func (t *reviewContextTracker) clear() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.state.CurrentPR == nil && t.state.CurrentReviewFile == "" {
+		return
+	}
+	t.state.CurrentPR = nil
+	t.state.CurrentReviewFile = ""
+	t.lastPRTouch = time.Time{}
+	t.emitLocked()
+}
+
+func (t *reviewContextTracker) capture(toolName string, args map[string]interface{}) (*prRef, string, bool) {
+	toolName = strings.TrimSpace(strings.ToLower(toolName))
+	if toolName == "" {
+		return nil, "", false
+	}
+	if toolName == "http" {
+		return parseGatewayPRRequest(args)
+	}
+	if ref, reviewFile, ok := directPRToolContext(toolName, args); ok {
+		return ref, reviewFile, true
+	}
+	if !ambiguousPRTool(toolName) {
+		return nil, "", false
+	}
+	ref, ok := prRefFromArgs(args)
+	if !ok {
+		return nil, "", false
+	}
+	t.mu.Lock()
+	lookup := t.prLookup
+	t.mu.Unlock()
+	if lookup != nil && lookup(ref) {
+		return ref, "", true
+	}
+	return nil, "", false
+}
+
+func (t *reviewContextTracker) emitLocked() {
+	workspaceCopy := map[string]interface{}{
+		"current_review_file": t.state.CurrentReviewFile,
+	}
+	if t.state.CurrentPR != nil {
+		workspaceCopy["current_pr"] = map[string]interface{}{
+			"owner": t.state.CurrentPR.Owner,
+			"repo":  t.state.CurrentPR.Repo,
+			"index": t.state.CurrentPR.Index,
+		}
+	}
+	notifyGateway(t.gatewayURL, "workspace_update", t.agentName, map[string]interface{}{
+		"workspace": workspaceCopy,
+	})
+}
+
+func taskMentionsPR(content string) bool {
+	text := strings.TrimSpace(content)
+	if text == "" {
+		return false
+	}
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bpr\s*#\d+\b`),
+		regexp.MustCompile(`(?i)\bpull request\s*#?\d+\b`),
+		regexp.MustCompile(`(?i)/pulls/\d+\b`),
+		regexp.MustCompile(`(?i)\b[\w.-]+/[\w.-]+#\d+\b`),
+	}
+	for _, pattern := range patterns {
+		if pattern.MatchString(text) {
+			return true
+		}
+	}
+	return false
+}
+
+func directPRToolContext(toolName string, args map[string]interface{}) (*prRef, string, bool) {
+	ref, ok := prRefFromArgs(args)
+	if !ok {
+		return nil, "", false
+	}
+	if strings.Contains(toolName, "pr") || strings.Contains(toolName, "pull") || toolName == "create-review" {
+		reviewFile := strings.TrimSpace(fmt.Sprint(args["file"]))
+		if reviewFile == "" || reviewFile == "<nil>" {
+			reviewFile = strings.TrimSpace(fmt.Sprint(args["path"]))
+			if reviewFile == "<nil>" {
+				reviewFile = ""
+			}
+		}
+		return ref, reviewFile, true
+	}
+	return nil, "", false
+}
+
+func ambiguousPRTool(toolName string) bool {
+	switch toolName {
+	case "comment", "get-issue", "close-issue":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseGatewayPRRequest(args map[string]interface{}) (*prRef, string, bool) {
+	rawURL := strings.TrimSpace(fmt.Sprint(args["url"]))
+	if rawURL == "" || rawURL == "<nil>" {
+		return nil, "", false
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, "", false
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for i := 0; i+7 < len(parts); i++ {
+		if parts[i] != "api" || parts[i+1] != "v1" || parts[i+2] != "gitea" || parts[i+3] != "prs" {
+			continue
+		}
+		index, err := strconv.Atoi(parts[i+6])
+		if err != nil || index <= 0 {
+			return nil, "", false
+		}
+		ref := &prRef{
+			Owner: strings.TrimSpace(parts[i+4]),
+			Repo:  strings.TrimSpace(parts[i+5]),
+			Index: index,
+		}
+		if ref.Owner == "" || ref.Repo == "" {
+			return nil, "", false
+		}
+		reviewFile := ""
+		if i+7 < len(parts) && parts[i+7] == "diff" {
+			reviewFile = strings.TrimSpace(parsed.Query().Get("file"))
+		}
+		return ref, reviewFile, true
+	}
+	return nil, "", false
+}
+
+func prRefFromArgs(args map[string]interface{}) (*prRef, bool) {
+	repoArg := strings.TrimSpace(fmt.Sprint(args["repo"]))
+	if repoArg == "" || repoArg == "<nil>" {
+		return nil, false
+	}
+	owner := strings.TrimSpace(fmt.Sprint(args["owner"]))
+	repo := repoArg
+	if strings.Contains(repoArg, "/") {
+		parts := strings.SplitN(repoArg, "/", 2)
+		owner = strings.TrimSpace(parts[0])
+		repo = strings.TrimSpace(parts[1])
+	}
+	if owner == "" {
+		owner = strings.TrimSpace(os.Getenv("GITEA_DEFAULT_OWNER"))
+		if owner == "" {
+			owner = "gitea_admin"
+		}
+	}
+	index := firstPositiveIntArg(args, "index", "number", "pull_number")
+	if repo == "" || index <= 0 {
+		return nil, false
+	}
+	return &prRef{Owner: owner, Repo: repo, Index: index}, true
+}
+
+func firstPositiveIntArg(args map[string]interface{}, keys ...string) int {
+	for _, key := range keys {
+		switch value := args[key].(type) {
+		case int:
+			if value > 0 {
+				return value
+			}
+		case int64:
+			if value > 0 {
+				return int(value)
+			}
+		case float64:
+			if value > 0 {
+				return int(value)
+			}
+		case string:
+			text := strings.TrimSpace(strings.TrimPrefix(value, "#"))
+			if text == "" {
+				continue
+			}
+			if n, err := strconv.Atoi(text); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
+}
 
 type delegateTool struct {
 	peers               map[string]string
@@ -4044,6 +4347,7 @@ func main() {
 	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
 	memoryToolsFlag := flag.Bool("memory-tools", false, "Enable recall, remember, and memory-edit tools (requires --memory-url)")
 	gatewayURL := flag.String("gateway-url", "", "Gateway URL for event notifications (optional)")
+	reviewContextIdleTimeout := flag.Duration("review-context-idle-timeout", 30*time.Minute, "Idle timeout before clearing PR review context")
 	agentNameFlag := flag.String("agent-name", "", "agent name override (defaults to soul filename)")
 	personaRepoFlag := flag.String("persona-repo", "", "git URL of persona repository")
 	toolsFile := flag.String("tools-file", "/etc/valhalla/tools.md", "path to tools context file")
@@ -4125,6 +4429,8 @@ func main() {
 	if giteaReviewersToken != "" {
 		_ = os.Setenv("GITEA_REVIEWERS_TOKEN", giteaReviewersToken)
 	}
+	reviewTracker := newReviewContextTracker(agentName, *gatewayURL, *reviewContextIdleTimeout)
+	defer reviewTracker.Stop()
 	taskStore := taskspkg.NewStore()
 	taskTracker := tasklifepkg.NewTaskTracker()
 	sovereignStates := map[string]bool{}
@@ -4213,6 +4519,24 @@ func main() {
 		}
 		if enabled["gitea"] {
 			giteaTool = toolpkg.NewGiteaAPITool(*giteaURL, giteaToken)
+			reviewTracker.SetPRLookup(func(ref *prRef) bool {
+				if ref == nil || giteaTool == nil {
+					return false
+				}
+				req, err := http.NewRequest(http.MethodGet, strings.TrimRight(giteaTool.GiteaURL, "/")+"/api/v1/repos/"+url.PathEscape(ref.Owner)+"/"+url.PathEscape(ref.Repo)+"/pulls/"+strconv.Itoa(ref.Index), nil)
+				if err != nil {
+					return false
+				}
+				if strings.TrimSpace(giteaTool.Token) != "" {
+					req.Header.Set("Authorization", "token "+strings.TrimSpace(giteaTool.Token))
+				}
+				resp, err := giteaTool.Client.Do(req)
+				if err != nil {
+					return false
+				}
+				defer resp.Body.Close()
+				return resp.StatusCode == http.StatusOK
+			})
 			reg.Register(toolpkg.NewCreateIssueTool(giteaTool))
 			reg.Register(toolpkg.NewCreatePRTool(giteaTool))
 			reg.Register(toolpkg.NewListIssuesTool(giteaTool))
@@ -4766,6 +5090,7 @@ func main() {
 				logTool(taskspkg.ToolLog{Name: tc.Function.Name, Input: string(inputBytes), Output: out})
 			}
 			maybeRememberAction(*memoryURL, agentName, sessionID, tc.Function.Name, args, result)
+			reviewTracker.UpdateFromTool(tc.Function.Name, args, result)
 			for _, event := range toolpkg.TypedToolResultEvents(tc.Function.Name, args, result, *workspace, typedEventContext) {
 				if !emit(event) {
 					return result
@@ -5334,6 +5659,7 @@ func main() {
 			http.Error(w, "content is required", http.StatusBadRequest)
 			return
 		}
+		reviewTracker.ClearIfTaskWithoutPR(req.Content)
 		task := taskStore.Create(taskspkg.Task{
 			ID:      newTaskID(),
 			Agent:   agentName,

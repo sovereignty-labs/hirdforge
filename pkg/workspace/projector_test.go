@@ -108,10 +108,13 @@ func TestProjectorSnapshotDeepCopiesFilesTouched(t *testing.T) {
 	p := NewProjector()
 	p.Apply("ivar", "file_read", map[string]interface{}{"path": "README.md"})
 	p.Apply("ivar", "plan", map[string]interface{}{"steps": []interface{}{"one", "two"}})
+	p.SetReviewContext("ivar", &PRRef{Owner: "kit", Repo: "hirdforge", Index: 167}, "cmd/gateway/main.go")
 
 	first := p.Get("ivar")
 	first.FilesTouched["README.md"] = FileState{Path: "README.md", State: "writing", LineCursor: 99}
 	first.Plan.Steps[0] = "mutated"
+	first.CurrentPR.Owner = "mutated"
+	first.CurrentReviewFile = "changed.go"
 
 	second := p.Get("ivar")
 	state := second.FilesTouched["README.md"]
@@ -123,5 +126,28 @@ func TestProjectorSnapshotDeepCopiesFilesTouched(t *testing.T) {
 	}
 	if second.Plan == nil || second.Plan.Steps[0] != "one" {
 		t.Fatalf("plan snapshot mutation leaked into projector: %+v", second.Plan)
+	}
+	if second.CurrentPR == nil || second.CurrentPR.Owner != "kit" || second.CurrentReviewFile != "cmd/gateway/main.go" {
+		t.Fatalf("review context snapshot mutation leaked into projector: %+v file=%q", second.CurrentPR, second.CurrentReviewFile)
+	}
+}
+
+func TestProjectorSetReviewContext(t *testing.T) {
+	p := NewProjector()
+
+	ws := p.SetReviewContext("freya", &PRRef{Owner: "kit", Repo: "hirdforge", Index: 169}, "cmd/gateway/ui.html")
+	if ws.CurrentPR == nil || ws.CurrentPR.Owner != "kit" || ws.CurrentPR.Repo != "hirdforge" || ws.CurrentPR.Index != 169 {
+		t.Fatalf("CurrentPR = %+v", ws.CurrentPR)
+	}
+	if ws.CurrentReviewFile != "cmd/gateway/ui.html" {
+		t.Fatalf("CurrentReviewFile = %q", ws.CurrentReviewFile)
+	}
+
+	ws = p.SetReviewContext("freya", nil, "")
+	if ws.CurrentPR != nil {
+		t.Fatalf("CurrentPR after clear = %+v", ws.CurrentPR)
+	}
+	if ws.CurrentReviewFile != "" {
+		t.Fatalf("CurrentReviewFile after clear = %q", ws.CurrentReviewFile)
 	}
 }
