@@ -514,6 +514,22 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 	if !workspacepkg.IsTypedEvent(eventType) {
 		return
 	}
+	var typed map[string]interface{}
+	// For delegate events with no explicit session_id (Comms-originated
+	// architect work has no taskID to carry), fall back to the architect's
+	// active Comms session. This mutation cascades through projector.Apply,
+	// addDelegationTimelineEvent, and SetArchitectContext, all of which read
+	// session_id from the same evt map.
+	if eventType == "delegate" {
+		if strings.TrimSpace(asString(evt["session_id"])) == "" {
+			if fallback := g.activeSessionID(agentName); fallback != "" {
+				evt["session_id"] = fallback
+				if typed != nil {
+					typed["session_id"] = fallback
+				}
+			}
+		}
+	}
 	g.projector.Apply(agentName, eventType, evt)
 	if eventType == "delegate" {
 		sessionID := strings.TrimSpace(asString(evt["session_id"]))
@@ -528,7 +544,7 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 		}
 	}
 	now := time.Now().Format(time.RFC3339)
-	typed := make(map[string]interface{}, len(evt)+2)
+	typed = make(map[string]interface{}, len(evt)+2)
 	for k, v := range evt {
 		typed[k] = v
 	}
