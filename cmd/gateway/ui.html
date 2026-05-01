@@ -394,6 +394,12 @@
     }
 
     function determineSurface(workspace, queueItem, timeline = []) {
+      // Architect mode is session-level state. Once current_session_id is
+      // established by a delegate event, the surface stays architect until
+      // a new session replaces it. Mirrors the Reviewer current_pr pattern.
+      if (String(workspace && workspace.current_session_id || '').trim()) {
+        return 'architect';
+      }
       const architectTime = Math.max(
         hasArchitectActivity(workspace, timeline) ? timeValue(workspace && workspace.current_objective_at) : 0,
         latestTimelineTime(timeline, architectEventTypes)
