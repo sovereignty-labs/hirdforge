@@ -2966,6 +2966,14 @@
                   {pendingApprovals > 0 && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
                 </button>
               )}
+              <button
+                onClick={() => { if (window.confirm('Stop all agents?')) fetch('/api/v1/agents/stop-all', { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }}
+                className="flex items-center gap-1 px-2 py-1 rounded border border-red-500/30 text-red-400 text-[10px] hover:bg-red-500/10"
+                title="Stop all agents"
+              >
+                <Icon name="Square" className="w-3 h-3" />
+                <span>Stop All</span>
+              </button>
               <button data-settings-toggle="true" onClick={() => setSettingsOpen(open => !open)} className="text-zinc-500 hover:text-zinc-300" title="Settings">
                 <Icon name="Settings" className="w-4 h-4" />
               </button>
@@ -3018,6 +3026,15 @@
                 <span className="text-[10px] text-zinc-600">-</span>
                 {/* TODO: replace active/idle with fleet state's current_task_summary once §5.3 backend field lands. */}
                 <span className="text-[10px] text-zinc-500 truncate flex-1">{focused ? focusedStatusText : 'idle'}</span>
+                {focusedFleetState && focusedFleetState.active && (
+                  <button
+                    onClick={() => { if (window.confirm(`Stop ${focused.name}?`)) fetch(`/api/v1/agents/${encodeURIComponent(focused.name)}/stop`, { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }}
+                    className="flex items-center gap-1 px-2 py-0.5 border border-red-500/30 rounded text-[10px] text-red-400 hover:bg-red-500/10 shrink-0"
+                  >
+                    <Icon name="Square" className="w-2.5 h-2.5" />
+                    Stop
+                  </button>
+                )}
                 <button className="flex items-center gap-1 px-2 py-0.5 border border-zinc-800 rounded text-[10px] text-zinc-500 hover:text-zinc-300 hover:border-zinc-700 shrink-0">
                   <Icon name="Hand" className="w-2.5 h-2.5" /> Interject
                 </button>
