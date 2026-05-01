@@ -279,6 +279,11 @@ type messageReq struct {
 	Source    string `json:"source"`
 }
 
+type agentMessageRequest struct {
+	Content   string `json:"content"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
 type dispatchReq struct {
 	Agent   string `json:"agent"`
 	Content string `json:"content"`
@@ -514,6 +519,22 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 	if !workspacepkg.IsTypedEvent(eventType) {
 		return
 	}
+	var typed map[string]interface{}
+	// For delegate events with no explicit session_id (Comms-originated
+	// architect work has no taskID to carry), fall back to the architect's
+	// active Comms session. This mutation cascades through projector.Apply,
+	// addDelegationTimelineEvent, and SetArchitectContext, all of which read
+	// session_id from the same evt map.
+	if eventType == "delegate" {
+		if strings.TrimSpace(asString(evt["session_id"])) == "" {
+			if fallback := g.activeSessionID(agentName); fallback != "" {
+				evt["session_id"] = fallback
+				if typed != nil {
+					typed["session_id"] = fallback
+				}
+			}
+		}
+	}
 	g.projector.Apply(agentName, eventType, evt)
 	if eventType == "delegate" {
 		sessionID := strings.TrimSpace(asString(evt["session_id"]))
@@ -528,7 +549,7 @@ func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface
 		}
 	}
 	now := time.Now().Format(time.RFC3339)
-	typed := make(map[string]interface{}, len(evt)+2)
+	typed = make(map[string]interface{}, len(evt)+2)
 	for k, v := range evt {
 		typed[k] = v
 	}
@@ -4474,7 +4495,7 @@ func main() {
 				gw.setActiveRequest(agentName, sessionID, agentCancel)
 				defer gw.clearActiveRequest(agentName, agentCancel)
 
-				body, _ := json.Marshal(map[string]string{"content": content, "session_id": sessionID})
+				body, _ := json.Marshal(agentMessageRequest{Content: content, SessionID: sessionID})
 				uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
 				if err != nil {
 					log.Printf("async message: failed to create request for %s: %v", agentName, err)
@@ -4592,7 +4613,7 @@ func main() {
 		gw.setActiveRequest(in.Agent, sessionID, agentCancel)
 		defer gw.clearActiveRequest(in.Agent, agentCancel)
 
-		body, _ := json.Marshal(map[string]string{"content": in.Content, "session_id": sessionID})
+		body, _ := json.Marshal(agentMessageRequest{Content: in.Content, SessionID: sessionID})
 		uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})

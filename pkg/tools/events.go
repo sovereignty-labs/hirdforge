@@ -104,6 +104,13 @@ type ToolEventContext struct {
 	AgentName     string
 }
 
+func sessionIDArg(args map[string]interface{}) string {
+	if sessionID := stringArg(args, "_session_id"); sessionID != "" {
+		return sessionID
+	}
+	return stringArg(args, "_task_id")
+}
+
 func CaptureTypedToolEventContext(toolName string, args map[string]interface{}, workDir, agentName string) ToolEventContext {
 	ctx := ToolEventContext{AgentName: strings.TrimSpace(agentName)}
 	if toolName != "git-commit" {
@@ -166,7 +173,7 @@ func TypedToolStartEvents(toolName string, args map[string]interface{}, workDir 
 			Type:             "delegate",
 			FromAgent:        ctx.AgentName,
 			ToAgent:          toAgent,
-			SessionID:        stringArg(args, "_task_id"),
+			SessionID:        sessionIDArg(args),
 			ObjectiveSummary: summarizeDelegateObjective(task),
 			TargetRepo:       extractRepoRef(task),
 		}}
