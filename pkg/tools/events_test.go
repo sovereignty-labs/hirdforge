@@ -39,9 +39,10 @@ func TestTypedToolStartEventsPlanStepComplete(t *testing.T) {
 
 func TestTypedToolStartEventsDelegate(t *testing.T) {
 	events := TypedToolStartEvents("delegate", map[string]interface{}{
-		"agent":    "ivar",
-		"task":     "TASK: Update kit/hirdforge RBAC manifests\nSTEPS:\n1. Inspect current files\nDONE WHEN: PR is open",
-		"_task_id": "sess-123",
+		"agent":       "ivar",
+		"task":        "TASK: Update kit/hirdforge RBAC manifests\nSTEPS:\n1. Inspect current files\nDONE WHEN: PR is open",
+		"_task_id":    "task-123",
+		"_session_id": "sess-123",
 	}, "/tmp", ToolEventContext{AgentName: "rune"})
 	if len(events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(events))

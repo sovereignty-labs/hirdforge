@@ -777,6 +777,10 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 		return toolpkg.ToolResult{Error: "agent and task are required"}
 	}
 	taskID, _ := args["_task_id"].(string)
+	sessionID := strings.TrimSpace(fmt.Sprint(args["_session_id"]))
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(taskID)
+	}
 	peerURL, ok := t.peers[agent]
 	if !ok {
 		names := make([]string, 0, len(t.peers))
@@ -790,7 +794,7 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
-	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, formatted, taskID)
+	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, formatted, sessionID)
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
@@ -4608,7 +4612,7 @@ func main() {
 	modelName = *model
 
 	emitNoop := func(interface{}) bool { return true }
-	processConversation := func(ctx context.Context, sessionID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
+	processConversation := func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
 		if emit == nil {
 			emit = emitNoop
 		}
@@ -4847,7 +4851,10 @@ func main() {
 				result := toolpkg.ToolResult{Error: "unknown tool: " + tc.Function.Name}
 				switch tc.Function.Name {
 				case "delegate":
-					args["_task_id"] = sessionID
+					args["_session_id"] = sessionID
+					if strings.TrimSpace(taskID) != "" {
+						args["_task_id"] = taskID
+					}
 					targetAgent := strings.TrimSpace(fmt.Sprint(args["agent"]))
 					if targetAgent != "" {
 						notifyGateway(*gatewayURL, "delegation_started", agentName, map[string]interface{}{
@@ -4933,11 +4940,12 @@ func main() {
 					targetAgent := strings.TrimSpace(fmt.Sprint(args["agent"]))
 					taskBrief := strings.TrimSpace(fmt.Sprint(args["task"]))
 					taskID := strings.TrimSpace(fmt.Sprint(args["_task_id"]))
+					dispatchSessionID := strings.TrimSpace(fmt.Sprint(args["_session_id"]))
 					notifyGateway(*gatewayURL, "task_dispatched", agentName, map[string]interface{}{
 						"target_agent": targetAgent,
 						"task_id":      taskID,
 						"summary":      truncateMemoryValue(taskBrief, 100),
-						"session_id":   taskID,
+						"session_id":   dispatchSessionID,
 					})
 				}
 				if tc.Function.Name == "git-clone" {
@@ -5647,7 +5655,7 @@ func main() {
 			flusher.Flush()
 			return true
 		}
-		if _, err := processConversation(r.Context(), sessionID, req.Content, emit, nil); err != nil {
+		if _, err := processConversation(r.Context(), sessionID, "", req.Content, emit, nil); err != nil {
 			incError("message processing failed", err, nil)
 			writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
 		}
@@ -5746,7 +5754,7 @@ func main() {
 				}}
 			}
 			for {
-				result, err = processConversation(ctx, taskID, pendingContent, nil, appendToolLog)
+				result, err = processConversation(ctx, taskID, taskID, pendingContent, nil, appendToolLog)
 				if err != nil || len(completionGates) == 0 {
 					break
 				}

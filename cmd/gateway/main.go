@@ -279,6 +279,11 @@ type messageReq struct {
 	Source    string `json:"source"`
 }
 
+type agentMessageRequest struct {
+	Content   string `json:"content"`
+	SessionID string `json:"session_id,omitempty"`
+}
+
 type dispatchReq struct {
 	Agent   string `json:"agent"`
 	Content string `json:"content"`
@@ -4490,7 +4495,7 @@ func main() {
 				gw.setActiveRequest(agentName, sessionID, agentCancel)
 				defer gw.clearActiveRequest(agentName, agentCancel)
 
-				body, _ := json.Marshal(map[string]string{"content": content, "session_id": sessionID})
+				body, _ := json.Marshal(agentMessageRequest{Content: content, SessionID: sessionID})
 				uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
 				if err != nil {
 					log.Printf("async message: failed to create request for %s: %v", agentName, err)
@@ -4608,7 +4613,7 @@ func main() {
 		gw.setActiveRequest(in.Agent, sessionID, agentCancel)
 		defer gw.clearActiveRequest(in.Agent, agentCancel)
 
-		body, _ := json.Marshal(map[string]string{"content": in.Content, "session_id": sessionID})
+		body, _ := json.Marshal(agentMessageRequest{Content: in.Content, SessionID: sessionID})
 		uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
