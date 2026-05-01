@@ -24,18 +24,6 @@
   <script type="text/babel">
     const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
-    const mockAgents = [
-      { id: 'ragnar', name: 'Ragnar', role: 'Architect', model: 'MiniMax M2.7', status: 'active', task: 'Coordinating #211 review', surface: 'idle' },
-      { id: 'ivar', name: 'Ivar', role: 'Builder', model: 'Gemma 4 26B (local-builder)', status: 'active', task: 'Writing rbac/gateway-argocd.yaml', surface: 'builder' },
-      { id: 'jeeves', name: 'Jeeves', role: 'PA', model: 'MiniMax M2.7', status: 'active', task: 'Drafting reply to Sarah Chen', pendingApproval: true, flag: true, surface: 'action' },
-      { id: 'sindri', name: 'Sindri', role: 'Builder', model: 'MiniMax M2.7', status: 'active', task: 'Reading PR #210 diff', surface: 'idle' },
-      { id: 'chuck', name: 'Chuck', role: 'Builder', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
-      { id: 'val', name: 'Val', role: 'Builder', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
-      { id: 'leif', name: 'Leif', role: 'Builder', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
-      { id: 'freya', name: 'Freya', role: 'Reviewer', model: 'GPT-5.2', status: 'idle', surface: 'idle' },
-      { id: 'thane', name: 'Thane', role: 'Reviewer', model: 'MiniMax M2.7', status: 'idle', surface: 'idle' },
-    ];
-
     function normalizeAgent(agent) {
       const name = String(agent.name || '').trim();
       return {
@@ -83,16 +71,6 @@
 
     function isReviewerAgent(agent) {
       return String((agent && agent.role) || '').toLowerCase().includes('review');
-    }
-
-    function mockSurfaceForAgent(agent) {
-      const key = String((agent && (agent.id || agent.name)) || '').toLowerCase();
-      const mock = mockAgents.find(item => item.id === key || item.name.toLowerCase() === key);
-      if (mock && (mock.surface === 'builder' || mock.surface === 'action')) return mock.surface;
-      const role = String((agent && agent.role) || '').toLowerCase();
-      if (role.includes('review')) return 'reviewer';
-      if (role.includes('pa') || role.includes('assistant') || role.includes('action')) return 'action';
-      return 'builder';
     }
 
     function formatTime(date = new Date()) {
@@ -658,61 +636,6 @@
       if (workspace && workspace.current_file && files[workspace.current_file]) return files[workspace.current_file];
       return touchedFiles(workspace)[0] || null;
     }
-
-    const ivarActivity = [
-      { t: '2m ago', text: 'cloned kit/asgard-infra', icon: 'FolderGit2' },
-      { t: '90s ago', text: 'created branch ivar/argocd-rbac-fix', icon: 'GitBranch' },
-      { t: '70s ago', text: 'read rbac/agent-roles.yaml', icon: 'FileCode' },
-      { t: '45s ago', text: 'read rbac/asgard-agent-binding.yaml', icon: 'FileCode' },
-      { t: 'now', text: 'writing rbac/gateway-argocd.yaml', icon: 'FileCode', current: true },
-      { t: 'next', text: 'validate yaml', icon: 'CheckCircle2', pending: true },
-      { t: 'next', text: 'commit and push', icon: 'GitCommit', pending: true },
-      { t: 'next', text: 'open PR', icon: 'GitPullRequest', pending: true },
-    ];
-
-    const jeevesActivity = [
-      { t: '4m ago', text: 'received email from Sarah Chen', icon: 'Inbox' },
-      { t: '3m ago', text: 'classified as response-needed', icon: 'Mail' },
-      { t: '2m ago', text: 'checked calendar — Fri 2pm available', icon: 'Calendar' },
-      { t: '90s ago', text: 'composed reply', icon: 'Edit3' },
-      { t: 'now', text: 'queued send for Sovereign approval', icon: 'ShieldAlert', current: true },
-      { t: 'next', text: 'send email', icon: 'Send', pending: true },
-      { t: 'next', text: 'send calendar invite', icon: 'Calendar', pending: true },
-    ];
-
-    const tree = {
-      name: 'kit/asgard-infra',
-      type: 'repo',
-      children: [
-        { name: 'infrastructure', type: 'folder', collapsed: true },
-        {
-          name: 'rbac',
-          type: 'folder',
-          expanded: true,
-          children: [
-            { name: 'agent-roles.yaml', type: 'file', state: 'read', age: '70s' },
-            { name: 'asgard-agent-binding.yaml', type: 'file', state: 'read', age: '45s' },
-            { name: 'gateway-argocd.yaml', type: 'file', state: 'writing', age: 'now' },
-          ],
-        },
-        { name: 'networkpolicies', type: 'folder', collapsed: true },
-        { name: 'sealed-secrets', type: 'folder', collapsed: true },
-        { name: 'README.md', type: 'file', state: 'clean' },
-      ],
-    };
-
-    const yamlLines = [
-      { n: 1, c: 'apiVersion: rbac.authorization.k8s.io/v1' },
-      { n: 2, c: 'kind: ClusterRole' },
-      { n: 3, c: 'metadata:' },
-      { n: 4, c: '  name: gateway-argocd-reader' },
-      { n: 5, c: '  labels:' },
-      { n: 6, c: '    asgard.io/component: gateway' },
-      { n: 7, c: 'rules:' },
-      { n: 8, c: '  - apiGroups: ["argoproj.io"]' },
-      { n: 9, c: '    resources: ["applications"]' },
-      { n: 10, c: '    verbs: ["get", "list", "watch", "patch"]', writing: true },
-    ];
 
     const realmSections = [
       { id: 'cluster', title: 'Cluster', icon: 'Server', open: true, body: '10 nodes · 47 pods · all green' },
@@ -1455,46 +1378,6 @@
               );
             })}
           </div>
-        </div>
-      );
-    }
-
-    function MockBuilderSurface({ cursorBlink, leftRailWidth, startDragTree, isDraggingTree, activityHeight, startDragActivity, isDraggingActivity }) {
-      return (
-        <div className="flex-1 flex flex-col min-h-0">
-          <div className="flex-1 flex min-h-0">
-            <div style={{ width: `${leftRailWidth}px` }} className="border-r border-zinc-800 bg-zinc-900/30 overflow-y-auto shrink-0">
-              <TreeNode node={tree} />
-              <div className="mt-2 px-2 py-1.5 border-t border-zinc-800/60 text-[9px] text-zinc-600">
-                <div className="uppercase mb-1">Legend</div>
-                <div className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" /> writing</div>
-                <div className="flex items-center gap-1.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-400/60" /> read</div>
-                <div className="mt-2 text-zinc-700">Other agents in repo: none</div>
-              </div>
-            </div>
-            <ResizeRailHandle startDragTree={startDragTree} isDraggingTree={isDraggingTree} />
-            <div className="flex-1 flex flex-col min-w-0">
-              <div className="px-3 py-1 border-b border-zinc-800 bg-zinc-900/30 flex items-center gap-2 shrink-0">
-                <Icon name="FileCode" className="w-3 h-3 text-amber-400" />
-                <span className="text-zinc-300">rbac/gateway-argocd.yaml</span>
-                <span className="text-[10px] text-amber-400 ml-auto flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" /> writing
-                </span>
-              </div>
-              <div className="flex-1 overflow-y-auto bg-zinc-950">
-                {yamlLines.map(line => (
-                  <div key={line.n} className={`flex font-mono text-[11px] leading-5 ${line.writing ? 'bg-amber-500/5 border-l-2 border-amber-500' : 'border-l-2 border-transparent'}`}>
-                    <span className="w-10 text-right pr-3 text-zinc-700 select-none shrink-0">{line.n}</span>
-                    <span className="text-zinc-300">
-                      {line.c}
-                      {line.writing && <span className={`inline-block w-2 h-3.5 align-middle ml-px ${cursorBlink ? 'bg-amber-400' : 'bg-transparent'}`} />}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-          <ActivityTimeline items={ivarActivity} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
         </div>
       );
     }
@@ -2572,7 +2455,6 @@
       startDragActivity,
       isDraggingActivity,
     }) {
-      const hasRealBuilder = surface === 'builder' && hasWorkspaceContent(workspace);
       return (
         <div className="relative flex-1 min-h-0 bg-zinc-950">
           <div className="absolute right-3 top-3 z-10 rounded border border-zinc-700 bg-zinc-950/90 px-2 py-0.5 text-[10px] uppercase text-zinc-400">
@@ -2602,10 +2484,8 @@
                 onCancelRevise={() => {}}
                 onSubmitRevise={() => {}}
               />
-            ) : hasRealBuilder ? (
-              <BuilderSurface focused={focused} workspace={workspace} workspaces={workspaces} timeline={timeline} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
             ) : (
-              <MockBuilderSurface cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
+              <BuilderSurface focused={focused} workspace={workspace} workspaces={workspaces} timeline={timeline} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
             )}
           </div>
         </div>
@@ -3166,9 +3046,9 @@
                   startDragActivity={startDragActivity}
                   isDraggingActivity={isDraggingActivity}
                 />
-              ) : focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'builder' ? (
+              ) : focused && focusedSurface === 'builder' ? (
                 <BuilderSurface focused={focused} workspace={focusedWorkspace} workspaces={workspaces} timeline={focusedTimeline} cursorBlink={cursorBlink} leftRailWidth={leftRailWidth} startDragTree={startDragTree} isDraggingTree={isDraggingTree} activityHeight={activityHeight} startDragActivity={startDragActivity} isDraggingActivity={isDraggingActivity} />
-              ) : focused && focusedFleetState && focusedFleetState.active && focusedSurface === 'action' ? (
+              ) : focused && focusedSurface === 'action' ? (
                 <ActionSurface
                   focused={focused}
                   plan={focusedPlan}
