@@ -964,16 +964,9 @@ func (g *gateway) refreshArchitectWorkspace(agentName string) workspacepkg.Agent
 	if sessionID == "" {
 		return g.projector.SetArchitectSessionData(agentName, "", nil, nil)
 	}
-	// Get the architect's own agent info to fetch their task list directly,
-	// avoiding N-1 HTTP calls when only one agent's tasks are needed.
-	architect, ok := g.getAgent(agentName)
-	if !ok {
-		return workspacepkg.AgentWorkspace{AgentName: agentName, FilesTouched: map[string]workspacepkg.FileState{}}
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// Architect's tasks are those where architect is the From field in their session.
-	tasks := g.fetchTasksFromAgent(ctx, *architect, "", "")
+	tasks := g.fetchTasks(ctx, "", agentName, "")
 	refs := make([]workspacepkg.TaskRef, 0, len(tasks))
 	for _, task := range tasks {
 		if strings.TrimSpace(task.SessionID) != sessionID {
