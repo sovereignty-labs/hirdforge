@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 
@@ -30,6 +29,8 @@ type serverDeps struct {
 	requirePRPattern    string
 	completionMaxNudges int
 	reviewTracker       *reviewContextTracker
+	agentDescription    string
+	a2aRuntime          *a2aRuntime
 }
 
 func registerRoutes(mux *http.ServeMux, deps serverDeps) {
@@ -46,26 +47,36 @@ func registerRoutes(mux *http.ServeMux, deps serverDeps) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		host, _ := os.Hostname()
-		if host == "" {
-			host = "localhost"
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"name":        deps.agentName,
-			"description": "Valhalla AI agent",
-			"url":         fmt.Sprintf("http://%s:%s", host, portValue),
-			"version":     "0.0.2",
+			"description": deps.agentDescription,
+			"url":         agentBaseURL(r),
+			"version":     "1.0.0",
 			"capabilities": map[string]interface{}{
-				"streaming":  true,
-				"tools":      enabledTools,
-				"delegation": len(peersValue) > 0,
+				"streaming":         true,
+				"pushNotifications": true,
 			},
-			"peers":              deps.peerNames,
-			"defaultInputModes":  []string{"text"},
-			"defaultOutputModes": []string{"text"},
+			"skills": enabledTools,
+			"interfaces": []map[string]string{
+				{
+					"protocol": "jsonrpc",
+					"url":      agentBaseURL(r) + "/a2a",
+				},
+				{
+					"protocol": "grpc",
+					"url":      agentGRPCURL(r),
+				},
+			},
+			"provider": map[string]string{
+				"organization": "Hirdforge",
+				"url":          "https://hirdforge.com",
+			},
 		})
 	})
+	if deps.a2aRuntime != nil {
+		mux.HandleFunc("/a2a", deps.a2aRuntime.handleJSONRPC)
+	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

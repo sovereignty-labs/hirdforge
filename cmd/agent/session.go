@@ -1290,14 +1290,24 @@ func registerSessionRoutes(mux *http.ServeMux, deps serverDeps) {
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
 
-		emit := func(chunk interface{}) bool {
+		legacyEmit := func(chunk interface{}) bool {
 			writeSSE(w, chunk)
 			flusher.Flush()
 			return true
 		}
-		if _, err := deps.processConversation(r.Context(), sessionID, "", req.Content, emit, nil); err != nil {
+		a2aTaskID := "session-" + sessionID
+		emit := func(chunk interface{}) bool {
+			if !legacyEmit(chunk) {
+				return false
+			}
+			return emitA2AStatusSSE(legacyEmit, a2aTaskID, chunk)
+		}
+		result, err := deps.processConversation(r.Context(), sessionID, "", req.Content, emit, nil)
+		if err != nil {
 			incError("message processing failed", err, nil)
 			writeSSE(w, sseChunk{Type: "content", Content: err.Error(), Done: false})
+		} else {
+			_ = emitA2AArtifactSSE(legacyEmit, a2aTaskID, result)
 		}
 		writeSSE(w, sseChunk{Type: "done", Done: true, SessionID: sessionID})
 		flusher.Flush()
