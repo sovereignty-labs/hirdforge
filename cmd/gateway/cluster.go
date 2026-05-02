@@ -449,13 +449,13 @@ func listCertExpiries(k8s *k8sState, namespace string) certsResponse {
 		log.Printf("certs: kubernetes integration disabled")
 		return out
 	}
-	status, body, rawBody, err := k8s.getJSONWithStatus(fmt.Sprintf("/apis/cert-manager.io/v1/namespaces/%s/certificates", url.PathEscape(namespace)))
+	status, body, rawBody, err := k8s.getJSONWithStatus("/apis/cert-manager.io/v1/certificates")
 	if err != nil {
 		log.Printf("certs: certificate request error: %v", err)
 		return out
 	}
 	if status == http.StatusNotFound {
-		log.Printf("certs: cert-manager certificates not found in namespace %s (404)", namespace)
+		log.Printf("certs: cert-manager certificates not found cluster-wide (404)")
 		return out
 	}
 	if status < 200 || status >= 300 {
@@ -475,12 +475,13 @@ func listCertExpiries(k8s *k8sState, namespace string) certsResponse {
 		}
 		out.Certs = append(out.Certs, certExpiryInfo{
 			Name:          asString(meta["name"]),
+			Namespace:     asString(meta["namespace"]),
 			Expiry:        expiry,
 			DaysRemaining: daysRemaining,
 		})
 	}
 	sort.Slice(out.Certs, func(i, j int) bool { return out.Certs[i].Name < out.Certs[j].Name })
-	log.Printf("certs: returned %d certificates from namespace %s", len(out.Certs), namespace)
+	log.Printf("certs: returned %d certificates cluster-wide", len(out.Certs))
 	return out
 }
 
