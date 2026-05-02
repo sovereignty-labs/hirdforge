@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.23-bookworm AS build
+FROM golang:1.25-bookworm AS build
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends curl tar ca-certificates && rm -rf /var/lib/apt/lists/*
 # Pinned tool versions
@@ -34,7 +34,7 @@ RUN set -eux; \
     rm -rf /tmp/helm.tar.gz /tmp/kubeseal.tar.gz /tmp/crane.tar.gz /tmp/linux-amd64 /tmp/kubeseal /tmp/crane
 
 # Runtime stage — full Go toolchain on Debian (glibc) for maximum capability
-FROM golang:1.23-bookworm
+FROM golang:1.25-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl wget jq python3 python3-pip python3-venv \
     ca-certificates build-essential openssh-client \
