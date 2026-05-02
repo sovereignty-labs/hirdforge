@@ -319,9 +319,7 @@ func (g *gateway) setActiveRequest(agent, sessionID string, cancel context.Cance
 func (g *gateway) clearActiveRequest(agent string, cancel context.CancelFunc) {
 	g.arMu.Lock()
 	defer g.arMu.Unlock()
-	if _, ok := g.activeRequests[agent]; ok {
-		delete(g.activeRequests, agent)
-	}
+	delete(g.activeRequests, agent)
 }
 
 func (g *gateway) activeSessionID(agent string) string {
