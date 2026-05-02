@@ -177,6 +177,7 @@ type historyDeploymentsResponse struct {
 
 type certExpiryInfo struct {
 	Name          string `json:"name"`
+	Namespace     string `json:"namespace"`
 	Expiry        string `json:"expiry"`
 	DaysRemaining int64  `json:"days_remaining"`
 }
