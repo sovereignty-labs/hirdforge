@@ -2866,20 +2866,10 @@ func main() {
 	giteaClient := &http.Client{Timeout: 10 * time.Second}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ui", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, uiHTML)
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 	})
 	mux.HandleFunc("/ui/", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, uiHTML)
+		http.Redirect(w, r, "/", http.StatusMovedPermanently)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2887,7 +2877,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(w, dashboardHTML)
+		_, _ = io.WriteString(w, uiHTML)
 	})
 	mux.HandleFunc("/ws/events", func(w http.ResponseWriter, r *http.Request) {
 		if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
