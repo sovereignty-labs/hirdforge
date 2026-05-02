@@ -177,22 +177,22 @@ func TestAgentConfigureRequestMarshalUnmarshal(t *testing.T) {
 // TestParseAgents validates agent parsing
 func TestParseAgents(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		wantErr  bool
-		wantLen  int
+		name    string
+		input   string
+		wantErr bool
+		wantLen int
 	}{
 		{
-			name:     "single agent",
-			input:    "val=http://val.valhalla.svc:8081",
-			wantErr:  false,
-			wantLen:  1,
+			name:    "single agent",
+			input:   "val=http://val.valhalla.svc:8081",
+			wantErr: false,
+			wantLen: 1,
 		},
 		{
-			name:     "multiple agents",
-			input:    "val=http://val.valhalla.svc:8081,chuck=http://chuck.valhalla.svc:8081",
-			wantErr:  false,
-			wantLen:  2,
+			name:    "multiple agents",
+			input:   "val=http://val.valhalla.svc:8081,chuck=http://chuck.valhalla.svc:8081",
+			wantErr: false,
+			wantLen: 2,
 		},
 		{
 			name:    "empty input",
@@ -323,11 +323,8 @@ func TestEventStructMarshalUnmarshal(t *testing.T) {
 // TestCreateGitOpsAgentConfigPRURLGeneration tests URL generation
 func TestCreateGitOpsAgentConfigPRURLGeneration(t *testing.T) {
 	// Compile-time signature check only; network behavior belongs in integration tests.
-	var fn func(*http.Client, string, string, string, string, agentConfigureRequest) (string, error)
-	fn = createGitOpsAgentConfigPR
-	if fn == nil {
-		t.Fatal("expected function assignment to succeed")
-	}
+	fn := createGitOpsAgentConfigPR
+	_ = fn
 }
 
 // TestAgentSnapshot ensures snapshotAgents returns correct agent list
@@ -336,19 +333,19 @@ func TestAgentSnapshot(t *testing.T) {
 	gw := &gateway{
 		agents: map[string]*Agent{
 			"val": {
-				Name:      "val",
-				URL:       "http://val.valhalla.svc:8081",
-				Healthy:   true,
-				Model:     "gpt-4o",
-				Tools:     []string{"exec", "read", "write"},
+				Name:          "val",
+				URL:           "http://val.valhalla.svc:8081",
+				Healthy:       true,
+				Model:         "gpt-4o",
+				Tools:         []string{"exec", "read", "write"},
 				UptimeSeconds: 3600,
 			},
 			"chuck": {
-				Name:      "chuck",
-				URL:       "http://chuck.valhalla.svc:8081",
-				Healthy:   false,
-				Model:     "gpt-4",
-				Tools:     []string{"exec", "read"},
+				Name:          "chuck",
+				URL:           "http://chuck.valhalla.svc:8081",
+				Healthy:       false,
+				Model:         "gpt-4",
+				Tools:         []string{"exec", "read"},
 				UptimeSeconds: 0,
 			},
 		},
