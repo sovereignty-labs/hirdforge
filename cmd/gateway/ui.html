@@ -391,7 +391,13 @@
         timeValue(queueItem && queueItem.queued_at),
         latestTimelineTime(timeline, actionEventTypes)
       );
-      if (architectTime === 0 && builderTime === 0 && actionTime === 0) return 'idle';
+      if (architectTime === 0 && builderTime === 0 && actionTime === 0) {
+        // Keep Action surface interactive when there's a pending approval item
+        // for the focused agent, regardless of fleet active state.
+        const hasPendingApproval = queueItem && queueItem.status === 'pending';
+        if (hasPendingApproval) return 'action';
+        return 'idle';
+      }
       if (architectTime >= builderTime && architectTime >= actionTime) return 'architect';
       return actionTime >= builderTime ? 'action' : 'builder';
     }
