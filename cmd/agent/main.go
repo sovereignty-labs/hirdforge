@@ -2060,7 +2060,9 @@ func main() {
 	sovereignNotifyURL := flag.String("sovereign-notify-url", "", "Gateway URL for sovereign task notifications; empty disables sovereign reporting")
 	sovereignNotifyOn := flag.String("sovereign-notify-on", "completed,failed,nudged", "Comma-separated sovereign notification states")
 	workspace := flag.String("workspace", "./workspace", "tool workspace directory")
+	agentsFlag := flag.String("agents", "", "comma-separated name=url peer agents (alias for --peers)")
 	peersFlag := flag.String("peers", "", "comma-separated name=url peer agents")
+	legacyDelegate := flag.Bool("legacy-delegate", false, "Use the legacy synchronous /tasks/send delegation path")
 	memoryURL := flag.String("memory-url", "", "Seidr memory service URL")
 	memoryToolsFlag := flag.Bool("memory-tools", false, "Enable recall, remember, and memory-edit tools (requires --memory-url)")
 	gatewayURL := flag.String("gateway-url", "", "Gateway URL for event notifications (optional)")
@@ -2097,9 +2099,18 @@ func main() {
 	if err := os.MkdirAll(*workspace, 0755); err != nil {
 		die("failed to create workspace", err)
 	}
-	peers, err := parsePeers(*peersFlag)
-	if err != nil {
-		die("failed to parse peers", err)
+	peers := map[string]string{}
+	for _, rawPeers := range []string{*peersFlag, *agentsFlag} {
+		parsedPeers, parseErr := parsePeers(rawPeers)
+		if parseErr != nil {
+			die("failed to parse peers", parseErr)
+		}
+		for name, value := range parsedPeers {
+			if existing, ok := peers[name]; ok && existing != value {
+				die("failed to parse peers", fmt.Errorf("duplicate peer %q with conflicting URLs", name))
+			}
+			peers[name] = value
+		}
 	}
 	peerNames := make([]string, 0, len(peers))
 	for name := range peers {
@@ -2107,6 +2118,7 @@ func main() {
 	}
 	sort.Strings(peerNames)
 	agentName := strings.TrimSpace(*agentNameFlag)
+	var err error
 	if agentName == "" {
 		agentName = agentNameFromSoulPath(*soulPath)
 	}
@@ -2194,6 +2206,7 @@ func main() {
 		giteaToken:          giteaToken,
 		agentName:           agentName,
 		peers:               peers,
+		gatewayURL:          *gatewayURL,
 		maxDelegationTokens: *maxDelegationTokens,
 		memoryURL:           *memoryURL,
 		memoryToolsEnabled:  *memoryToolsFlag,
@@ -2201,6 +2214,7 @@ func main() {
 		reviewTracker:       reviewTracker,
 		enabled:             enabled,
 		delegationGates:     delegationGates,
+		legacyDelegate:      *legacyDelegate,
 	})
 	enabledTools = reg.List()
 	modelName = *model
