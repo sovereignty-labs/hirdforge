@@ -4,6 +4,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY pkg/ pkg/
+COPY proto/ proto/
 RUN go vet ./...
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-lockbox ./cmd/lockbox/
 
@@ -14,4 +15,3 @@ USER warrior
 WORKDIR /workspace
 EXPOSE 8083
 ENTRYPOINT ["/usr/local/bin/valhalla-lockbox"]
-
