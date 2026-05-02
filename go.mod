@@ -1,6 +1,6 @@
 module github.com/kitporath/project_valhalla
 
-go 1.23.0
+go 1.25.9
 
 require (
 	github.com/chzyer/readline v1.5.1
