@@ -446,7 +446,6 @@ var (
 var (
 	portValue       string
 	grpcPortValue   string
-	peersValue      map[string]string
 	giteaURLValue   string
 	giteaTokenValue string
 	gatewayURLValue string
@@ -2207,7 +2206,6 @@ func main() {
 	modelName = *model
 	portValue = *port
 	grpcPortValue = *grpcPort
-	peersValue = peers
 	giteaURLValue = *giteaURL
 	giteaTokenValue = giteaToken
 	gatewayURLValue = *gatewayURL
