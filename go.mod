@@ -4,6 +4,7 @@ go 1.25.9
 
 require (
 	github.com/chzyer/readline v1.5.1
+	github.com/lib/pq v1.10.9
 	golang.org/x/oauth2 v0.30.0
 	google.golang.org/api v0.226.0
 )

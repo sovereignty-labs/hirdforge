@@ -305,6 +305,7 @@ type gateway struct {
 	mu                sync.RWMutex
 	agents            map[string]*Agent
 	order             []string
+	a2aStore          *A2ATaskStore
 	reposMu           sync.RWMutex
 	repos             []string
 	prReviewMu        sync.RWMutex
@@ -1467,6 +1468,7 @@ func main() {
 	webhookSecret := flag.String("webhook-secret", "", "HMAC secret for Gitea webhook validation (optional)")
 	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
 	seidrURLFlag := flag.String("seidr-url", "http://seidr.asgard.svc:8082", "Seidr memory service URL")
+	a2aDBURL := flag.String("a2a-db-url", "", "PostgreSQL URL for A2A task store")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
@@ -1514,6 +1516,16 @@ func main() {
 	}
 	if err := gw.loadPipelineState(); err != nil {
 		log.Printf("webhook: failed to load pipeline state: %v", err)
+	}
+	if strings.TrimSpace(*a2aDBURL) != "" {
+		store := &A2ATaskStore{}
+		if err := store.Init(*a2aDBURL); err != nil {
+			die("failed to initialize a2a task store", err)
+		}
+		gw.a2aStore = store
+		log.Printf("a2a: task store initialized")
+	} else {
+		log.Printf("a2a: task store disabled (no --a2a-db-url)")
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
 	gw.refreshRepos()
@@ -1594,6 +1606,7 @@ func main() {
 		lockboxURL:   strings.TrimSpace(*lockboxURL),
 		giteaRepo:    strings.TrimSpace(*giteaRepo),
 	})
+	gw.registerA2ARoutes(mux)
 	gw.registerHealthEndpoints(mux)
 	registerGatewayMCP(mux, gw)
 	gw.registerWebhookHandlers(mux)
