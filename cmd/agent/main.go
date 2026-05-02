@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -444,6 +445,7 @@ var (
 
 var (
 	portValue       string
+	grpcPortValue   string
 	peersValue      map[string]string
 	giteaURLValue   string
 	giteaTokenValue string
@@ -2042,6 +2044,7 @@ func metricsText() string {
 func main() {
 	soulPath := flag.String("soul", "./soul.md", "path to SOUL.md")
 	port := flag.String("port", "8081", "HTTP port")
+	grpcPort := flag.String("grpc-port", "8082", "gRPC port")
 	inferenceURL := flag.String("inference-url", "http://localhost:11434", "inference base URL")
 	model := flag.String("model", "qwen3:30b", "model name")
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
@@ -2203,6 +2206,7 @@ func main() {
 	enabledTools = reg.List()
 	modelName = *model
 	portValue = *port
+	grpcPortValue = *grpcPort
 	peersValue = peers
 	giteaURLValue = *giteaURL
 	giteaTokenValue = giteaToken
@@ -2234,6 +2238,7 @@ func main() {
 		giteaTool:        giteaTool,
 		reviewTracker:    reviewTracker,
 	})
+	a2aRuntime := newA2ARuntime(agentName, processConversation)
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, serverDeps{
@@ -2252,14 +2257,22 @@ func main() {
 		requirePRPattern:    *requirePRPattern,
 		completionMaxNudges: *completionMaxNudges,
 		reviewTracker:       reviewTracker,
+		agentDescription:    agentDescriptionFromSoul(soul),
+		a2aRuntime:          a2aRuntime,
 	})
+
+	go func() {
+		log.Printf("a2a grpc: listening on :%s", *grpcPort)
+		die("a2a grpc server failed", startA2AGRPCServer(*grpcPort, a2aRuntime))
+	}()
 
 	addr := ":" + *port
 	logJSON("info", "agent started", map[string]interface{}{
-		"port":  *port,
-		"model": *model,
-		"tools": enabledTools,
-		"peers": peerNames,
+		"port":      *port,
+		"grpc_port": *grpcPort,
+		"model":     *model,
+		"tools":     enabledTools,
+		"peers":     peerNames,
 	})
 	die("server failed", http.ListenAndServe(addr, mux))
 }
