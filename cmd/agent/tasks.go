@@ -16,6 +16,7 @@ import (
 
 	tasklifepkg "github.com/kitporath/project_valhalla/pkg/tasklife"
 	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
+	workspacepkg "github.com/kitporath/project_valhalla/pkg/workspace"
 )
 
 func newTaskID() string {
@@ -84,6 +85,64 @@ func notifyGateway(gatewayURL, eventType, agentName string, metadata map[string]
 		}
 		_ = resp.Body.Close()
 	}()
+}
+
+func taskEventMetadata(chunk interface{}) (string, map[string]interface{}, bool) {
+	body, err := json.Marshal(chunk)
+	if err != nil {
+		return "", nil, false
+	}
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return "", nil, false
+	}
+	eventType := strings.TrimSpace(fmt.Sprint(metadata["type"]))
+	if eventType == "" {
+		return "", nil, false
+	}
+	return eventType, metadata, true
+}
+
+func taskObjectMap(value interface{}) (map[string]interface{}, bool) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func taskWorkspaceUpdateEmitter(gatewayURL, agentName, taskSessionID string) func(interface{}) bool {
+	projector := workspacepkg.NewProjector()
+	return func(chunk interface{}) bool {
+		eventType, metadata, ok := taskEventMetadata(chunk)
+		if !ok || !workspacepkg.IsTypedEvent(eventType) {
+			return true
+		}
+		if strings.TrimSpace(taskSessionID) != "" {
+			sessionID := strings.TrimSpace(fmt.Sprint(metadata["session_id"]))
+			if sessionID == "" || sessionID == "<nil>" {
+				metadata["session_id"] = strings.TrimSpace(taskSessionID)
+			}
+		}
+		projector.Apply(agentName, eventType, metadata)
+		if strings.TrimSpace(taskSessionID) != "" {
+			ws := projector.Get(agentName)
+			projector.SetArchitectContext(agentName, taskSessionID, ws.CurrentObjective)
+		}
+		notifyGateway(gatewayURL, eventType, agentName, metadata)
+		workspace, ok := taskObjectMap(projector.Get(agentName))
+		if !ok {
+			return true
+		}
+		notifyGateway(gatewayURL, "workspace_update", agentName, map[string]interface{}{
+			"workspace": workspace,
+		})
+		return true
+	}
 }
 
 func verifyPRExists(giteaURL, giteaToken, prURL string) (bool, error) {
@@ -269,6 +328,7 @@ func registerTaskRoutes(mux *http.ServeMux, deps serverDeps) {
 			pendingContent := content
 			var result string
 			var err error
+			emitWorkspaceUpdate := taskWorkspaceUpdateEmitter(gatewayURLValue, deps.agentName, current.SessionID)
 			completionGates := []tasklifepkg.CompletionGate(nil)
 			if strings.TrimSpace(deps.requirePRPattern) != "" {
 				completionGates = []tasklifepkg.CompletionGate{{
@@ -278,7 +338,7 @@ func registerTaskRoutes(mux *http.ServeMux, deps serverDeps) {
 				}}
 			}
 			for {
-				result, err = deps.processConversation(ctx, taskID, taskID, pendingContent, nil, appendToolLog)
+				result, err = deps.processConversation(ctx, taskID, taskID, pendingContent, emitWorkspaceUpdate, appendToolLog)
 				if err != nil || len(completionGates) == 0 {
 					break
 				}
