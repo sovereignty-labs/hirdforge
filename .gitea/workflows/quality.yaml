@@ -1,0 +1,62 @@
+name: Quality Gates
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    container: golang:1.25-alpine
+
+    steps:
+      - name: Install base packages
+        run: apk add --no-cache git ca-certificates bash
+
+      - name: Clone repository at workflow SHA
+        run: |
+          rm -rf /src
+          git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src
+          cd /src
+          git fetch origin ${{ github.sha }}
+          git checkout ${{ github.sha }}
+
+      - name: Install static analysis tools
+        run: |
+          cd /src
+          GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@latest
+          GOBIN=/usr/local/bin go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
+
+      - name: Run staticcheck
+        run: |
+          cd /src
+          staticcheck ./...
+
+      - name: Run gocyclo
+        run: |
+          cd /src
+          # Target threshold is -over 30 once existing legacy hotspots are reduced.
+          gocyclo -over 250 .
+
+      - name: Run go vet
+        run: |
+          cd /src
+          go vet ./...
+
+      - name: Warn on oversized Go files
+        run: |
+          cd /src
+          found=0
+          find . -name '*.go' -type f | sort > /tmp/go-files.txt
+          while IFS= read -r file; do
+            lines=$(wc -l < "$file")
+            if [ "$lines" -gt 1500 ]; then
+              echo "WARNING: $file has $lines lines (threshold 1500)"
+              found=1
+            fi
+          done < /tmp/go-files.txt
+          if [ "$found" -eq 0 ]; then
+            echo "No Go files exceed 1500 lines."
+          fi
