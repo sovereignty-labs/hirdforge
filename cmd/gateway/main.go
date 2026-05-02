@@ -308,10 +308,6 @@ type gateway struct {
 	a2aStore          *A2ATaskStore
 	reposMu           sync.RWMutex
 	repos             []string
-	prReviewMu        sync.RWMutex
-	prReviewState     map[string]prReviewState
-	dispatchedTasksMu sync.Mutex
-	dispatchedTasks   map[int64]*dispatchedTask
 	eventMu           sync.Mutex
 	events            []Event
 	eventCap          int
@@ -330,7 +326,6 @@ type gateway struct {
 	activeRequests    map[string]*ActiveRequest
 	webhookDedup      sync.Map
 	delegateResults   sync.Map
-	secondPassCounter uint64
 	injectionMu       sync.Mutex
 	injections        map[string][]InjectionMessage // keyed by agent name
 	pausedAgents      map[string]bool
@@ -1501,8 +1496,6 @@ func main() {
 		notifications:       make([]Notification, 0, 100),
 		notifCap:            100,
 		lastSession:         map[string]string{},
-		prReviewState:       map[string]prReviewState{},
-		dispatchedTasks:     map[int64]*dispatchedTask{},
 		activeRequests:      map[string]*ActiveRequest{},
 		injections:          map[string][]InjectionMessage{},
 		pausedAgents:        map[string]bool{},
@@ -1513,9 +1506,6 @@ func main() {
 		seidrURL:            strings.TrimSpace(*seidrURLFlag),
 		discordWebhookURL:   strings.TrimSpace(*discordWebhookURL),
 		delegationTimelines: make(map[string][]delegationTimelineEvent),
-	}
-	if err := gw.loadPipelineState(); err != nil {
-		log.Printf("webhook: failed to load pipeline state: %v", err)
 	}
 	if strings.TrimSpace(*a2aDBURL) != "" {
 		store := &A2ATaskStore{}
@@ -1545,7 +1535,6 @@ func main() {
 			gw.refreshRepos()
 		}
 	}()
-	go gw.runTaskCompletionGuard()
 	go gw.runWebhookDedupCleanup()
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
