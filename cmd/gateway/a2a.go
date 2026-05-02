@@ -33,6 +33,8 @@ type Task struct {
 	Artifacts []Artifact             `json:"artifacts,omitempty"`
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 	Agent     string                 `json:"agent,omitempty"`
+	CreatedAt string                 `json:"created_at,omitempty"`
+	UpdatedAt string                 `json:"updated_at,omitempty"`
 }
 
 type TaskStatus struct {
@@ -185,7 +187,7 @@ func (s *A2ATaskStore) GetTask(id string) (*Task, error) {
 		return nil, fmt.Errorf("a2a: task store not initialized")
 	}
 	row := s.db.QueryRow(
-		`SELECT id, context_id, state, agent, metadata, artifacts, updated_at FROM a2a_tasks WHERE id = $1`,
+		`SELECT id, context_id, state, agent, metadata, artifacts, created_at, updated_at FROM a2a_tasks WHERE id = $1`,
 		strings.TrimSpace(id),
 	)
 	return scanA2ATask(row)
@@ -198,7 +200,7 @@ func (s *A2ATaskStore) ListTasks(filter TaskFilter) ([]Task, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("a2a: task store not initialized")
 	}
-	query := `SELECT id, context_id, state, agent, metadata, artifacts, updated_at FROM a2a_tasks`
+	query := `SELECT id, context_id, state, agent, metadata, artifacts, created_at, updated_at FROM a2a_tasks`
 	where := make([]string, 0, 3)
 	args := make([]interface{}, 0, 4)
 	if state := strings.TrimSpace(string(filter.State)); state != "" {
@@ -346,9 +348,10 @@ func scanA2ATask(scanner interface {
 		agent      string
 		metadataDB []byte
 		artifacts  []byte
+		createdAt  time.Time
 		updatedAt  time.Time
 	)
-	if err := scanner.Scan(&id, &contextID, &state, &agent, &metadataDB, &artifacts, &updatedAt); err != nil {
+	if err := scanner.Scan(&id, &contextID, &state, &agent, &metadataDB, &artifacts, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -358,6 +361,8 @@ func scanA2ATask(scanner interface {
 		ID:        id,
 		ContextID: contextID,
 		Agent:     agent,
+		CreatedAt: createdAt.UTC().Format(time.RFC3339),
+		UpdatedAt: updatedAt.UTC().Format(time.RFC3339),
 		Status: TaskStatus{
 			State:     TaskState(strings.TrimSpace(state)),
 			Timestamp: updatedAt.UTC().Format(time.RFC3339),
@@ -493,9 +498,10 @@ func (g *gateway) registerA2ARoutes(mux *http.ServeMux) {
 			return
 		}
 		var in struct {
-			TaskID    string     `json:"taskId"`
-			Status    TaskStatus `json:"status"`
-			Artifacts []Artifact `json:"artifacts"`
+			TaskID    string                 `json:"taskId"`
+			Status    TaskStatus             `json:"status"`
+			Artifacts []Artifact             `json:"artifacts"`
+			Metadata  map[string]interface{} `json:"metadata"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
@@ -513,8 +519,30 @@ func (g *gateway) registerA2ARoutes(mux *http.ServeMux) {
 			return
 		}
 		if task == nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
-			return
+			state := in.Status.State
+			if strings.TrimSpace(string(state)) == "" {
+				state = TaskStateSubmitted
+			}
+			contextID := taskID
+			if in.Status.Message != nil && strings.TrimSpace(in.Status.Message.MessageID) != "" {
+				contextID = strings.TrimSpace(in.Status.Message.MessageID)
+			}
+			agent := strings.TrimSpace(fmt.Sprint(in.Metadata["agent"]))
+			if agent == "" || agent == "<nil>" {
+				agent = "unknown"
+			}
+			task = &Task{
+				ID:        taskID,
+				ContextID: contextID,
+				Agent:     agent,
+				Status:    TaskStatus{State: state},
+				Metadata:  in.Metadata,
+			}
+			if err := g.a2aStore.CreateTask(task); err != nil {
+				log.Printf("a2a: create task from notify failed: %v", err)
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create task"})
+				return
+			}
 		}
 		if strings.TrimSpace(string(in.Status.State)) != "" {
 			if strings.TrimSpace(in.Status.Timestamp) == "" {

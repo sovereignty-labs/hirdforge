@@ -186,6 +186,58 @@ func TestA2ANotifyHandler(t *testing.T) {
 	}
 }
 
+func TestA2ANotifyCreatesMissingTask(t *testing.T) {
+	store := &A2ATaskStore{}
+	var current *Task
+	store.getTaskOverride = func(id string) (*Task, error) {
+		if current == nil || current.ID != id {
+			return nil, nil
+		}
+		copy := *current
+		return &copy, nil
+	}
+	store.createTaskOverride = func(task *Task) error {
+		copy := *task
+		current = &copy
+		return nil
+	}
+	store.updateStatusOverride = func(id string, status TaskStatus) error {
+		if current == nil || current.ID != id {
+			t.Fatalf("updateStatusOverride missing task %q", id)
+		}
+		current.Status = status
+		return nil
+	}
+	store.addMessageOverride = func(taskID string, msg Message) error {
+		return nil
+	}
+
+	gw := &gateway{a2aStore: store}
+	mux := http.NewServeMux()
+	gw.registerA2ARoutes(mux)
+
+	body := `{"taskId":"task-created","status":{"state":"submitted","timestamp":"2026-05-02T12:00:00Z","message":{"role":"system","messageId":"sess-99"}},"metadata":{"agent":"freya","transport":"a2a"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/a2a/notify", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if current == nil {
+		t.Fatalf("expected task to be created")
+	}
+	if current.ID != "task-created" || current.ContextID != "sess-99" {
+		t.Fatalf("created task = %+v", current)
+	}
+	if current.Agent != "freya" {
+		t.Fatalf("created agent = %q", current.Agent)
+	}
+	if current.Status.State != TaskStateSubmitted {
+		t.Fatalf("created state = %q", current.Status.State)
+	}
+}
+
 func newTestA2ATaskStore(t *testing.T) (*A2ATaskStore, func()) {
 	t.Helper()
 	dbURL := strings.TrimSpace(os.Getenv("A2A_TEST_DB_URL"))

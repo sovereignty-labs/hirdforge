@@ -560,7 +560,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 
 		shouldRetryTool := func(name string) bool {
 			switch name {
-			case "delegate", "broadcast", "recall", "remember", "task_status":
+			case "delegate", "broadcast", "recall", "remember", "task_status", "task_result":
 				return false
 			default:
 				return true

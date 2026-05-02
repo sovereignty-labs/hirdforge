@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -16,6 +19,9 @@ import (
 	mcppkg "github.com/kitporath/project_valhalla/pkg/mcp"
 	tasklifepkg "github.com/kitporath/project_valhalla/pkg/tasklife"
 	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	a2apb "github.com/kitporath/project_valhalla/proto/a2a"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -27,8 +33,10 @@ type delegateTool struct {
 	peers               map[string]string
 	agentName           string
 	giteaURL            string
+	gatewayURL          string
 	maxDelegationTokens int
 	gates               []string
+	legacyDelegate      bool
 }
 
 type peerHealthResponse struct {
@@ -71,11 +79,20 @@ func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
-	resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, formatted, sessionID)
+	if t.legacyDelegate {
+		resp, err := sendPeerAgentTask(agent, peerURL, t.agentName, formatted, sessionID)
+		if err != nil {
+			return toolpkg.ToolResult{Error: err.Error()}
+		}
+		return toolpkg.ToolResult{Output: resp}
+	}
+	submittedTaskID, err := sendPeerAgentTaskA2A(agent, peerURL, formatted, sessionID, t.gatewayURL, t.agentName)
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
-	return toolpkg.ToolResult{Output: resp}
+	return toolpkg.ToolResult{
+		Output: fmt.Sprintf("Task submitted to %s. Task ID: %s. You will be notified on completion.", agent, submittedTaskID),
+	}
 }
 
 func (t *delegateTool) prepareDelegation(peerURL, task, taskID string) (string, error) {
@@ -138,6 +155,191 @@ func fetchPeerModel(peerURL string) string {
 		return ""
 	}
 	return strings.TrimSpace(out.Model)
+}
+
+func sendPeerAgentTaskA2A(agentName, peerURL, task, sessionID, gatewayURL, delegatedBy string) (string, error) {
+	if strings.TrimSpace(gatewayURL) == "" {
+		return "", fmt.Errorf("gateway URL is required for A2A delegation")
+	}
+	logJSON("info", "delegating", map[string]interface{}{"target_agent": agentName, "transport": "a2a"})
+	req := a2aSendMessageRequest{
+		Message: a2aMessage{
+			Role: "user",
+			Parts: []a2aPart{{
+				Text: task,
+			}},
+			MessageID: strings.TrimSpace(sessionID),
+		},
+		PushNotification: &a2aPushNotificationConfig{
+			URL: strings.TrimRight(strings.TrimSpace(gatewayURL), "/") + "/api/v1/a2a/notify",
+		},
+	}
+	taskID, err := sendPeerAgentTaskA2APreferred(peerURL, req)
+	if err != nil {
+		return "", err
+	}
+	if err := registerGatewayA2ATask(strings.TrimSpace(gatewayURL), taskID, agentName, strings.TrimSpace(sessionID), delegatedBy); err != nil {
+		return "", err
+	}
+	return taskID, nil
+}
+
+func sendPeerAgentTaskA2APreferred(peerURL string, req a2aSendMessageRequest) (string, error) {
+	if target, ok := peerGRPCTarget(peerURL); ok {
+		taskID, err := sendPeerAgentTaskA2AGRPC(target, req)
+		if err == nil {
+			return taskID, nil
+		}
+		logJSON("warn", "grpc delegation failed, falling back to json-rpc", map[string]interface{}{
+			"target": target,
+			"error":  err.Error(),
+		})
+	}
+	return sendPeerAgentTaskA2AJSONRPC(peerURL, req)
+}
+
+func sendPeerAgentTaskA2AGRPC(target string, req a2aSendMessageRequest) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), agentCommTimeout)
+	defer cancel()
+	conn, err := grpc.NewClient(
+		target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	client := a2apb.NewA2AServiceClient(conn)
+	callReq := &a2apb.SendMessageRequest{
+		Message: protoMessageFromLocal(&req.Message),
+	}
+	if req.PushNotification != nil {
+		callReq.PushNotification = &a2apb.PushNotificationConfig{
+			Url:   strings.TrimSpace(req.PushNotification.URL),
+			Token: strings.TrimSpace(req.PushNotification.Token),
+		}
+	}
+	resp, err := client.SendMessage(ctx, callReq)
+	if err != nil {
+		return "", err
+	}
+	taskID := strings.TrimSpace(resp.GetId())
+	if taskID == "" {
+		return "", fmt.Errorf("peer returned empty task id")
+	}
+	return taskID, nil
+}
+
+func sendPeerAgentTaskA2AJSONRPC(peerURL string, req a2aSendMessageRequest) (string, error) {
+	params, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+	body, err := json.Marshal(jsonRPCRequest{
+		ID:      "delegate-" + strconv.FormatInt(time.Now().UTC().UnixNano(), 10),
+		Method:  "message/send",
+		Params:  params,
+		JSONRPC: "2.0",
+	})
+	if err != nil {
+		return "", err
+	}
+	httpReq, err := http.NewRequest(http.MethodPost, strings.TrimRight(peerURL, "/")+"/a2a", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: agentCommTimeout}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("peer returned %s: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var rpcResp jsonRPCResponse
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		return "", err
+	}
+	if rpcResp.Error != nil {
+		return "", fmt.Errorf("%s", strings.TrimSpace(rpcResp.Error.Message))
+	}
+	resultBody, err := json.Marshal(rpcResp.Result)
+	if err != nil {
+		return "", err
+	}
+	var taskResp a2aTask
+	if err := json.Unmarshal(resultBody, &taskResp); err != nil {
+		return "", err
+	}
+	taskID := strings.TrimSpace(taskResp.ID)
+	if taskID == "" {
+		return "", fmt.Errorf("peer returned empty task id")
+	}
+	return taskID, nil
+}
+
+func registerGatewayA2ATask(gatewayURL, taskID, agentName, sessionID, delegatedBy string) error {
+	payload := map[string]interface{}{
+		"taskId": taskID,
+		"status": map[string]interface{}{
+			"state":     "submitted",
+			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"message": map[string]interface{}{
+				"role":      "system",
+				"messageId": strings.TrimSpace(sessionID),
+			},
+		},
+		"metadata": map[string]interface{}{
+			"agent":        strings.TrimSpace(agentName),
+			"delegated_by": strings.TrimSpace(delegatedBy),
+			"transport":    "a2a",
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(gatewayURL, "/")+"/api/v1/a2a/notify", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: agentCommTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("gateway returned %s while registering delegated task: %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+func peerGRPCTarget(peerURL string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(peerURL))
+	if err != nil {
+		return "", false
+	}
+	host := strings.TrimSpace(parsed.Host)
+	if host == "" {
+		return "", false
+	}
+	hostOnly, _, err := net.SplitHostPort(host)
+	if err == nil {
+		host = hostOnly
+	}
+	if host == "" {
+		return "", false
+	}
+	if !strings.HasSuffix(host, ".svc") && !strings.HasSuffix(host, ".svc.cluster.local") {
+		return "", false
+	}
+	return net.JoinHostPort(host, "8082"), true
 }
 
 func sendPeerAgentTask(agentName, peerURL, from, task, sessionID string) (string, error) {
@@ -292,63 +494,121 @@ func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult 
 }
 
 type taskStatusTool struct {
-	peers map[string]string
+	gatewayURL string
 }
 
 func (t *taskStatusTool) Name() string { return "task_status" }
 func (t *taskStatusTool) Description() string {
-	return "Check the status of an async delegated task on a peer agent."
+	return "Check the status of an async delegated task through the gateway A2A task store."
 }
 func (t *taskStatusTool) Parameters() map[string]string {
 	return map[string]string{
-		"agent":   "Name of the agent running the task",
 		"task_id": "Task ID returned by delegate",
 	}
 }
 func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
-	agent, _ := args["agent"].(string)
 	taskID, _ := args["task_id"].(string)
-	if strings.TrimSpace(agent) == "" || strings.TrimSpace(taskID) == "" {
-		return toolpkg.ToolResult{Error: "agent and task_id are required"}
+	if strings.TrimSpace(taskID) == "" {
+		return toolpkg.ToolResult{Error: "task_id is required"}
 	}
-	peerURL, ok := t.peers[agent]
-	if !ok {
-		return toolpkg.ToolResult{Error: "unknown agent: " + agent}
-	}
-	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(peerURL, "/")+"/tasks/"+url.PathEscape(taskID), nil)
+	taskResp, err := fetchGatewayA2ATask(t.gatewayURL, taskID)
 	if err != nil {
 		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	out, err := json.Marshal(map[string]string{
+		"state":      strings.TrimSpace(taskResp.Status.State),
+		"agent":      strings.TrimSpace(taskResp.Agent),
+		"created_at": strings.TrimSpace(taskResp.CreatedAt),
+		"updated_at": strings.TrimSpace(taskResp.UpdatedAt),
+	})
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	return toolpkg.ToolResult{Output: string(out)}
+}
+
+type taskResultTool struct {
+	gatewayURL string
+}
+
+func (t *taskResultTool) Name() string { return "task_result" }
+func (t *taskResultTool) Description() string {
+	return "Retrieve artifacts from a completed delegated task through the gateway A2A task store."
+}
+func (t *taskResultTool) Parameters() map[string]string {
+	return map[string]string{
+		"task_id": "Task ID returned by delegate",
+	}
+}
+func (t *taskResultTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
+	taskID, _ := args["task_id"].(string)
+	if strings.TrimSpace(taskID) == "" {
+		return toolpkg.ToolResult{Error: "task_id is required"}
+	}
+	taskResp, err := fetchGatewayA2ATask(t.gatewayURL, taskID)
+	if err != nil {
+		return toolpkg.ToolResult{Error: err.Error()}
+	}
+	switch strings.TrimSpace(taskResp.Status.State) {
+	case "completed":
+		body, err := json.Marshal(taskResp.Artifacts)
+		if err != nil {
+			return toolpkg.ToolResult{Error: err.Error()}
+		}
+		return toolpkg.ToolResult{Output: string(body)}
+	case "submitted", "working", "input-needed":
+		return toolpkg.ToolResult{Output: "task not completed yet"}
+	case "failed", "canceled":
+		return toolpkg.ToolResult{Output: fmt.Sprintf("task did not complete successfully (state: %s)", strings.TrimSpace(taskResp.Status.State))}
+	default:
+		return toolpkg.ToolResult{Output: "task not completed yet"}
+	}
+}
+
+type gatewayA2ATask struct {
+	ID        string `json:"id"`
+	ContextID string `json:"contextId"`
+	Status    struct {
+		State string `json:"state"`
+	} `json:"status"`
+	Artifacts []struct {
+		ArtifactID string `json:"artifactId"`
+		Parts      []struct {
+			Text string `json:"text"`
+		} `json:"parts"`
+	} `json:"artifacts,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Agent     string                 `json:"agent,omitempty"`
+	CreatedAt string                 `json:"created_at,omitempty"`
+	UpdatedAt string                 `json:"updated_at,omitempty"`
+}
+
+func fetchGatewayA2ATask(gatewayURL, taskID string) (*gatewayA2ATask, error) {
+	if strings.TrimSpace(gatewayURL) == "" {
+		return nil, fmt.Errorf("gateway URL is required for task queries")
+	}
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(gatewayURL, "/")+"/api/v1/a2a/tasks/"+url.PathEscape(strings.TrimSpace(taskID)), nil)
+	if err != nil {
+		return nil, err
 	}
 	client := &http.Client{Timeout: agentCommTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return toolpkg.ToolResult{Error: err.Error()}
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errors.New("task not found")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return toolpkg.ToolResult{Error: strings.TrimSpace(string(body))}
+		return nil, fmt.Errorf("gateway returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	var taskResp struct {
-		Status string `json:"status"`
-		Result string `json:"result"`
-		Error  string `json:"error"`
-	}
+	var taskResp gatewayA2ATask
 	if err := json.Unmarshal(body, &taskResp); err != nil {
-		return toolpkg.ToolResult{Output: strings.TrimSpace(string(body))}
+		return nil, err
 	}
-	trimmed := map[string]string{
-		"status": strings.TrimSpace(taskResp.Status),
-		"result": strings.TrimSpace(taskResp.Result),
-	}
-	if trimmed["result"] == "" && strings.TrimSpace(taskResp.Error) != "" {
-		trimmed["result"] = strings.TrimSpace(taskResp.Error)
-	}
-	out, err := json.Marshal(trimmed)
-	if err != nil {
-		return toolpkg.ToolResult{Output: strings.TrimSpace(string(body))}
-	}
-	return toolpkg.ToolResult{Output: string(out)}
+	return &taskResp, nil
 }
 
 type recallTool struct {
@@ -770,6 +1030,7 @@ type toolSetupDeps struct {
 	giteaToken          string
 	agentName           string
 	peers               map[string]string
+	gatewayURL          string
 	maxDelegationTokens int
 	memoryURL           string
 	memoryToolsEnabled  bool
@@ -777,6 +1038,7 @@ type toolSetupDeps struct {
 	reviewTracker       *reviewContextTracker
 	enabled             map[string]bool
 	delegationGates     []string
+	legacyDelegate      bool
 }
 
 func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.GiteaAPITool, []toolDef) {
@@ -785,11 +1047,14 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		peers:               deps.peers,
 		agentName:           deps.agentName,
 		giteaURL:            deps.giteaURL,
+		gatewayURL:          deps.gatewayURL,
 		maxDelegationTokens: deps.maxDelegationTokens,
 		gates:               deps.delegationGates,
+		legacyDelegate:      deps.legacyDelegate,
 	}
 	broadcastExec := &broadcastTool{peers: deps.peers}
-	taskStatusExec := &taskStatusTool{peers: deps.peers}
+	taskStatusExec := &taskStatusTool{gatewayURL: deps.gatewayURL}
+	taskResultExec := &taskResultTool{gatewayURL: deps.gatewayURL}
 	delegateExecValue = delegateExec
 	broadcastExecValue = broadcastExec
 	recallExec := &recallTool{
@@ -865,6 +1130,7 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	if deps.enabled["delegate"] || len(deps.peers) > 0 {
 		reg.Register(delegateExec)
 		reg.Register(taskStatusExec)
+		reg.Register(taskResultExec)
 	}
 	if deps.enabled["broadcast"] || len(deps.peers) > 0 {
 		reg.Register(broadcastExec)
