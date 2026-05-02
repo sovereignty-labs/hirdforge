@@ -291,7 +291,7 @@
     function activitySummary(evt) {
       const type = evt.type;
       if (type === 'plan') return `declared ${(evt.steps || []).length || 0}-step plan`;
-      if (type === 'plan_step_complete') return `completed step ${(Number(evt.step) || 0) + 1}`;
+      if (type === 'plan_step_complete') return `completed step ${Number(evt.step) || 1}`;
       if (type === 'file_read') return `read ${evt.path || 'file'}`;
       if (type === 'file_write') return `${evt.status === 'complete' ? 'wrote' : 'writing'} ${evt.path || 'file'}`;
       if (type === 'git_clone') return `cloned ${evt.repo || 'repo'}`;
