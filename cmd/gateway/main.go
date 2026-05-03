@@ -36,6 +36,7 @@ type Agent struct {
 	Name           string   `json:"name"`
 	URL            string   `json:"url"`
 	Role           string   `json:"role"`
+	Warband        string   `json:"warband"`
 	Healthy        bool     `json:"healthy"`
 	Model          string   `json:"model"`
 	Tools          []string `json:"tools"`
@@ -334,6 +335,7 @@ type gateway struct {
 	giteaURL          string
 	giteaToken        string
 	seidrURL          string
+	defaultWarband    string
 	discordWebhookURL string
 
 	// delegationTimelines stores typed events indexed by session_id.
@@ -436,7 +438,16 @@ var validAgentRoles = map[string]bool{
 	"specialist":  true,
 }
 
-func parseAgents(raw string) (map[string]*Agent, []string, error) {
+func normalizeWarbandName(warband string) string {
+	warband = strings.TrimSpace(warband)
+	if warband == "" {
+		return "default"
+	}
+	return warband
+}
+
+func parseAgents(raw string, defaultWarband string) (map[string]*Agent, []string, error) {
+	defaultWarband = normalizeWarbandName(defaultWarband)
 	out := map[string]*Agent{}
 	order := []string{}
 	for _, part := range strings.Split(raw, ",") {
@@ -450,18 +461,28 @@ func parseAgents(raw string) (map[string]*Agent, []string, error) {
 		}
 		name, url = strings.TrimSpace(name), strings.TrimSpace(url)
 		role := ""
-		if idx := strings.LastIndex(url, ":"); idx > 0 {
-			suffix := strings.TrimSpace(url[idx+1:])
-			if validAgentRoles[suffix] {
-				role = suffix
-				url = strings.TrimSpace(url[:idx])
+		warband := defaultWarband
+		segments := strings.Split(url, ":")
+		if len(segments) >= 3 {
+			candidateRole := strings.TrimSpace(segments[len(segments)-2])
+			if validAgentRoles[candidateRole] {
+				role = candidateRole
+				warband = normalizeWarbandName(strings.TrimSpace(segments[len(segments)-1]))
+				url = strings.TrimSpace(strings.Join(segments[:len(segments)-2], ":"))
+			}
+		}
+		if role == "" && len(segments) >= 2 {
+			candidateRole := strings.TrimSpace(segments[len(segments)-1])
+			if validAgentRoles[candidateRole] {
+				role = candidateRole
+				url = strings.TrimSpace(strings.Join(segments[:len(segments)-1], ":"))
 			}
 		}
 		url = strings.TrimRight(url, "/")
 		if _, exists := out[name]; exists {
 			return nil, nil, fmt.Errorf("duplicate agent name %q", name)
 		}
-		out[name] = &Agent{Name: name, URL: url, Role: role}
+		out[name] = &Agent{Name: name, URL: url, Role: role, Warband: warband}
 		order = append(order, name)
 	}
 	if len(out) == 0 {
@@ -1454,7 +1475,8 @@ func sendDiscordApprovalWebhook(webhookURL string, item approvalQueueItem) error
 
 func main() {
 	port := flag.String("port", "8080", "HTTP port")
-	agentsFlag := flag.String("agents", "", "comma-separated name=url[:role] agent list")
+	agentsFlag := flag.String("agents", "", "comma-separated name=url[:role][:warband] agent list")
+	defaultWarbandFlag := flag.String("default-warband", "default", "fallback warband for agents without one")
 	giteaURL := flag.String("gitea-url", "", "Gitea base URL")
 	giteaToken := flag.String("gitea-token", "", "Gitea API token (optional)")
 	giteaRepo := flag.String("gitea-repo", "kit/hirdforge", "Gitea repo in owner/name format")
@@ -1479,7 +1501,8 @@ func main() {
 		die("missing --agents", fmt.Errorf("required"))
 	}
 
-	agents, order, err := parseAgents(*agentsFlag)
+	defaultWarband := normalizeWarbandName(*defaultWarbandFlag)
+	agents, order, err := parseAgents(*agentsFlag, defaultWarband)
 	if err != nil {
 		die("failed to parse --agents", err)
 	}
@@ -1504,6 +1527,7 @@ func main() {
 		giteaURL:            strings.TrimSpace(*giteaURL),
 		giteaToken:          resolveGatewayGiteaToken(*giteaToken),
 		seidrURL:            strings.TrimSpace(*seidrURLFlag),
+		defaultWarband:      defaultWarband,
 		discordWebhookURL:   strings.TrimSpace(*discordWebhookURL),
 		delegationTimelines: make(map[string][]delegationTimelineEvent),
 	}

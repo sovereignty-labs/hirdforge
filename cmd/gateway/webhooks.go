@@ -155,17 +155,27 @@ func (g *gateway) dispatchA2APeerReview(pr webhookPR) {
 		return
 	}
 	author := g.builderFromBranch(pr.Head)
+	warband := g.agentWarband(author)
 	peerName := ""
+	fallbackPeer := ""
 	g.mu.RLock()
 	for _, name := range g.order {
 		agent := g.agents[name]
 		if name == "" || name == author || agent == nil || !agent.Healthy || agent.Role != "builder" {
 			continue
 		}
-		peerName = name
-		break
+		if fallbackPeer == "" {
+			fallbackPeer = name
+		}
+		if normalizeWarbandName(agent.Warband) == warband {
+			peerName = name
+			break
+		}
 	}
 	g.mu.RUnlock()
+	if peerName == "" {
+		peerName = fallbackPeer
+	}
 	if peerName == "" {
 		log.Printf("webhook: A2A peer review skipped for PR #%d on %s: no healthy peer builder available", pr.Number, pr.Repo)
 		return
@@ -337,6 +347,8 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		log.Printf("webhook: no dispatchable tasks after PR #%d on %s", pr.Number, pr.Repo)
 		return
 	}
+	author := g.builderFromBranch(pr.Head)
+	warband := g.agentWarband(author)
 
 	tierName := ""
 	for _, label := range task.Labels {
@@ -354,12 +366,14 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 	reason := ""
 	if labelAgent != "" {
 		if agent, ok := g.getAgent(labelAgent); ok && agent.Healthy {
-			selectedAgent = labelAgent
-			reason = fmt.Sprintf("label: agent/%s", labelAgent)
+			if normalizeWarbandName(agent.Warband) == warband {
+				selectedAgent = labelAgent
+				reason = fmt.Sprintf("label: agent/%s", labelAgent)
+			}
 		}
 	}
 	if selectedAgent == "" {
-		selectedAgent, reason = g.selectAgentForTask(task)
+		selectedAgent, reason = g.selectAgentForTask(task, warband)
 		if selectedAgent == "" && labelAgent != "" {
 			selectedAgent = labelAgent
 			reason = "bifrost: no candidates, using label fallback"
@@ -374,7 +388,7 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 	targetAgent := selectedAgent
 	agent, ok := g.getAgent(targetAgent)
 	if !ok || !agent.Healthy {
-		if fallback, ok := g.pickHealthyTaskAgent(tierName, targetAgent); ok {
+		if fallback, ok := g.pickHealthyTaskAgent(tierName, targetAgent, warband); ok {
 			log.Printf("webhook: task #%d rerouted from %s to %s within tier %q", task.Number, targetAgent, fallback, tierName)
 			targetAgent = fallback
 			agent, _ = g.getAgent(targetAgent)
@@ -424,6 +438,7 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		Agent:        targetAgent,
 		DispatchedAt: time.Now().UTC(),
 		Repo:         pr.Repo,
+		Warband:      warband,
 		Attempts:     1,
 		TaskTitle:    task.Title,
 		TaskBody:     task.Body,

@@ -181,18 +181,53 @@ func TestParseAgents(t *testing.T) {
 		input   string
 		wantErr bool
 		wantLen int
+		check   func(*testing.T, map[string]*Agent)
 	}{
 		{
 			name:    "single agent",
 			input:   "val=http://val.valhalla.svc:8081",
 			wantErr: false,
 			wantLen: 1,
+			check: func(t *testing.T, agents map[string]*Agent) {
+				t.Helper()
+				if got := agents["val"].Warband; got != "default" {
+					t.Fatalf("warband mismatch: got %q, want %q", got, "default")
+				}
+			},
 		},
 		{
 			name:    "multiple agents",
 			input:   "val=http://val.valhalla.svc:8081,chuck=http://chuck.valhalla.svc:8081",
 			wantErr: false,
 			wantLen: 2,
+		},
+		{
+			name:    "role and warband",
+			input:   "val=http://val.valhalla.svc:8081:builder:alpha",
+			wantErr: false,
+			wantLen: 1,
+			check: func(t *testing.T, agents map[string]*Agent) {
+				t.Helper()
+				agent := agents["val"]
+				if agent.Role != "builder" {
+					t.Fatalf("role mismatch: got %q, want %q", agent.Role, "builder")
+				}
+				if agent.Warband != "alpha" {
+					t.Fatalf("warband mismatch: got %q, want %q", agent.Warband, "alpha")
+				}
+			},
+		},
+		{
+			name:    "custom default warband",
+			input:   "val=http://val.valhalla.svc:8081",
+			wantErr: false,
+			wantLen: 1,
+			check: func(t *testing.T, agents map[string]*Agent) {
+				t.Helper()
+				if got := agents["val"].Warband; got != "warband-x" {
+					t.Fatalf("warband mismatch: got %q, want %q", got, "warband-x")
+				}
+			},
 		},
 		{
 			name:    "empty input",
@@ -213,7 +248,11 @@ func TestParseAgents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			agents, order, err := parseAgents(tt.input)
+			defaultWarband := "default"
+			if tt.name == "custom default warband" {
+				defaultWarband = "warband-x"
+			}
+			agents, order, err := parseAgents(tt.input, defaultWarband)
 
 			if tt.wantErr {
 				if err == nil {
@@ -233,13 +272,17 @@ func TestParseAgents(t *testing.T) {
 			if len(order) != tt.wantLen {
 				t.Fatalf("order length: got %d, want %d", len(order), tt.wantLen)
 			}
+
+			if tt.check != nil {
+				tt.check(t, agents)
+			}
 		})
 	}
 }
 
 // TestParseAgentsEmptyValidation ensures empty string is rejected
 func TestParseAgentsEmptyValidation(t *testing.T) {
-	agents, order, err := parseAgents("")
+	agents, order, err := parseAgents("", "default")
 
 	if err == nil {
 		t.Fatalf("expected error for empty input, got nil")
