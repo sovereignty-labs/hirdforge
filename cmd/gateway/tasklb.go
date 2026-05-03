@@ -55,7 +55,6 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWar
 	capable := make([]bifrostCandidate, 0, len(all))
 	idleCapable := make([]bifrostCandidate, 0, len(all))
 	sameWarbandIdle := make([]bifrostCandidate, 0, len(all))
-	sameWarbandCapable := make([]bifrostCandidate, 0, len(all))
 	for _, agent := range all {
 		name := strings.TrimSpace(agent.Name)
 		if name == "" {
@@ -86,7 +85,6 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWar
 			idleCapable = append(idleCapable, candidate)
 		}
 		if agentWarband == targetWarband {
-			sameWarbandCapable = append(sameWarbandCapable, candidate)
 			if !candidate.Active {
 				sameWarbandIdle = append(sameWarbandIdle, candidate)
 			}
