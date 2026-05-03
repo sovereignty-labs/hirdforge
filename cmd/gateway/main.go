@@ -436,6 +436,7 @@ var validAgentRoles = map[string]bool{
 	"coordinator": true,
 	"assistant":   true,
 	"specialist":  true,
+	"architect":   true,
 }
 
 func normalizeWarbandName(warband string) string {
