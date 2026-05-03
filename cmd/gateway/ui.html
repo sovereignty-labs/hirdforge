@@ -291,7 +291,7 @@
     function activitySummary(evt) {
       const type = evt.type;
       if (type === 'plan') return `declared ${(evt.steps || []).length || 0}-step plan`;
-      if (type === 'plan_step_complete') return `completed step ${(Number(evt.step) || 0) + 1}`;
+      if (type === 'plan_step_complete') return `completed step ${Number(evt.step) || 1}`;
       if (type === 'file_read') return `read ${evt.path || 'file'}`;
       if (type === 'file_write') return `${evt.status === 'complete' ? 'wrote' : 'writing'} ${evt.path || 'file'}`;
       if (type === 'git_clone') return `cloned ${evt.repo || 'repo'}`;
@@ -391,7 +391,13 @@
         timeValue(queueItem && queueItem.queued_at),
         latestTimelineTime(timeline, actionEventTypes)
       );
-      if (architectTime === 0 && builderTime === 0 && actionTime === 0) return 'idle';
+      if (architectTime === 0 && builderTime === 0 && actionTime === 0) {
+        // Keep Action surface interactive when there's a pending approval item
+        // for the focused agent, regardless of fleet active state.
+        const hasPendingApproval = queueItem && queueItem.status === 'pending';
+        if (hasPendingApproval) return 'action';
+        return 'idle';
+      }
       if (architectTime >= builderTime && architectTime >= actionTime) return 'architect';
       return actionTime >= builderTime ? 'action' : 'builder';
     }
@@ -2508,6 +2514,7 @@
       const [revisionQueueID, setRevisionQueueID] = useState('');
       const [revisionNote, setRevisionNote] = useState('');
       const [showApprovalShield, setShowApprovalShield] = useState(false);
+      const [approvalPopupOpen, setApprovalPopupOpen] = useState(false);
       const [settingsOpen, setSettingsOpen] = useState(false);
       const [threads, setThreads] = useState({});
       const [inputByAgent, setInputByAgent] = useState({});
@@ -2519,11 +2526,18 @@
       const [isDraggingActivity, setIsDraggingActivity] = useState(false);
       const [workspaces, setWorkspaces] = useState({});
       const [activityByAgent, setActivityByAgent] = useState({});
+      const approvalPopupRef = useRef(null);
       const focused = useMemo(() => agents.find(agent => agent.id === activeAgent) || null, [agents, activeAgent]);
       const focusedFleetState = useMemo(() => fleetStates.find(state => state.id === activeAgent) || null, [fleetStates, activeAgent]);
       const focusedWorkspace = workspaces[activeAgent] || null;
       const focusedTimeline = activityByAgent[activeAgent] || [];
       const focusedPlan = focusedWorkspace && focusedWorkspace.plan ? focusedWorkspace.plan : null;
+      const pendingApprovalList = useMemo(
+        () => (pendingQueueItems || [])
+          .filter(item => item && item.status === 'pending')
+          .sort((a, b) => queueSortTime(a) - queueSortTime(b)),
+        [pendingQueueItems]
+      );
       const reviewerAgent = isReviewerAgent(focused);
       const focusedQueueItem = useMemo(
         () => selectQueueForAgent(activeAgent, pendingQueueItems, approvalOverrides),
@@ -2537,6 +2551,25 @@
         const id = setInterval(() => setCursorBlink(blink => !blink), 530);
         return () => clearInterval(id);
       }, []);
+
+      useEffect(() => {
+        if (!approvalPopupOpen) return;
+        const onKey = event => {
+          if (event.key === 'Escape') setApprovalPopupOpen(false);
+        };
+        const onMouseDown = event => {
+          if (event.target.closest && event.target.closest('[data-approval-shield-toggle="true"]')) return;
+          if (approvalPopupRef.current && !approvalPopupRef.current.contains(event.target)) {
+            setApprovalPopupOpen(false);
+          }
+        };
+        document.addEventListener('keydown', onKey);
+        document.addEventListener('mousedown', onMouseDown);
+        return () => {
+          document.removeEventListener('keydown', onKey);
+          document.removeEventListener('mousedown', onMouseDown);
+        };
+      }, [approvalPopupOpen]);
 
       useEffect(() => {
         let cancelled = false;
@@ -2628,6 +2661,11 @@
           clearInterval(id);
         };
       }, [loadApprovals]);
+
+      useEffect(() => {
+        if (pendingApprovalList.length > 0) return;
+        setApprovalPopupOpen(false);
+      }, [pendingApprovalList]);
 
       useEffect(() => {
         if (agents.length === 0) return;
@@ -2932,6 +2970,12 @@
       };
 
       const dragCursorClass = isDraggingTree ? 'cursor-col-resize select-none' : isDraggingActivity ? 'cursor-row-resize select-none' : '';
+      const focusApprovalAgent = (item) => {
+        const agentName = approvalAgentName(item);
+        if (!agentName) return;
+        setActiveAgent(agentName);
+        setApprovalPopupOpen(false);
+      };
 
       return (
         <div className={`h-screen w-screen bg-zinc-950 text-zinc-100 flex flex-col overflow-hidden font-mono text-xs ${dragCursorClass}`}>
@@ -2958,13 +3002,49 @@
                 </button>
               ))}
             </div>
-            <div className="ml-auto flex items-center gap-3">
+            <div className="ml-auto flex items-center gap-3 relative">
               {showApprovalShield && (
-                <button className="relative flex items-center gap-1 text-amber-400 hover:text-amber-300" title="Pending approvals">
-                  <Icon name="ShieldAlert" className="w-4 h-4" />
-                  <span className="text-[10px] font-semibold">{pendingApprovals}</span>
-                  {pendingApprovals > 0 && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
-                </button>
+                <>
+                  <button
+                    data-approval-shield-toggle="true"
+                    onClick={() => setApprovalPopupOpen(open => !open)}
+                    className="relative flex items-center gap-1 text-amber-400 hover:text-amber-300"
+                    title="Pending approvals"
+                  >
+                    <Icon name="ShieldAlert" className="w-4 h-4" />
+                    <span className="text-[10px] font-semibold">{pendingApprovals}</span>
+                    {pendingApprovals > 0 && <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />}
+                  </button>
+                  {approvalPopupOpen && (
+                    <div ref={approvalPopupRef} className="absolute right-0 top-8 z-30 w-72 rounded border border-zinc-800 bg-zinc-950 shadow-2xl">
+                      <div className="border-b border-zinc-800 px-3 py-2 text-[10px] uppercase tracking-wide text-zinc-500">
+                        Pending approvals
+                      </div>
+                      <div className="max-h-72 overflow-y-auto p-1">
+                        {pendingApprovalList.length === 0 ? (
+                          <div className="px-2 py-2 text-[10px] text-zinc-600">No pending approvals.</div>
+                        ) : pendingApprovalList.map(item => {
+                          const agentName = approvalAgentName(item);
+                          const clickable = Boolean(agentName) && agents.some(agent => agent.id === agentName);
+                          return (
+                            <button
+                              key={item.queue_id || `${agentName}-${item.action}-${item.queued_at}`}
+                              onClick={() => clickable && focusApprovalAgent(item)}
+                              disabled={!clickable}
+                              className={`w-full rounded px-2 py-2 text-left ${clickable ? 'hover:bg-zinc-900/80' : 'cursor-default opacity-70'}`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-zinc-200">{agentName || 'Unknown agent'}</span>
+                                <span className="shrink-0 text-[10px] text-zinc-500">{item.queued_at || '-'}</span>
+                              </div>
+                              <div className="mt-1 text-[10px] text-zinc-400">{item.action || 'approval action'}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </>
               )}
               <button
                 onClick={() => { if (window.confirm('Stop all agents?')) fetch('/api/v1/agents/stop-all', { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }}

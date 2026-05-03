@@ -495,7 +495,7 @@ func validateStagedFilesForCommit(repoDir string) error {
 			if errOutput == "" {
 				errOutput = "validation failed with no output"
 			}
-			return fmt.Errorf("Commit blocked: syntax error in %s:\n%s\nFix the error and try git-commit again.", file, errOutput)
+			return fmt.Errorf("commit blocked: syntax error in %s:\n%s\nfix the error and try git-commit again", file, errOutput)
 		}
 	}
 	return nil
