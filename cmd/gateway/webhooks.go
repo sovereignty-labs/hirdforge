@@ -207,7 +207,7 @@ func (g *gateway) dispatchA2APeerReview(pr webhookPR) {
 	}
 
 	messageText := fmt.Sprintf(
-		"Review PR #%d on %s: %q.\nClone the repo, run git fetch origin, and review the diff for branch %s.\nAssess correctness, code quality, and style.\nPost a formal Gitea review (APPROVED or REQUEST_CHANGES) on the PR.\nThen report your review result to ragnar using the delegate tool:\ndelegate agent=ragnar message='Review complete for PR #%d on %s. Result: [APPROVED/REQUEST_CHANGES]. Summary: [your 2-3 sentence assessment]'",
+		"Review PR #%d on %s: %q.\nClone the repo, run git fetch origin, and review the diff for branch %s.\nAssess correctness, code quality, and style.\nUse the create-review tool to post a formal Gitea review with event APPROVED or REQUEST_CHANGES on the PR.\nThen report your review result to ragnar using the delegate tool:\ndelegate agent=ragnar message='Review complete for PR #%d on %s. Result: [APPROVED/REQUEST_CHANGES]. Summary: [your 2-3 sentence assessment]'",
 		pr.Number,
 		pr.Repo,
 		pr.Title,
