@@ -60,6 +60,7 @@ type dispatchedTask struct {
 	Agent          string    `json:"agent"`
 	DispatchedAt   time.Time `json:"dispatched_at"`
 	Repo           string    `json:"repo"`
+	Warband        string    `json:"warband"`
 	Attempts       int       `json:"attempts"`
 	FailedAgents   []string  `json:"failed_agents"`
 	TaskTitle      string    `json:"task_title"`
@@ -432,9 +433,19 @@ Remember: Execute tools, don't narrate. Verify push with ls-remote. Confirm PR U
 `, taskNumber, taskBody)
 }
 
-func (g *gateway) pickHealthyTaskAgent(tierName, preferred string) (string, bool) {
+func (g *gateway) pickHealthyTaskAgent(tierName, preferred, preferredWarband string) (string, bool) {
 	if strings.TrimSpace(tierName) != "autonomous" {
 		return "", false
+	}
+	targetWarband := normalizeWarbandName(preferredWarband)
+	for _, candidate := range g.order {
+		if candidate == strings.TrimSpace(preferred) {
+			continue
+		}
+		agent, ok := g.getAgent(candidate)
+		if ok && agent.Healthy && agent.Role == "builder" && normalizeWarbandName(agent.Warband) == targetWarband {
+			return candidate, true
+		}
 	}
 	for _, candidate := range g.order {
 		if candidate == strings.TrimSpace(preferred) {

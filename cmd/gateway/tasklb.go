@@ -27,9 +27,10 @@ type bifrostResult struct {
 	Reason string
 }
 
-func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResult {
+func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWarband string) bifrostResult {
 	labelAgent := ""
 	tierName := ""
+	targetWarband := normalizeWarbandName(preferredWarband)
 	for _, label := range taskLabels {
 		if strings.HasPrefix(label, "agent/") && labelAgent == "" {
 			labelAgent = strings.TrimPrefix(label, "agent/")
@@ -53,6 +54,7 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResul
 	all := g.snapshotAgents()
 	capable := make([]bifrostCandidate, 0, len(all))
 	idleCapable := make([]bifrostCandidate, 0, len(all))
+	sameWarbandIdle := make([]bifrostCandidate, 0, len(all))
 	for _, agent := range all {
 		name := strings.TrimSpace(agent.Name)
 		if name == "" {
@@ -73,6 +75,7 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResul
 			Tools:   append([]string(nil), agent.Tools...),
 			Fitness: 0.5,
 		}
+		agentWarband := normalizeWarbandName(agent.Warband)
 		if !bifrostCapable(candidate.Tools, taskLabels, taskBody) {
 			log.Printf("bifrost: filtered incapable agent %s", name)
 			continue
@@ -81,13 +84,22 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResul
 		if !candidate.Active {
 			idleCapable = append(idleCapable, candidate)
 		}
+		if agentWarband == targetWarband {
+			if !candidate.Active {
+				sameWarbandIdle = append(sameWarbandIdle, candidate)
+			}
+		}
 	}
 
 	if len(capable) == 0 {
 		log.Printf("bifrost: no capable candidates")
 		return bifrostResult{}
 	}
-	if len(idleCapable) == 0 {
+	chosenPool := idleCapable
+	if len(sameWarbandIdle) > 0 {
+		chosenPool = sameWarbandIdle
+	}
+	if len(chosenPool) == 0 {
 		if labelAgent != "" {
 			log.Printf("bifrost: all capable agents busy, returning label fallback %s", labelAgent)
 			return bifrostResult{
@@ -100,23 +112,23 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResul
 	}
 
 	var wg sync.WaitGroup
-	for i := range idleCapable {
+	for i := range chosenPool {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			idleCapable[idx].Fitness = g.queryAgentFitness(idleCapable[idx].Name, 3*time.Second)
+			chosenPool[idx].Fitness = g.queryAgentFitness(chosenPool[idx].Name, 3*time.Second)
 		}(i)
 	}
 	wg.Wait()
 
-	sort.Slice(idleCapable, func(i, j int) bool {
-		if idleCapable[i].Fitness == idleCapable[j].Fitness {
-			return idleCapable[i].Name < idleCapable[j].Name
+	sort.Slice(chosenPool, func(i, j int) bool {
+		if chosenPool[i].Fitness == chosenPool[j].Fitness {
+			return chosenPool[i].Name < chosenPool[j].Name
 		}
-		return idleCapable[i].Fitness > idleCapable[j].Fitness
+		return chosenPool[i].Fitness > chosenPool[j].Fitness
 	})
 
-	chosen := idleCapable[0]
+	chosen := chosenPool[0]
 	reason := fmt.Sprintf("%s selected: idle, capable, %.0f%% success rate", chosen.Name, chosen.Fitness*100)
 	log.Printf("bifrost: %s", reason)
 	return bifrostResult{
@@ -125,8 +137,8 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string) bifrostResul
 	}
 }
 
-func (g *gateway) selectAgentForTask(task webhookIssue) (string, string) {
-	result := g.selectAgent(task.Labels, task.Body)
+func (g *gateway) selectAgentForTask(task webhookIssue, preferredWarband string) (string, string) {
+	result := g.selectAgent(task.Labels, task.Body, preferredWarband)
 	if result.Agent != "" {
 		return result.Agent, result.Reason
 	}

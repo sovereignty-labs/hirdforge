@@ -289,10 +289,45 @@ type AgentState struct {
 	Name      string `json:"name"`
 	Paused    bool   `json:"paused"`
 	Active    bool   `json:"active"`
+	Warband   string `json:"warband"`
 	SessionID string `json:"session_id,omitempty"`
 	TaskRef   string `json:"task_ref,omitempty"`
 	Source    string `json:"source,omitempty"`
 	Since     int64  `json:"since,omitempty"`
+}
+
+func (g *gateway) fleetState(warbandFilter string) []AgentState {
+	warbandFilter = strings.TrimSpace(warbandFilter)
+	states := make([]AgentState, 0, len(g.order))
+	paused := make(map[string]bool, len(g.order))
+	g.injectionMu.Lock()
+	for _, name := range g.order {
+		paused[name] = g.pausedAgents[name]
+	}
+	g.injectionMu.Unlock()
+	g.arMu.RLock()
+	for _, name := range g.order {
+		state := AgentState{
+			Name:    name,
+			Paused:  paused[name],
+			Warband: g.agentWarband(name),
+		}
+		if warbandFilter != "" && state.Warband != warbandFilter {
+			continue
+		}
+		if ar, ok := g.activeRequests[name]; ok {
+			state.Active = true
+			state.SessionID = ar.SessionID
+			state.Source = detectSessionSource(ar.SessionID)
+			state.Since = ar.StartedAt.Unix()
+			if sess, ok := g.sessionStore.get(ar.SessionID); ok {
+				state.TaskRef = sess.TaskRef
+			}
+		}
+		states = append(states, state)
+	}
+	g.arMu.RUnlock()
+	return states
 }
 
 type InjectionMessage struct {

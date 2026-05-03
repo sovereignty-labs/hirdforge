@@ -34,6 +34,17 @@ func (g *gateway) getAgent(name string) (*Agent, bool) {
 	return &cp, true
 }
 
+func (g *gateway) agentWarband(name string) string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if agent, ok := g.agents[strings.TrimSpace(name)]; ok && agent != nil {
+		if warband := strings.TrimSpace(agent.Warband); warband != "" {
+			return warband
+		}
+	}
+	return normalizeWarbandName(g.defaultWarband)
+}
+
 func (g *gateway) updateAgent(updated Agent) {
 	g.mu.Lock()
 	old := g.agents[updated.Name]
@@ -61,15 +72,18 @@ func (g *gateway) refreshAgentHealth() {
 	names := append([]string(nil), g.order...)
 	urls := make(map[string]string, len(g.order))
 	roles := make(map[string]string, len(g.order))
+	warbands := make(map[string]string, len(g.order))
 	for _, n := range g.order {
 		urls[n] = g.agents[n].URL
 		roles[n] = g.agents[n].Role
+		warbands[n] = g.agents[n].Warband
 	}
 	g.mu.RUnlock()
 
 	for _, name := range names {
 		updated := Agent{Name: name, URL: urls[name], Tools: []string{}}
 		updated.Role = roles[name]
+		updated.Warband = warbands[name]
 		h, err := queryAgentHealth(client, urls[name])
 		if err == nil {
 			updated.Healthy = true
@@ -415,31 +429,6 @@ func registerAgentRoutes(mux *http.ServeMux, gw *gateway, proxyClient *http.Clie
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		states := make([]AgentState, 0, len(gw.order))
-		paused := make(map[string]bool, len(gw.order))
-		gw.injectionMu.Lock()
-		for _, name := range gw.order {
-			paused[name] = gw.pausedAgents[name]
-		}
-		gw.injectionMu.Unlock()
-		gw.arMu.RLock()
-		for _, name := range gw.order {
-			state := AgentState{Name: name, Paused: paused[name]}
-			if ar, ok := gw.activeRequests[name]; ok {
-				state.Active = true
-				state.SessionID = ar.SessionID
-				state.Source = detectSessionSource(ar.SessionID)
-				state.Since = ar.StartedAt.Unix()
-				if sess, ok := gw.sessionStore.get(ar.SessionID); ok {
-					state.TaskRef = sess.TaskRef
-					if sess.Source != "" {
-						state.Source = sess.Source
-					}
-				}
-			}
-			states = append(states, state)
-		}
-		gw.arMu.RUnlock()
-		writeJSON(w, http.StatusOK, states)
+		writeJSON(w, http.StatusOK, gw.fleetState(r.URL.Query().Get("warband")))
 	})
 }
