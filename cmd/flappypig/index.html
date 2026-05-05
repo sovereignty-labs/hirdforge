@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" lang="en">
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Flappy Pig</title>
     <style>
@@ -190,6 +190,35 @@
                 } else {
                     pig.velocity = JUMP;
                 }
+            }
+        });
+
+        canvas.addEventListener('click', () => {
+            if (gameOver) {
+                // Reset game
+                score = 0;
+                frameCount = 0;
+                gameOver = false;
+                pig.y = 300;
+                pig.velocity = 0;
+                pipes = [];
+            } else {
+                pig.velocity = JUMP;
+            }
+        });
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (gameOver) {
+                // Reset game
+                score = 0;
+                frameCount = 0;
+                gameOver = false;
+                pig.y = 300;
+                pig.velocity = 0;
+                pipes = [];
+            } else {
+                pig.velocity = JUMP;
             }
         });
 
