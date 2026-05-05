@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF=" lang="en">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flappy Pig</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #87CEEB;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            border: 4px solid #5d4037;
+            background: #aed581;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        canvas.width = 400;
+        canvas.height = 600;
+
+        // Game Constants
+        const GRAVITY = 0.6;
+        const JUMP = -9;
+        const PIPE_SPEED = 3;
+        const PIPE_SPAWN_RATE = 90; // frames
+        const PIPE_GAP = 160;
+        const PIPE_WIDTH = 70;
+
+        // Game State
+        let score = 0;
+        let frameCount = 0;
+        let gameOver = false;
+
+        const pig = {
+            x: 50,
+            y: 300,
+            velocity: 0,
+            radius: 15,
+            color: '#4fc3f7' // Blue pig
+        };
+
+        let pipes = [];
+
+        function createPipe() {
+            const minPipeHeight = 50;
+            const maxPipeHeight = canvas.height - PIPE_GAP - minPipeHeight;
+            const height = Math.floor(Math.random() * (maxPipeHeight - minPipeHeight + 1)) + minPipeHeight;
+            pipes.push({
+                x: canvas.width,
+                topHeight: height,
+                passed: false
+            });
+        }
+
+        function drawPig() {
+            // Body
+            ctx.fillStyle = pig.color;
+            ctx.fillRect(pig.x - 15, pig.y - 15, 30, 30);
+            
+            // Eyes (8-bit style)
+            ctx.fillStyle = 'white';
+            ctx.fillRect(pig.x + 5, pig.y - 10, 8, 8);
+            ctx.fillStyle = 'black';
+            ctx.fillRect(pig.x + 9, pig.y - 6, 4, 4);
+
+            // Snout
+            ctx.fillStyle = '#81d4fa';
+            ctx.fillRect(pig.x + 10, pig.y, 8, 10);
+        }
+
+        function drawPipes() {
+            pipes.forEach(pipe => {
+                // Top Pipe (Brown fence)
+                ctx.fillStyle = '#795548';
+                ctx.fillRect(pipe.x, 0, PIPE_WIDTH, pipe.topHeight);
+                // Fence details (chunky brown shapes)
+                ctx.fillStyle = '#5d4037';
+                ctx.fillRect(pipe.x + 5, 0, 8, pipe.topHeight);
+                ctx.fillRect(pipe.x + PIPE_WIDTH - 13, 0, 8, pipe.topHeight);
+                ctx.fillRect(pipe.x, pipe.topHeight - 10, PIPE_WIDTH, 10);
+
+                // Bottom Pipe
+                const bottomY = pipe.topHeight + PIPE_GAP;
+                ctx.fillStyle = '#795548';
+                ctx.fillRect(pipe.x, bottomY, PIPE_WIDTH, canvas.height - bottomY);
+                // Fence details
+                ctx.fillStyle = '#5d4037';
+                ctx.fillRect(pipe.x + 5, bottomY, 8, canvas.height - bottomY);
+                ctx.fillRect(pipe.x + PIPE_WIDTH - 13, bottomY, 8, canvas.height - bottomY);
+                ctx.fillRect(pipe.x, bottomY, PIPE_WIDTH, 10);
+            });
+        }
+
+        function update() {
+            if (gameOver) return;
+
+            pig.velocity += GRAVITY;
+            pig.y += pig.velocity;
+
+            // Collision with floor or ceiling
+            if (pig.y + pig.radius > canvas.height || pig.y - pig.radius < 0) {
+                gameOver = true;
+            }
+
+            // Pipes logic
+            if (frameCount % PIPE_SPAWN_RATE === 0) {
+                createPipe();
+            }
+
+            pipes.forEach(pipe => {
+                pipe.x -= PIPE_SPEED;
+
+                // Collision detection
+                if (
+                    pig.x + pig.radius > pipe.x &&
+                    pig.x - pig.radius < pipe.x + PIPE_WIDTH &&
+                    (pig.y - pig.radius < pipe.topHeight || pig.y + pig.radius > pipe.topHeight + PIPE_GAP)
+                ) {
+                    gameOver = true;
+                }
+
+                // Score increment from pipes
+                if (!pipe.passed && pipe.x + PIPE_WIDTH < pig.x) {
+                    score += 10;
+                    pipe.passed = true;
+                }
+            });
+
+            // Remove off-screen pipes
+            pipes = pipes.filter(pipe => pipe.x + PIPE_WIDTH > 0);
+
+            // Survival score (increments over time)
+            score += 0.1;
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            drawPipes();
+            drawPig();
+
+            // UI
+            ctx.fillStyle = 'black';
+            ctx.font = '24px Courier New';
+            ctx.textAlign = 'left';
+            ctx.fillText(`Score: ${Math.floor(score)}`, 10, 40);
+
+            if (gameOver) {
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = 'white';
+                ctx.textAlign = 'center';
+                ctx.font = '40px Courier New';
+                ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2);
+                ctx.font = '20px Courier New';
+                ctx.fillText('Press Space to Restart', canvas.width / 2, canvas.height / 2 + 50);
+            }
+        }
+
+        function gameLoop() {
+            update();
+            draw();
+            frameCount++;
+            requestAnimationFrame(gameLoop);
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                if (gameOver) {
+                    // Reset game
+                    score = 0;
+                    frameCount = 0;
+                    gameOver = false;
+                    pig.y = 300;
+                    pig.velocity = 0;
+                    pipes = [];
+                } else {
+                    pig.velocity = JUMP;
+                }
+            }
+        });
+
+        gameLoop();
+    </script>
+</body>
+</html>
