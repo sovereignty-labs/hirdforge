@@ -20,6 +20,8 @@ import (
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
+var controlTokenRE = regexp.MustCompile(`</?\|[^>]*>`)
+
 var (
 	taskPRURLRE   = regexp.MustCompile(`/pulls/(\d+)\b`)
 	taskPRRefRE   = regexp.MustCompile(`\bPR\s*#(\d+)\b`)
@@ -388,7 +390,10 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 							gw.applyWorkspaceEvent(agentName, evt)
 							if typ == "content" {
 								if c, ok := evt["content"].(string); ok {
-									contentBuf.WriteString(c)
+									cleaned := controlTokenRE.ReplaceAllString(c, "")
+									if cleaned != "" {
+										contentBuf.WriteString(cleaned)
+									}
 								}
 							}
 							if typ == "done" {
@@ -642,7 +647,12 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 						gw.applyWorkspaceEvent(in.Agent, evt)
 						if typ == "content" {
 							if content, _ := evt["content"].(string); content != "" {
-								contentBuf.WriteString(content)
+								cleaned := controlTokenRE.ReplaceAllString(content, "")
+								if cleaned == "" {
+									goto lineDone
+								}
+								evt["content"] = cleaned
+								contentBuf.WriteString(cleaned)
 							}
 							if !forward(evt) {
 								drainAgentResponse()
