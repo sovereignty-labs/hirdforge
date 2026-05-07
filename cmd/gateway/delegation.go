@@ -103,6 +103,7 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 			if in.Type == "" {
 				in.Type = "task"
 			}
+			log.Printf("event received: type=%s agent=%s", in.Type, in.Agent)
 			if in.Type == "workspace_update" && strings.TrimSpace(in.Agent) != "" {
 				meta := asMap(in.Metadata["workspace"])
 				var pr *workspacepkg.PRRef
