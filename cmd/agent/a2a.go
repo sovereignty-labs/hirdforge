@@ -151,6 +151,7 @@ func newA2ARuntime(agentName, gatewayURL string, processConversation conversatio
 }
 
 func (rt *a2aRuntime) postGatewayEvent(eventType, agentName string, metadata map[string]interface{}) {
+	log.Printf("a2a: postGatewayEvent called type=%s agent=%s gatewayURL=%q", eventType, agentName, rt.gatewayURL)
 	if strings.TrimSpace(rt.gatewayURL) == "" {
 		return
 	}
@@ -180,6 +181,7 @@ func (rt *a2aRuntime) postGatewayEvent(eventType, agentName string, metadata map
 		if resp.StatusCode >= 400 {
 			log.Printf("a2a: postGatewayEvent gateway returned %d", resp.StatusCode)
 		}
+		log.Printf("a2a: postGatewayEvent sent type=%s status=%d", eventType, resp.StatusCode)
 	}()
 }
 
