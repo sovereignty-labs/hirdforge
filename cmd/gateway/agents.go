@@ -204,6 +204,28 @@ func registerAgentRoutes(mux *http.ServeMux, gw *gateway, proxyClient *http.Clie
 			gw.injectionMu.Unlock()
 			gw.addEvent("injection_queued", name, fmt.Sprintf("Sovereign queued injection for %s", name))
 			writeJSON(w, http.StatusOK, map[string]string{"status": "queued", "agent": name})
+		case strings.HasSuffix(path, "/session/new"):
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			name := strings.TrimSuffix(path, "/session/new")
+			name = strings.Trim(name, "/")
+			if name == "" || strings.Contains(name, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			if _, ok := gw.getAgent(name); !ok {
+				writeJSON(w, http.StatusNotFound, map[string]string{"error": "unknown agent"})
+				return
+			}
+			gw.stopAgent(name)
+			newSessionID := fmt.Sprintf("hirdforge-%s-%d", name, time.Now().UnixNano())
+			gw.lastSessionMu.Lock()
+			gw.lastSession[name] = newSessionID
+			gw.lastSessionMu.Unlock()
+			gw.addEvent("session_reset", name, fmt.Sprintf("Session reset for %s", name))
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "agent": name, "session_id": newSessionID})
 		case strings.HasSuffix(path, "/pause"):
 			if r.Method != http.MethodPost {
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

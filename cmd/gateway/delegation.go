@@ -490,331 +490,394 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 		gw.lastSessionMu.Unlock()
 		gw.addEvent("message", in.Agent, fmt.Sprintf("Message sent to %s", in.Agent))
 
-		agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
-		defer agentCancel()
-		gw.setActiveRequest(in.Agent, sessionID, agentCancel)
-		defer gw.clearActiveRequest(in.Agent, agentCancel)
+		gw.proxyMessageSSE(w, streamClient, agent, in.Agent, in.Content, sessionID)
+	})
 
-		body, _ := json.Marshal(agentMessageRequest{Content: in.Content, SessionID: sessionID})
-		uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
+	mux.HandleFunc("/api/v1/message/regenerate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		uReq.Header.Set("Content-Type", "application/json")
-		uResp, err := streamClient.Do(uReq)
-		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
+		var in struct {
+			Agent string `json:"agent"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
-		if uResp.StatusCode == 429 {
-			b, _ := io.ReadAll(io.LimitReader(uResp.Body, 4096))
-			uResp.Body.Close()
-			log.Printf("rate limit: upstream agent returned 429 for %s", in.Agent)
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited", "detail": strings.TrimSpace(string(b))})
+		in.Agent = strings.TrimSpace(in.Agent)
+		if in.Agent == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "agent is required"})
 			return
 		}
-		if uResp.StatusCode < 200 || uResp.StatusCode >= 300 {
-			b, _ := io.ReadAll(io.LimitReader(uResp.Body, 4096))
-			uResp.Body.Close()
-			writeJSON(w, uResp.StatusCode, map[string]string{"error": strings.TrimSpace(string(b))})
-			return
-		}
-		flusher, ok := w.(http.Flusher)
+		agent, ok := gw.getAgent(in.Agent)
 		if !ok {
-			uResp.Body.Close()
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown agent"})
 			return
 		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("X-Accel-Buffering", "no")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.WriteHeader(http.StatusOK)
-		keepaliveDone := make(chan struct{})
-		defer close(keepaliveDone)
-		go func() {
-			ticker := time.NewTicker(15 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					fmt.Fprintf(w, ": keepalive\n\n")
-					flusher.Flush()
-				case <-keepaliveDone:
-					return
-				case <-agentCtx.Done():
-					return
-				}
+		if !agent.Healthy {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "agent is unhealthy"})
+			return
+		}
+		gw.lastSessionMu.RLock()
+		prevSessionID := gw.lastSession[in.Agent]
+		gw.lastSessionMu.RUnlock()
+		if strings.TrimSpace(prevSessionID) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no previous session found for agent"})
+			return
+		}
+		sess, ok := gw.sessionStore.get(prevSessionID)
+		if !ok || len(sess.Messages) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no messages in session to regenerate"})
+			return
+		}
+		var lastUser string
+		for i := len(sess.Messages) - 1; i >= 0; i-- {
+			if sess.Messages[i].Role == "user" {
+				lastUser = sess.Messages[i].Content
+				break
 			}
-		}()
+		}
+		if strings.TrimSpace(lastUser) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no user message found to regenerate"})
+			return
+		}
+		gw.stopAgent(in.Agent)
+		newSessionID := fmt.Sprintf("hirdforge-%s-%d", in.Agent, time.Now().UnixNano())
+		gw.sessionStore.ensureSession(newSessionID, in.Agent)
+		gw.lastSessionMu.Lock()
+		gw.lastSession[in.Agent] = newSessionID
+		gw.lastSessionMu.Unlock()
+		gw.addEvent("message_regenerated", in.Agent, fmt.Sprintf("Regenerating last message for %s", in.Agent))
+		gw.proxyMessageSSE(w, streamClient, agent, in.Agent, lastUser, newSessionID)
+	})
+}
 
-		reader := bufio.NewReader(uResp.Body)
-		var contentBuf strings.Builder
-		var doneEvt map[string]interface{}
-		var saveOnce sync.Once
-		processInjectionQueue := func(baseSessionID string) {
-			gw.injectionMu.Lock()
-			pending := gw.injections[in.Agent]
-			if len(pending) == 0 {
-				gw.injectionMu.Unlock()
+func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Client, agent *Agent, agentName, content, sessionID string) {
+	agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
+	defer agentCancel()
+	gw.setActiveRequest(agentName, sessionID, agentCancel)
+	defer gw.clearActiveRequest(agentName, agentCancel)
+
+	body, _ := json.Marshal(agentMessageRequest{Content: content, SessionID: sessionID})
+	uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to create upstream request"})
+		return
+	}
+	uReq.Header.Set("Content-Type", "application/json")
+	uResp, err := streamClient.Do(uReq)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upstream request failed"})
+		return
+	}
+	if uResp.StatusCode == 429 {
+		b, _ := io.ReadAll(io.LimitReader(uResp.Body, 4096))
+		uResp.Body.Close()
+		log.Printf("rate limit: upstream agent returned 429 for %s", agentName)
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited", "detail": strings.TrimSpace(string(b))})
+		return
+	}
+	if uResp.StatusCode < 200 || uResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(uResp.Body, 4096))
+		uResp.Body.Close()
+		writeJSON(w, uResp.StatusCode, map[string]string{"error": strings.TrimSpace(string(b))})
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		uResp.Body.Close()
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	keepaliveDone := make(chan struct{})
+	defer close(keepaliveDone)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprintf(w, ": keepalive\n\n")
+				flusher.Flush()
+			case <-keepaliveDone:
+				return
+			case <-agentCtx.Done():
 				return
 			}
-			next := pending[0]
-			gw.injections[in.Agent] = pending[1:]
-			gw.injectionMu.Unlock()
-			injSessionID := strings.TrimSpace(next.SessionID)
-			if injSessionID == "" {
-				injSessionID = baseSessionID
-			}
-			go func() {
-				injBody, _ := json.Marshal(map[string]string{
-					"content":    next.Content,
-					"session_id": injSessionID,
-				})
-				injReq, err := http.NewRequest(http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(injBody))
-				if err != nil {
-					log.Printf("injection failed for %s: %v", in.Agent, err)
-					return
-				}
-				injReq.Header.Set("Content-Type", "application/json")
-				gw.addEvent("injection_sent", in.Agent, fmt.Sprintf("Sovereign injection delivered to %s", in.Agent))
-				resp, err := http.DefaultClient.Do(injReq)
-				if err != nil {
-					log.Printf("injection request failed for %s: %v", in.Agent, err)
-					return
-				}
-				defer resp.Body.Close()
+		}
+	}()
 
-				var fullResp strings.Builder
-				scanner := bufio.NewScanner(resp.Body)
-				scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-				for scanner.Scan() {
-					line := scanner.Text()
-					if strings.HasPrefix(line, "data: ") {
-						chunk := strings.TrimPrefix(line, "data: ")
-						var obj map[string]interface{}
-						if json.Unmarshal([]byte(chunk), &obj) == nil {
-							if c, ok := obj["content"].(string); ok {
-								fullResp.WriteString(c)
-							}
+	reader := bufio.NewReader(uResp.Body)
+	var contentBuf strings.Builder
+	var doneEvt map[string]interface{}
+	var saveOnce sync.Once
+	processInjectionQueue := func(baseSessionID string) {
+		gw.injectionMu.Lock()
+		pending := gw.injections[agentName]
+		if len(pending) == 0 {
+			gw.injectionMu.Unlock()
+			return
+		}
+		next := pending[0]
+		gw.injections[agentName] = pending[1:]
+		gw.injectionMu.Unlock()
+		injSessionID := strings.TrimSpace(next.SessionID)
+		if injSessionID == "" {
+			injSessionID = baseSessionID
+		}
+		go func() {
+			injBody, _ := json.Marshal(map[string]string{
+				"content":    next.Content,
+				"session_id": injSessionID,
+			})
+			injReq, err := http.NewRequest(http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(injBody))
+			if err != nil {
+				log.Printf("injection failed for %s: %v", agentName, err)
+				return
+			}
+			injReq.Header.Set("Content-Type", "application/json")
+			gw.addEvent("injection_sent", agentName, fmt.Sprintf("Sovereign injection delivered to %s", agentName))
+			resp, err := http.DefaultClient.Do(injReq)
+			if err != nil {
+				log.Printf("injection request failed for %s: %v", agentName, err)
+				return
+			}
+			defer resp.Body.Close()
+
+			var fullResp strings.Builder
+			scanner := bufio.NewScanner(resp.Body)
+			scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+			for scanner.Scan() {
+				line := scanner.Text()
+				if strings.HasPrefix(line, "data: ") {
+					chunk := strings.TrimPrefix(line, "data: ")
+					var obj map[string]interface{}
+					if json.Unmarshal([]byte(chunk), &obj) == nil {
+						if c, ok := obj["content"].(string); ok {
+							fullResp.WriteString(c)
 						}
 					}
 				}
-				cleaned := thinkTagRE.ReplaceAllString(fullResp.String(), "")
-				gw.sessionStore.appendConversation(injSessionID, in.Agent, next.Content, cleaned)
-				gw.addEvent("injection_complete", in.Agent, fmt.Sprintf("Sovereign injection response from %s", in.Agent))
-			}()
-		}
-		saveConversation := func() {
-			saveOnce.Do(func() {
-				raw := contentBuf.String()
-				cleaned := thinkTagRE.ReplaceAllString(raw, "")
-				gw.sessionStore.appendConversation(sessionID, in.Agent, in.Content, cleaned)
-			})
-		}
-		drainAgentResponse := func() {
-			go func() {
-				defer uResp.Body.Close()
-				defer agentCancel()
-				for {
-					line, err := reader.ReadBytes('\n')
-					if err != nil {
-						break
-					}
-					_ = line
-				}
-				saveConversation()
-			}()
-		}
-		forward := func(evt map[string]interface{}) bool {
-			b, err := json.Marshal(evt)
-			if err != nil {
-				return true
 			}
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
-				return false
-			}
-			flusher.Flush()
-			return true
-		}
-		forwardReplaceIfNeeded := func() bool {
+			cleaned := thinkTagRE.ReplaceAllString(fullResp.String(), "")
+			gw.sessionStore.appendConversation(injSessionID, agentName, next.Content, cleaned)
+			gw.addEvent("injection_complete", agentName, fmt.Sprintf("Sovereign injection response from %s", agentName))
+		}()
+	}
+	saveConversation := func() {
+		saveOnce.Do(func() {
 			raw := contentBuf.String()
 			cleaned := thinkTagRE.ReplaceAllString(raw, "")
-			if cleaned != raw && cleaned != "" {
-				if !forward(map[string]interface{}{"type": "replace", "content": cleaned, "done": false}) {
-					return false
+			gw.sessionStore.appendConversation(sessionID, agentName, content, cleaned)
+		})
+	}
+	drainAgentResponse := func() {
+		go func() {
+			defer uResp.Body.Close()
+			defer agentCancel()
+			for {
+				line, err := reader.ReadBytes('\n')
+				if err != nil {
+					break
 				}
+				_ = line
 			}
+			saveConversation()
+		}()
+	}
+	forward := func(evt map[string]interface{}) bool {
+		b, err := json.Marshal(evt)
+		if err != nil {
 			return true
 		}
-		for {
-			line, err := reader.ReadBytes('\n')
-			if len(line) > 0 {
-				trim := strings.TrimSpace(string(line))
-				if strings.HasPrefix(trim, "data:") {
-					payload := strings.TrimSpace(strings.TrimPrefix(trim, "data:"))
-					var evt map[string]interface{}
-					if json.Unmarshal([]byte(payload), &evt) == nil {
-						typ, _ := evt["type"].(string)
-						gw.applyWorkspaceEvent(in.Agent, evt)
-						if typ == "content" {
-							if content, _ := evt["content"].(string); content != "" {
-								cleaned := controlTokenRE.ReplaceAllString(content, "")
-								if cleaned == "" {
-									goto lineDone
-								}
-								evt["content"] = cleaned
-								contentBuf.WriteString(cleaned)
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	forwardReplaceIfNeeded := func() bool {
+		raw := contentBuf.String()
+		cleaned := thinkTagRE.ReplaceAllString(raw, "")
+		if cleaned != raw && cleaned != "" {
+			if !forward(map[string]interface{}{"type": "replace", "content": cleaned, "done": false}) {
+				return false
+			}
+		}
+		return true
+	}
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			trim := strings.TrimSpace(string(line))
+			if strings.HasPrefix(trim, "data:") {
+				payload := strings.TrimSpace(strings.TrimPrefix(trim, "data:"))
+				var evt map[string]interface{}
+				if json.Unmarshal([]byte(payload), &evt) == nil {
+					typ, _ := evt["type"].(string)
+					gw.applyWorkspaceEvent(agentName, evt)
+					if typ == "content" {
+						if c, _ := evt["content"].(string); c != "" {
+							cleaned := controlTokenRE.ReplaceAllString(c, "")
+							if cleaned == "" {
+								goto lineDone
 							}
-							if !forward(evt) {
-								drainAgentResponse()
-								return
-							}
-							goto lineDone
-						}
-						if typ, _ := evt["type"].(string); typ == "tool_call" {
-							gw.addEvent("tool_call", in.Agent, "Tool call observed")
-							evtBytes, _ := json.Marshal(evt)
-							evtBlob := strings.ToLower(string(evtBytes))
-							toolName := strings.ToLower(strings.TrimSpace(fmt.Sprint(evt["name"])))
-							if toolName == "" {
-								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
-									toolName = strings.ToLower(strings.TrimSpace(fmt.Sprint(tc["name"])))
-									if toolName == "" {
-										if fn, ok := tc["function"].(map[string]interface{}); ok {
-											toolName = strings.ToLower(strings.TrimSpace(fmt.Sprint(fn["name"])))
-										}
-									}
-								}
-							}
-							switch {
-							case toolName == "exec" && strings.Contains(evtBlob, "cat /tmp/valhalla-personas"):
-								gw.addEvent("skill_loaded", in.Agent, "Loaded skill file")
-							case toolName == "git-clone":
-								summary := "Cloning repository"
-								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
-									var args map[string]interface{}
-									if a, ok := tc["arguments"].(map[string]interface{}); ok {
-										args = a
-									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
-										_ = json.Unmarshal([]byte(aStr), &args)
-									}
-									if repo, ok := args["repo"].(string); ok && repo != "" {
-										parts := strings.Split(repo, "/")
-										if len(parts) >= 2 {
-											summary = "Cloning " + parts[len(parts)-2] + "/" + parts[len(parts)-1]
-										} else {
-											summary = "Cloning " + repo
-										}
-									}
-								}
-								gw.addEvent("recon_started", in.Agent, summary)
-							case toolName == "gitea" && strings.Contains(evtBlob, "create-pr"):
-								summary := "Pull request created"
-								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
-									var args map[string]interface{}
-									if a, ok := tc["arguments"].(map[string]interface{}); ok {
-										args = a
-									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
-										_ = json.Unmarshal([]byte(aStr), &args)
-									}
-									if title, ok := args["title"].(string); ok && title != "" {
-										summary = "PR: " + title
-									}
-								}
-								gw.addEvent("pr_created", in.Agent, summary)
-							case toolName == "write":
-								summary := "Writing file"
-								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
-									var args map[string]interface{}
-									if a, ok := tc["arguments"].(map[string]interface{}); ok {
-										args = a
-									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
-										_ = json.Unmarshal([]byte(aStr), &args)
-									}
-									if path, ok := args["path"].(string); ok && path != "" {
-										summary = "Writing " + path
-									}
-								}
-								gw.addEvent("tool_call", in.Agent, summary)
-							case toolName == "edit":
-								summary := "Editing file"
-								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
-									var args map[string]interface{}
-									if a, ok := tc["arguments"].(map[string]interface{}); ok {
-										args = a
-									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
-										_ = json.Unmarshal([]byte(aStr), &args)
-									}
-									if path, ok := args["path"].(string); ok && path != "" {
-										summary = "Editing " + path
-									}
-								}
-								gw.addEvent("tool_call", in.Agent, summary)
-							case toolName == "delegate":
-								summary := "Delegating task"
-								if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
-									var args map[string]interface{}
-									if a, ok := tc["arguments"].(map[string]interface{}); ok {
-										args = a
-									} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
-										_ = json.Unmarshal([]byte(aStr), &args)
-									}
-									if agent, ok := args["agent"].(string); ok && agent != "" {
-										summary = "Delegating to " + agent
-									}
-								}
-								gw.addEvent("tool_call", in.Agent, summary)
-							case toolName == "read" && strings.Contains(strings.ToUpper(string(evtBytes)), "ARCHITECTURE"):
-								gw.addEvent("recon_reading", in.Agent, "Reading ARCHITECTURE.md")
-							}
-						}
-						if typ == "done" {
-							doneEvt = evt
-							if _, ok := doneEvt["session_id"]; !ok {
-								doneEvt["session_id"] = sessionID
-							}
-							if !forwardReplaceIfNeeded() {
-								drainAgentResponse()
-								return
-							}
-							saveConversation()
-							processInjectionQueue(sessionID)
-							if !forward(doneEvt) {
-								drainAgentResponse()
-								return
-							}
-							uResp.Body.Close()
-							return
+							evt["content"] = cleaned
+							contentBuf.WriteString(cleaned)
 						}
 						if !forward(evt) {
 							drainAgentResponse()
 							return
 						}
+						goto lineDone
+					}
+					if typ, _ := evt["type"].(string); typ == "tool_call" {
+						gw.addEvent("tool_call", agentName, "Tool call observed")
+						evtBytes, _ := json.Marshal(evt)
+						evtBlob := strings.ToLower(string(evtBytes))
+						toolName := strings.ToLower(strings.TrimSpace(fmt.Sprint(evt["name"])))
+						if toolName == "" {
+							if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+								toolName = strings.ToLower(strings.TrimSpace(fmt.Sprint(tc["name"])))
+								if toolName == "" {
+									if fn, ok := tc["function"].(map[string]interface{}); ok {
+										toolName = strings.ToLower(strings.TrimSpace(fmt.Sprint(fn["name"])))
+									}
+								}
+							}
+						}
+						switch {
+						case toolName == "exec" && strings.Contains(evtBlob, "cat /tmp/valhalla-personas"):
+							gw.addEvent("skill_loaded", agentName, "Loaded skill file")
+						case toolName == "git-clone":
+							summary := "Cloning repository"
+							if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+								var args map[string]interface{}
+								if a, ok := tc["arguments"].(map[string]interface{}); ok {
+									args = a
+								} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+									_ = json.Unmarshal([]byte(aStr), &args)
+								}
+								if repo, ok := args["repo"].(string); ok && repo != "" {
+									parts := strings.Split(repo, "/")
+									if len(parts) >= 2 {
+										summary = "Cloning " + parts[len(parts)-2] + "/" + parts[len(parts)-1]
+									} else {
+										summary = "Cloning " + repo
+									}
+								}
+							}
+							gw.addEvent("recon_started", agentName, summary)
+						case toolName == "gitea" && strings.Contains(evtBlob, "create-pr"):
+							summary := "Pull request created"
+							if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+								var args map[string]interface{}
+								if a, ok := tc["arguments"].(map[string]interface{}); ok {
+									args = a
+								} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+									_ = json.Unmarshal([]byte(aStr), &args)
+								}
+								if title, ok := args["title"].(string); ok && title != "" {
+									summary = "PR: " + title
+								}
+							}
+							gw.addEvent("pr_created", agentName, summary)
+						case toolName == "write":
+							summary := "Writing file"
+							if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+								var args map[string]interface{}
+								if a, ok := tc["arguments"].(map[string]interface{}); ok {
+									args = a
+								} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+									_ = json.Unmarshal([]byte(aStr), &args)
+								}
+								if path, ok := args["path"].(string); ok && path != "" {
+									summary = "Writing " + path
+								}
+							}
+							gw.addEvent("tool_call", agentName, summary)
+						case toolName == "edit":
+							summary := "Editing file"
+							if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+								var args map[string]interface{}
+								if a, ok := tc["arguments"].(map[string]interface{}); ok {
+									args = a
+								} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+									_ = json.Unmarshal([]byte(aStr), &args)
+								}
+								if path, ok := args["path"].(string); ok && path != "" {
+									summary = "Editing " + path
+								}
+							}
+							gw.addEvent("tool_call", agentName, summary)
+						case toolName == "delegate":
+							summary := "Delegating task"
+							if tc, ok := evt["tool_call"].(map[string]interface{}); ok {
+								var args map[string]interface{}
+								if a, ok := tc["arguments"].(map[string]interface{}); ok {
+									args = a
+								} else if aStr, ok := tc["arguments"].(string); ok && aStr != "" {
+									_ = json.Unmarshal([]byte(aStr), &args)
+								}
+								if target, ok := args["agent"].(string); ok && target != "" {
+									summary = "Delegating to " + target
+								}
+							}
+							gw.addEvent("tool_call", agentName, summary)
+						case toolName == "read" && strings.Contains(strings.ToUpper(string(evtBytes)), "ARCHITECTURE"):
+							gw.addEvent("recon_reading", agentName, "Reading ARCHITECTURE.md")
+						}
+					}
+					if typ == "done" {
+						doneEvt = evt
+						if _, ok := doneEvt["session_id"]; !ok {
+							doneEvt["session_id"] = sessionID
+						}
+						if !forwardReplaceIfNeeded() {
+							drainAgentResponse()
+							return
+						}
+						saveConversation()
+						processInjectionQueue(sessionID)
+						if !forward(doneEvt) {
+							drainAgentResponse()
+							return
+						}
+						uResp.Body.Close()
+						return
+					}
+					if !forward(evt) {
+						drainAgentResponse()
+						return
 					}
 				}
-			lineDone:
 			}
-			if err == io.EOF {
-				if !forwardReplaceIfNeeded() {
-					uResp.Body.Close()
-					return
-				}
-				saveConversation()
-				processInjectionQueue(sessionID)
-				if doneEvt != nil {
-					_ = forward(doneEvt)
-				} else {
-					_ = forward(map[string]interface{}{"type": "done", "done": true, "session_id": sessionID})
-				}
-				uResp.Body.Close()
-				return
-			}
-			if err != nil {
-				uResp.Body.Close()
-				return
-			}
+		lineDone:
 		}
-	})
+		if err == io.EOF {
+			if !forwardReplaceIfNeeded() {
+				uResp.Body.Close()
+				return
+			}
+			saveConversation()
+			processInjectionQueue(sessionID)
+			if doneEvt != nil {
+				_ = forward(doneEvt)
+			} else {
+				_ = forward(map[string]interface{}{"type": "done", "done": true, "session_id": sessionID})
+			}
+			uResp.Body.Close()
+			return
+		}
+		if err != nil {
+			uResp.Body.Close()
+			return
+		}
+	}
 }
