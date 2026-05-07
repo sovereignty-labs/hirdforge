@@ -878,6 +878,10 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 			return
 		}
 		reader := bufio.NewReader(resp.Body)
+		const repetitionWindow = 5
+		const repetitionThreshold = 4
+		var recentChunks []string
+		var repeatCount int
 		for {
 			line, err := reader.ReadString('\n')
 			if err == io.EOF {
@@ -901,7 +905,24 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 				return
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				chunks <- inferenceStreamEvent{Content: chunk.Choices[0].Delta.Content}
+				content := chunk.Choices[0].Delta.Content
+				trimmed := strings.TrimSpace(content)
+				if trimmed != "" {
+					if len(recentChunks) > 0 && recentChunks[len(recentChunks)-1] == trimmed {
+						repeatCount++
+						if repeatCount >= repetitionThreshold {
+							log.Printf("repetition loop detected, truncating response")
+							return
+						}
+					} else {
+						repeatCount = 1
+					}
+					recentChunks = append(recentChunks, trimmed)
+					if len(recentChunks) > repetitionWindow {
+						recentChunks = recentChunks[1:]
+					}
+				}
+				chunks <- inferenceStreamEvent{Content: content}
 			}
 		}
 	}()
