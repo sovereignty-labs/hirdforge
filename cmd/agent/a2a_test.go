@@ -16,7 +16,7 @@ import (
 )
 
 func TestJSONRPCMessageSend(t *testing.T) {
-	runtime := newA2ARuntime("ragnar", func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
+	runtime := newA2ARuntime("ragnar", "", func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
 		return "done", nil
 	})
 	reqBody := `{"jsonrpc":"2.0","id":"req-1","method":"message/send","params":{"message":{"role":"user","parts":[{"text":"hello"}],"messageId":"ctx-123"}}}`
@@ -79,7 +79,7 @@ func TestAgentCardV1Format(t *testing.T) {
 		taskCancels:         map[string]context.CancelFunc{},
 		completionMaxNudges: 1,
 		reviewTracker:       newReviewContextTracker("ragnar", "", time.Minute),
-		a2aRuntime: newA2ARuntime("ragnar", func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
+		a2aRuntime: newA2ARuntime("ragnar", "", func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
 			return "", nil
 		}),
 	})
@@ -117,7 +117,7 @@ func TestPushNotification(t *testing.T) {
 	}))
 	defer server.Close()
 
-	runtime := newA2ARuntime("ragnar", func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
+	runtime := newA2ARuntime("ragnar", "", func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
 		return "finished", nil
 	})
 	_, done, err := runtime.submit(a2aSendMessageRequest{

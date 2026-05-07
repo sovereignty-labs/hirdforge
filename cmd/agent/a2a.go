@@ -122,8 +122,10 @@ type a2aRuntimeEvent struct {
 
 type a2aRuntime struct {
 	agentName           string
+	gatewayURL          string
 	processConversation conversationProcessor
 	pushClient          *http.Client
+	eventClient         *http.Client
 
 	mu           sync.RWMutex
 	tasks        map[string]*a2aTask
@@ -136,14 +138,49 @@ var (
 	errA2ANotFound = errors.New("task not found")
 )
 
-func newA2ARuntime(agentName string, processConversation conversationProcessor) *a2aRuntime {
+func newA2ARuntime(agentName, gatewayURL string, processConversation conversationProcessor) *a2aRuntime {
 	return &a2aRuntime{
 		agentName:           strings.TrimSpace(agentName),
+		gatewayURL:          strings.TrimSpace(gatewayURL),
 		processConversation: processConversation,
 		pushClient:          &http.Client{Timeout: 10 * time.Second},
+		eventClient:         &http.Client{Timeout: 5 * time.Second},
 		tasks:               map[string]*a2aTask{},
 		cancels:             map[string]context.CancelFunc{},
 	}
+}
+
+func (rt *a2aRuntime) postGatewayEvent(eventType, agentName string, metadata map[string]interface{}) {
+	if strings.TrimSpace(rt.gatewayURL) == "" {
+		return
+	}
+	go func() {
+		body, err := json.Marshal(map[string]interface{}{
+			"type":     eventType,
+			"agent":    agentName,
+			"metadata": metadata,
+		})
+		if err != nil {
+			log.Printf("a2a: postGatewayEvent marshal error: %v", err)
+			return
+		}
+		url := strings.TrimRight(rt.gatewayURL, "/") + "/api/v1/events"
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			log.Printf("a2a: postGatewayEvent request error: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := rt.eventClient.Do(req)
+		if err != nil {
+			log.Printf("a2a: postGatewayEvent send error: %v", err)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			log.Printf("a2a: postGatewayEvent gateway returned %d", resp.StatusCode)
+		}
+	}()
 }
 
 func (rt *a2aRuntime) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +369,26 @@ func (rt *a2aRuntime) runTask(ctx context.Context, task *a2aTask, content string
 		})
 	}
 
-	result, err := rt.processConversation(ctx, task.ID, task.ID, content, rt.eventEmitter(task.ID, sink), nil)
+	rt.postGatewayEvent("delegation_started", rt.agentName, map[string]interface{}{
+		"target_agent": rt.agentName,
+		"session_id":   task.ContextID,
+		"task_id":      task.ID,
+	})
+
+	baseEmit := rt.eventEmitter(task.ID, sink)
+	emit := func(chunk interface{}) bool {
+		if c, ok := chunk.(sseChunk); ok && c.Type == "tool_call" {
+			buf, _ := json.Marshal(c)
+			meta := map[string]interface{}{}
+			_ = json.Unmarshal(buf, &meta)
+			meta["session_id"] = task.ContextID
+			meta["task_id"] = task.ID
+			rt.postGatewayEvent(c.Type, rt.agentName, meta)
+		}
+		return baseEmit(chunk)
+	}
+
+	result, err := rt.processConversation(ctx, task.ID, task.ID, content, emit, nil)
 	switch {
 	case ctx.Err() == context.Canceled:
 		finalStatus := a2aTaskStatus{
@@ -347,6 +403,12 @@ func (rt *a2aRuntime) runTask(ctx context.Context, task *a2aTask, content string
 			current.Status = finalStatus
 		})
 		rt.emitFinalStatus(task.ID, finalStatus, sink)
+		rt.postGatewayEvent("delegation_ended", rt.agentName, map[string]interface{}{
+			"target_agent": rt.agentName,
+			"session_id":   task.ContextID,
+			"task_id":      task.ID,
+			"state":        string(a2aTaskStateCanceled),
+		})
 		rt.postCompletion(push, finalTask)
 	case err != nil:
 		finalStatus := a2aTaskStatus{
@@ -361,6 +423,12 @@ func (rt *a2aRuntime) runTask(ctx context.Context, task *a2aTask, content string
 			current.Status = finalStatus
 		})
 		rt.emitFinalStatus(task.ID, finalStatus, sink)
+		rt.postGatewayEvent("delegation_ended", rt.agentName, map[string]interface{}{
+			"target_agent": rt.agentName,
+			"session_id":   task.ContextID,
+			"task_id":      task.ID,
+			"state":        string(a2aTaskStateFailed),
+		})
 		rt.postCompletion(push, finalTask)
 	default:
 		artifact := a2aArtifact{
@@ -386,6 +454,12 @@ func (rt *a2aRuntime) runTask(ctx context.Context, task *a2aTask, content string
 			})
 		}
 		rt.emitFinalStatus(task.ID, finalStatus, sink)
+		rt.postGatewayEvent("delegation_ended", rt.agentName, map[string]interface{}{
+			"target_agent": rt.agentName,
+			"session_id":   task.ContextID,
+			"task_id":      task.ID,
+			"state":        string(a2aTaskStateCompleted),
+		})
 		rt.postCompletion(push, finalTask)
 	}
 }
