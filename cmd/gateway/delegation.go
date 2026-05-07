@@ -169,10 +169,31 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 					}
 					gw.setActiveRequest(target, sid, nil)
 				}
+				if taskID, ok := in.Metadata["task_id"].(string); ok && strings.TrimSpace(taskID) != "" && gw.a2aStore != nil {
+					if err := gw.a2aStore.UpdateTaskStatus(strings.TrimSpace(taskID), TaskStatus{
+						State:     TaskStateWorking,
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+					}); err != nil {
+						log.Printf("a2aStore.UpdateTaskStatus(%s, working): %v", taskID, err)
+					}
+				}
 			}
 			if in.Type == "delegation_ended" {
 				if target, ok := in.Metadata["target_agent"].(string); ok && target != "" {
 					gw.clearActiveRequest(target, nil)
+				}
+				if taskID, ok := in.Metadata["task_id"].(string); ok && strings.TrimSpace(taskID) != "" && gw.a2aStore != nil {
+					stateStr, _ := in.Metadata["state"].(string)
+					stateStr = strings.TrimSpace(stateStr)
+					if stateStr == "" {
+						stateStr = string(TaskStateCompleted)
+					}
+					if err := gw.a2aStore.UpdateTaskStatus(strings.TrimSpace(taskID), TaskStatus{
+						State:     TaskState(stateStr),
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+					}); err != nil {
+						log.Printf("a2aStore.UpdateTaskStatus(%s, %s): %v", taskID, stateStr, err)
+					}
 				}
 			}
 
