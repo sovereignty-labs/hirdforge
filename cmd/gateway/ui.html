@@ -2293,33 +2293,80 @@
         if (projected.length > 0) {
           return projected.sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
         }
-        const seen = new Map();
+        const taskIDOrder = [];
+        const eventsByTaskID = new Map();
+        const noIDEvents = [];
         delegationEvents.forEach(evt => {
           if (!evt) return;
-          if (evt.type !== 'delegation_started' && evt.type !== 'task_dispatched') return;
           const meta = (evt && evt.metadata) || {};
           const taskID = String(meta.task_id || '');
-          const targetAgent = String(meta.target_agent || evt.agent || '');
-          const key = taskID || `${targetAgent}-${evt.timestamp || ''}`;
-          if (!key || seen.has(key)) return;
+          if (taskID) {
+            if (!eventsByTaskID.has(taskID)) {
+              taskIDOrder.push(taskID);
+              eventsByTaskID.set(taskID, []);
+            }
+            eventsByTaskID.get(taskID).push(evt);
+            return;
+          }
+          if (evt.type !== 'delegation_started' && evt.type !== 'task_dispatched') return;
+          noIDEvents.push(evt);
+        });
+
+        const buildEntry = (id, primary, statusEvent, defaultStatus) => {
+          const meta = (primary && primary.metadata) || {};
+          const targetAgent = String(meta.target_agent || (primary && primary.agent) || '');
           const content = String(meta.content || meta.task || '');
+          let status = defaultStatus;
+          if (statusEvent && statusEvent.type === 'delegation_ended') {
+            const stateStr = String(((statusEvent.metadata) || {}).state || 'completed').trim();
+            status = stateStr || 'completed';
+          } else if (statusEvent && statusEvent.type === 'task_dispatched') {
+            status = 'dispatched';
+          }
           const prNumber = Number(meta.pr_number) || extractPRNumberFromText(content);
           const prInfo = prList.find(pr => Number(pr.number) === prNumber) || null;
-          seen.set(key, {
-            id: key,
+          return {
+            id,
             agent: targetAgent || 'unknown',
             session_id: String(meta.session_id || activeSessionID),
-            created_at: evt.timestamp || '',
+            created_at: (primary && primary.timestamp) || '',
             content,
             parsed: parseDelegatedTask(content),
             prNumber,
             prInfo,
             issueRef: '',
-            displayStatus: evt.type === 'delegation_ended' ? 'completed' : 'dispatched',
-            lifecycleState: evt.type === 'delegation_ended' ? 'completed' : 'dispatched',
-          });
+            displayStatus: status,
+            lifecycleState: status,
+          };
+        };
+
+        const tasksFromIDs = taskIDOrder.map(taskID => {
+          const events = eventsByTaskID.get(taskID) || [];
+          const started = events.filter(e => e.type === 'delegation_started');
+          const dispatched = events.filter(e => e.type === 'task_dispatched');
+          const ended = events.filter(e => e.type === 'delegation_ended');
+          let primary = started.find(e => {
+            const meta = e.metadata || {};
+            const eventAgent = String(e.agent || '');
+            const targetAgent = String(meta.target_agent || '');
+            return eventAgent && targetAgent && eventAgent !== targetAgent;
+          }) || started[0] || dispatched[0] || ended[0];
+          if (!primary) return null;
+          const statusEvent = ended[ended.length - 1] || dispatched[dispatched.length - 1] || null;
+          return buildEntry(taskID, primary, statusEvent, 'dispatched');
+        }).filter(Boolean);
+
+        const noIDSeen = new Map();
+        noIDEvents.forEach(evt => {
+          const meta = (evt && evt.metadata) || {};
+          const targetAgent = String(meta.target_agent || evt.agent || '');
+          const fallbackKey = `${targetAgent}-${evt.timestamp || ''}`;
+          if (!fallbackKey || noIDSeen.has(fallbackKey)) return;
+          noIDSeen.set(fallbackKey, buildEntry(fallbackKey, evt, evt, 'dispatched'));
         });
-        return Array.from(seen.values()).sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
+
+        return [...tasksFromIDs, ...Array.from(noIDSeen.values())]
+          .sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
       }, [activeSessionID, workspace, prList, delegationEvents]);
       const selectedTaskID = activeSessionID ? (selectedTaskBySession[activeSessionID] || '') : '';
       const selectedTask = sessionTasks.find(task => task.id === selectedTaskID) || null;
