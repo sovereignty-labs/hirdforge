@@ -2238,32 +2238,89 @@
     }) {
       const [prs, setPRs] = useState([]);
       const [selectedTaskBySession, setSelectedTaskBySession] = useState({});
+      const [delegationEvents, setDelegationEvents] = useState([]);
 
       const activeSessionID = String(workspace && workspace.current_session_id || '').trim();
       const activeObjective = String(workspace && workspace.current_objective || '').trim();
       const sessionEvents = Array.isArray(workspace && workspace.session_timeline) ? workspace.session_timeline : [];
       const architectTimeline = useMemo(() => architectTimelineItems(sessionEvents).slice(-30), [sessionEvents]);
       const prList = useMemo(() => asArrayPayload(prs, 'prs'), [prs]);
+
+      useEffect(() => {
+        if (!activeSessionID) {
+          setDelegationEvents([]);
+          return;
+        }
+        let cancelled = false;
+        const load = () => {
+          fetch(`/api/v1/delegation-timeline?session_id=${encodeURIComponent(activeSessionID)}`)
+            .then(response => response.ok ? response.json() : { events: [] })
+            .then(data => {
+              if (cancelled) return;
+              setDelegationEvents(Array.isArray(data && data.events) ? data.events : []);
+            })
+            .catch(() => {
+              if (!cancelled) setDelegationEvents([]);
+            });
+        };
+        load();
+        const id = setInterval(load, 5000);
+        return () => {
+          cancelled = true;
+          clearInterval(id);
+        };
+      }, [activeSessionID]);
+
       const sessionTasks = useMemo(() => {
         if (!activeSessionID) return [];
-        return (Array.isArray(workspace && workspace.session_tasks) ? workspace.session_tasks : [])
+        const enrichProjected = task => {
+          const parsed = parseDelegatedTask(task.content);
+          const prNumber = Number(task && task.pr_number) || extractPRNumberFromText(collectTaskText(task));
+          const prInfo = prList.find(pr => Number(pr.number) === prNumber) || null;
+          return {
+            ...task,
+            parsed,
+            prNumber,
+            prInfo,
+            issueRef: extractIssueRef(task, parsed),
+            displayStatus: architectTaskStatus(task, prInfo),
+            lifecycleState: architectLifecycleState(task, prInfo),
+          };
+        };
+        const projected = (Array.isArray(workspace && workspace.session_tasks) ? workspace.session_tasks : [])
           .filter(task => String(task && task.session_id || '') === activeSessionID)
-          .map(task => {
-            const parsed = parseDelegatedTask(task.content);
-            const prNumber = Number(task && task.pr_number) || extractPRNumberFromText(collectTaskText(task));
-            const prInfo = prList.find(pr => Number(pr.number) === prNumber) || null;
-            return {
-              ...task,
-              parsed,
-              prNumber,
-              prInfo,
-              issueRef: extractIssueRef(task, parsed),
-              displayStatus: architectTaskStatus(task, prInfo),
-              lifecycleState: architectLifecycleState(task, prInfo),
-            };
-          })
-          .sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
-      }, [activeSessionID, workspace, prList]);
+          .map(enrichProjected);
+        if (projected.length > 0) {
+          return projected.sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
+        }
+        const seen = new Map();
+        delegationEvents.forEach(evt => {
+          if (!evt) return;
+          if (evt.type !== 'delegation_started' && evt.type !== 'task_dispatched') return;
+          const meta = (evt && evt.metadata) || {};
+          const taskID = String(meta.task_id || '');
+          const targetAgent = String(meta.target_agent || evt.agent || '');
+          const key = taskID || `${targetAgent}-${evt.timestamp || ''}`;
+          if (!key || seen.has(key)) return;
+          const content = String(meta.content || meta.task || '');
+          const prNumber = Number(meta.pr_number) || extractPRNumberFromText(content);
+          const prInfo = prList.find(pr => Number(pr.number) === prNumber) || null;
+          seen.set(key, {
+            id: key,
+            agent: targetAgent || 'unknown',
+            session_id: String(meta.session_id || activeSessionID),
+            created_at: evt.timestamp || '',
+            content,
+            parsed: parseDelegatedTask(content),
+            prNumber,
+            prInfo,
+            issueRef: '',
+            displayStatus: evt.type === 'delegation_ended' ? 'completed' : 'dispatched',
+            lifecycleState: evt.type === 'delegation_ended' ? 'completed' : 'dispatched',
+          });
+        });
+        return Array.from(seen.values()).sort((a, b) => timeValue(a.created_at) - timeValue(b.created_at));
+      }, [activeSessionID, workspace, prList, delegationEvents]);
       const selectedTaskID = activeSessionID ? (selectedTaskBySession[activeSessionID] || '') : '';
       const selectedTask = sessionTasks.find(task => task.id === selectedTaskID) || null;
       const selectedTaskEvents = useMemo(() => taskEventsForAgent(sessionEvents, selectedTask), [sessionEvents, selectedTask]);
