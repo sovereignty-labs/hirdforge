@@ -901,7 +901,12 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			if len(assistant.ToolCalls) == 0 {
 				break
 			}
-			messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
+			if strings.TrimSpace(assistant.Content) != "" {
+				messages = append(messages, message{Role: assistant.Role, Content: assistant.Content})
+				messages = append(messages, message{Role: assistant.Role, ToolCalls: assistant.ToolCalls})
+			} else {
+				messages = append(messages, message{Role: assistant.Role, Content: assistant.Content, ToolCalls: assistant.ToolCalls})
+			}
 			executeToolCalls(assistant.ToolCalls)
 			if i == deps.maxToolRounds-1 {
 				log.Printf("[TOOL_LIMIT] agent=%s model=%s session=%s — reached %d tool rounds", deps.agentName, deps.model, sessionID, deps.maxToolRounds)
