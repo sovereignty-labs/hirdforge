@@ -20,7 +20,7 @@ import (
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
-var controlTokenRE = regexp.MustCompile(`</?\|[^>]*>`)
+var controlTokenRE = regexp.MustCompile(`</?\|[^>]*>|<\w+\|>|</?(?:thought|channel|start_of_turn|end_of_turn|tool_call|tool_response)\b[^>]*>?`)
 
 var (
 	taskPRURLRE   = regexp.MustCompile(`/pulls/(\d+)\b`)
