@@ -135,6 +135,19 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 			}
 			msg, _ := in.Metadata["message"].(string)
 			gw.addEvent(in.Type, in.Agent, msg)
+			if strings.TrimSpace(in.Agent) != "" {
+				eventMap := map[string]interface{}{
+					"type":  in.Type,
+					"agent": in.Agent,
+				}
+				for k, v := range in.Metadata {
+					if k == "type" || k == "agent" {
+						continue
+					}
+					eventMap[k] = v
+				}
+				gw.applyWorkspaceEvent(in.Agent, eventMap)
+			}
 			if sessionID, ok := in.Metadata["session_id"].(string); ok && sessionID != "" {
 				evt := delegationTimelineEvent{
 					Type:      in.Type,

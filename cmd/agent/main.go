@@ -2250,7 +2250,7 @@ func main() {
 		giteaTool:        giteaTool,
 		reviewTracker:    reviewTracker,
 	})
-	a2aRuntime := newA2ARuntime(agentName, processConversation)
+	a2aRuntime := newA2ARuntime(agentName, *gatewayURL, processConversation)
 
 	mux := http.NewServeMux()
 	registerRoutes(mux, serverDeps{
