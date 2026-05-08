@@ -149,23 +149,34 @@ func (g *gateway) handleAgentPRSynchronized(pr webhookPR) {
 	g.dispatchA2APeerReview(pr)
 }
 
+func (g *gateway) warbandFromRepo(repo string) string {
+	owner := ""
+	if idx := strings.IndexByte(repo, '/'); idx > 0 {
+		owner = strings.TrimSpace(repo[:idx])
+	}
+	switch owner {
+	case "warband":
+		return "bravo"
+	case "kit":
+		return "alpha"
+	default:
+		return normalizeWarbandName(g.defaultWarband)
+	}
+}
+
 func (g *gateway) dispatchA2APeerReview(pr webhookPR) {
 	if strings.HasPrefix(pr.Head, "ci/") {
 		log.Printf("webhook: review skipped for PR #%d on %s: ci branch %s", pr.Number, pr.Repo, pr.Head)
 		return
 	}
 	author := g.builderFromBranch(pr.Head)
-	warband := g.agentWarband(author)
+	warband := g.warbandFromRepo(pr.Repo)
 	peerName := ""
-	fallbackPeer := ""
 	g.mu.RLock()
 	for _, name := range g.order {
 		agent := g.agents[name]
-		if name == "" || name == author || agent == nil || !agent.Healthy || agent.Role != "builder" {
+		if name == "" || name == author || agent == nil || !agent.Healthy || agent.Role != "reviewer" {
 			continue
-		}
-		if fallbackPeer == "" {
-			fallbackPeer = name
 		}
 		if normalizeWarbandName(agent.Warband) == warband {
 			peerName = name
@@ -174,10 +185,7 @@ func (g *gateway) dispatchA2APeerReview(pr webhookPR) {
 	}
 	g.mu.RUnlock()
 	if peerName == "" {
-		peerName = fallbackPeer
-	}
-	if peerName == "" {
-		log.Printf("webhook: A2A peer review skipped for PR #%d on %s: no healthy peer builder available", pr.Number, pr.Repo)
+		log.Printf("webhook: A2A peer review skipped for PR #%d on %s: no healthy reviewer available in %s warband", pr.Number, pr.Repo, warband)
 		return
 	}
 

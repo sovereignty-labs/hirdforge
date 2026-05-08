@@ -575,10 +575,18 @@ function DispatchView({events}){
       const sid=e.SessionId||e.session_id||'';
       if(!sid)return;
       if(!sessionMap[sid]){
-        // Extract agent name from session ID like "hirdforge-ragnar-123" -> "ragnar"
-        const parts=sid.split('-');
-        const agent=parts.length>=3?parts[2]:(parts[1]||'unknown');
-        sessionMap[sid]={id:sid,agent,lastActivity:e.Time||e.time};
+        // Extract agent name: prefer explicit agent field, fallback to parsing
+        // session ID like "sess-X-agentname-123" -> "agentname"
+        let agent=e.agent||'';
+        if(!agent){
+          const parts=sid.split('-');
+          agent=parts.length>=3?parts[2]:(parts[1]||'unknown');
+        }
+        // Task summary: prefer explicit task_summary, then content, then id
+        const taskSummary=e.task_summary||e.content||(sid.length>50?sid.slice(0,50)+'...':sid);
+        // Active = no last_preview means still running
+        const hasActivity=Boolean(e.last_preview||e.lastPreview);
+        sessionMap[sid]={id:sid,agent,taskSummary,lastActivity:e.Time||e.time,active:!hasActivity};
       }else{
         // Update lastActivity if newer
         const existingTs=new Date(sessionMap[sid].lastActivity).getTime();
@@ -684,17 +692,35 @@ function DispatchView({events}){
         :h('div',{className:'dispatch-sessions'},
             filteredSessions.map(s=>{
               const isSelected=selectedSession===s.id;
+              // Truncate task summary to 50 chars
+              const summary=s.taskSummary||'';
+              const shortSummary=summary.length>50?summary.slice(0,50)+'...':summary;
               return h('div',{
                 key:s.id,
                 className:`dispatch-session${isSelected?' active':''}`,
                 onClick:()=>setSelectedSession(isSelected?null:s.id),
                 style:{cursor:'pointer'}
               },
-                h('div',{className:'dispatch-session-agent'},s.agent),
-                h('div',{className:'dispatch-session-id',style:{fontSize:10,color:'var(--text-muted)',marginTop:2}},
-                  s.id.length>40?s.id.slice(0,40)+'...':s.id
+                h('div',{style:{display:'flex',alignItems:'center',gap:6}},
+                  // Status dot: green for active (no last_preview), gray for completed
+                  h('div',{style:{
+                    width:7,height:7,borderRadius:'50%',flexShrink:0,
+                    background:s.active?'var(--green)':'rgba(255,255,255,0.2)'
+                  }}),
+                  // Agent name badge
+                  h('span',{style:{
+                    fontSize:12,fontWeight:500,color:'var(--text-bright)',
+                    background:'rgba(255,255,255,0.04)',
+                    border:'1px solid rgba(255,255,255,0.08)',
+                    borderRadius:6,padding:'2px 7px'
+                  }},s.agent),
+                  h('span',{style:{fontSize:10,color:'var(--text-muted)',marginLeft:2}},s.active?'●':'○')
                 ),
-                h('div',{className:'dispatch-session-time',style:{fontSize:10,color:'var(--text-muted)',marginTop:4}},
+                h('div',{style:{
+                  fontSize:11,color:'var(--text-dim)',marginTop:4,
+                  overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'
+                }},shortSummary),
+                h('div',{style:{fontSize:10,color:'var(--text-muted)',marginTop:3}},
                   s.lastActivity?ago(Math.floor(new Date(s.lastActivity).getTime()/1000))+' ago':'no activity'
                 )
               );
