@@ -526,8 +526,12 @@ func (s *gatewayMCPServer) registerTools() {
 			if strings.TrimSpace(sha) != "" {
 				payload["sha"] = sha
 			}
+			method := http.MethodPost
+			if strings.TrimSpace(sha) != "" {
+				method = http.MethodPut
+			}
 			path := fmt.Sprintf("/api/v1/repos/%s/%s/contents/%s", url.PathEscape(owner), url.PathEscape(repo), filepath)
-			return s.callGiteaJSON(ctx, http.MethodPost, path, payload)
+			return s.callGiteaJSON(ctx, method, path, payload)
 		},
 	}
 	s.tools["gitea_create_branch"] = mcpToolHandler{
