@@ -847,6 +847,47 @@ func streamOllamaWithContext(ctx context.Context, messages []message, defs []too
 	return streamChatCompletionsWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
 }
 
+const (
+	repetitionBufferSize    = 500
+	repetitionCheckInterval = 50
+	repetitionWindowSize    = 100
+	repetitionThreshold     = 3
+)
+
+// repetitionDetector flags streaming output that is stuck in a loop by looking
+// for the same window of trailing bytes repeating multiple times across an
+// assembled rolling buffer. It works on assembled text instead of per-chunk
+// equality, so the detection survives the inference server splitting a
+// repeated token across arbitrary chunk boundaries.
+type repetitionDetector struct {
+	buf            []byte
+	sinceLastCheck int
+}
+
+func newRepetitionDetector() *repetitionDetector {
+	return &repetitionDetector{buf: make([]byte, 0, repetitionBufferSize)}
+}
+
+func (d *repetitionDetector) observe(content string) bool {
+	if content == "" {
+		return false
+	}
+	d.buf = append(d.buf, content...)
+	if len(d.buf) > repetitionBufferSize {
+		d.buf = d.buf[len(d.buf)-repetitionBufferSize:]
+	}
+	d.sinceLastCheck += len(content)
+	if d.sinceLastCheck < repetitionCheckInterval {
+		return false
+	}
+	d.sinceLastCheck = 0
+	if len(d.buf) < repetitionWindowSize {
+		return false
+	}
+	window := d.buf[len(d.buf)-repetitionWindowSize:]
+	return bytes.Count(d.buf, window) >= repetitionThreshold
+}
+
 func streamChatCompletionsWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
 	chunks := make(chan inferenceStreamEvent)
 	go func() {
@@ -878,10 +919,7 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 			return
 		}
 		reader := bufio.NewReader(resp.Body)
-		const repetitionWindow = 5
-		const repetitionThreshold = 4
-		var recentChunks []string
-		var repeatCount int
+		detector := newRepetitionDetector()
 		for {
 			line, err := reader.ReadString('\n')
 			if err == io.EOF {
@@ -906,21 +944,9 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 				content := chunk.Choices[0].Delta.Content
-				trimmed := strings.TrimSpace(content)
-				if trimmed != "" {
-					if len(recentChunks) > 0 && recentChunks[len(recentChunks)-1] == trimmed {
-						repeatCount++
-						if repeatCount >= repetitionThreshold {
-							log.Printf("repetition loop detected, truncating response")
-							return
-						}
-					} else {
-						repeatCount = 1
-					}
-					recentChunks = append(recentChunks, trimmed)
-					if len(recentChunks) > repetitionWindow {
-						recentChunks = recentChunks[1:]
-					}
+				if detector.observe(content) {
+					log.Printf("repetition loop detected, truncating response")
+					return
 				}
 				chunks <- inferenceStreamEvent{Content: content}
 			}
