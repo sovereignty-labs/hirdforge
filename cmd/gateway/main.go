@@ -1688,5 +1688,23 @@ func main() {
 	addr := ":" + *port
 	log.Printf("Hirdforge Gateway listening on %s", addr)
 	log.Printf("Agents: %s", strings.Join(order, ","))
-	die("gateway failed", http.ListenAndServe(addr, mux))
+	die("gateway failed", http.ListenAndServe(addr, withRequestBodyLimit(mux, maxRequestBodyBytes)))
+}
+
+// maxRequestBodyBytes caps any single HTTP request body. LLM passthrough is
+// the largest legitimate payload — long conversation histories or attached
+// files — and 32 MiB is well above the inference servers' own per-request
+// limits, so this cuts off pathological inputs without restricting normal use.
+const maxRequestBodyBytes = 32 << 20
+
+// withRequestBodyLimit wraps each request's r.Body in an http.MaxBytesReader
+// so json.NewDecoder(r.Body).Decode(...) (and any other read of r.Body) can't
+// be made to allocate unbounded memory by a hostile or buggy client.
+func withRequestBodyLimit(next http.Handler, limit int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil && r.ContentLength != 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
