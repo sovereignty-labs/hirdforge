@@ -953,9 +953,9 @@ func shortSHA(in string) string {
 //
 // The function hits three endpoints in sequence:
 //
-//   - /api/v1/user/repos?limit=50       — repositories owned by the authenticated user
-//   - /api/v1/orgs/warband/repos?limit=50 — repositories owned by the warband org
-//   - /api/v1/users/kit/repos?limit=50    — repositories owned by the kit user
+//   - /api/v1/user/repos?limit=50         — repositories owned by the authenticated user
+//   - /api/v1/users/warband/repos?limit=50 — repositories owned by the warband user
+//   - /api/v1/users/kit/repos?limit=50     — repositories owned by the kit user
 //
 // Results are deduplicated by full_name, sorted alphabetically, and assigned to
 // g.repos under g.reposMu. An empty or unset giteaURL / giteaToken causes the
@@ -974,7 +974,7 @@ func (g *gateway) refreshRepos() {
 	all := make([]map[string]interface{}, 0, 100)
 	for _, path := range []string{
 		"/api/v1/user/repos?limit=50",
-		"/api/v1/orgs/warband/repos?limit=50",
+		"/api/v1/users/warband/repos?limit=50",
 		"/api/v1/users/kit/repos?limit=50",
 	} {
 		var repos []map[string]interface{}

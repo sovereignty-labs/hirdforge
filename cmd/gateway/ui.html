@@ -2299,6 +2299,15 @@
         delegationEvents.forEach(evt => {
           if (!evt) return;
           const meta = (evt && evt.metadata) || {};
+          // Skip self-events. The agent runtime emits `delegation_started`
+          // with target_agent == agent on its OWN task entry; that's not a
+          // dispatched task from this agent's perspective, so it shouldn't
+          // appear in the Dispatched Tasks list (and was the third entry
+          // showing up alongside the real dispatch and its no-ID twin).
+          const eventAgent = String(evt.agent || '');
+          const targetAgent = String(meta.target_agent || '');
+          if (eventAgent && targetAgent && eventAgent === targetAgent) return;
+
           const taskID = String(meta.task_id || '');
           if (taskID) {
             if (!eventsByTaskID.has(taskID)) {
@@ -2308,7 +2317,13 @@
             eventsByTaskID.get(taskID).push(evt);
             return;
           }
-          if (evt.type !== 'delegation_started' && evt.type !== 'task_dispatched') return;
+          // `task_dispatched` always carries the task_id, so anything in this
+          // branch with no task_id is a caller-side `delegation_started`
+          // (session.go:600) emitted before the delegate tool returns. It is
+          // always followed by a matching `task_dispatched` that lands in the
+          // task_id bucket above. Dropping it here removes the duplicate
+          // entry that was inflating the counter.
+          if (evt.type !== 'task_dispatched') return;
           noIDEvents.push(evt);
         });
 

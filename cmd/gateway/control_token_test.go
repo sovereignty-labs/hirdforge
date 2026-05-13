@@ -48,6 +48,26 @@ func TestControlTokenREStripsGemmaCallFormat(t *testing.T) {
 			in:   "I had a thought about it.",
 			want: "I had a thought about it.",
 		},
+		{
+			name: "raw <function=...>...</function> block is stripped whole",
+			in:   "before <function=wait_for_task><parameter=task_id>b7f691c4-1234</parameter></function> after",
+			want: "before  after",
+		},
+		{
+			name: "multiline <function=...>...</function> block is stripped whole",
+			in:   "x <function=delegate>\n  <parameter=agent>warrior</parameter>\n  <parameter=task>ship it</parameter>\n</function> y",
+			want: "x  y",
+		},
+		{
+			name: "orphan </function> closer without opener is stripped",
+			in:   "stray </function> text",
+			want: "stray  text",
+		},
+		{
+			name: "orphan <parameter=...></parameter> pair is stripped",
+			in:   "<parameter=q>hello</parameter>",
+			want: "hello",
+		},
 	}
 
 	for _, tc := range cases {
