@@ -888,19 +888,32 @@ func (d *repetitionDetector) observe(content string) bool {
 	return bytes.Count(d.buf, window) >= repetitionThreshold
 }
 
+// errStreamCanceled is a sentinel returned from streaming-helper closures when
+// the producer goroutine should exit because the context was canceled. It is
+// never surfaced to the consumer.
+var errStreamCanceled = fmt.Errorf("stream canceled")
+
 func streamChatCompletionsWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) <-chan inferenceStreamEvent {
 	chunks := make(chan inferenceStreamEvent)
 	go func() {
 		defer close(chunks)
+		send := func(evt inferenceStreamEvent) bool {
+			select {
+			case chunks <- evt:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/chat/completions"
 		body, err := json.Marshal(chatRequest{Model: model, Messages: messages, Stream: true, Tools: defs})
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)})
 			return
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)})
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -909,13 +922,13 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)})
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
+			send(inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))})
 			return
 		}
 		reader := bufio.NewReader(resp.Body)
@@ -926,7 +939,7 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 				break
 			}
 			if err != nil {
-				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)}
+				send(inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)})
 				return
 			}
 			line = strings.TrimRight(line, "\r\n")
@@ -939,7 +952,7 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 			}
 			var chunk streamChunk
 			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)}
+				send(inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)})
 				return
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
@@ -948,7 +961,9 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 					log.Printf("repetition loop detected, truncating response")
 					return
 				}
-				chunks <- inferenceStreamEvent{Content: content}
+				if !send(inferenceStreamEvent{Content: content}) {
+					return
+				}
 			}
 		}
 	}()
@@ -959,15 +974,23 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 	chunks := make(chan inferenceStreamEvent)
 	go func() {
 		defer close(chunks)
+		send := func(evt inferenceStreamEvent) bool {
+			select {
+			case chunks <- evt:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/responses"
 		body, err := json.Marshal(responsesRequest{Model: model, Input: convertMessagesForResponses(messages), Stream: true, Tools: convertToolDefsForResponses(defs)})
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)})
 			return
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)})
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -976,13 +999,13 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)})
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
+			send(inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))})
 			return
 		}
 		type pendingCall struct {
@@ -1006,14 +1029,16 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 				if argText == "" {
 					argText = "{}"
 				}
-				chunks <- inferenceStreamEvent{ToolCalls: []toolCall{{
+				if !send(inferenceStreamEvent{ToolCalls: []toolCall{{
 					ID:   p.id,
 					Type: "function",
 					Function: toolCallFunction{
 						Name:      p.name,
 						Arguments: argText,
 					},
-				}}}
+				}}}) {
+					return
+				}
 			}
 			clear(pending)
 		}
@@ -1034,7 +1059,9 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 					return err
 				}
 				if payload.Delta != "" {
-					chunks <- inferenceStreamEvent{Content: payload.Delta}
+					if !send(inferenceStreamEvent{Content: payload.Delta}) {
+						return errStreamCanceled
+					}
 				}
 			case "response.output_item.added", "response.output_item.done":
 				var payload struct {
@@ -1114,13 +1141,16 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 				break
 			}
 			if err != nil {
-				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)}
+				send(inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)})
 				return
 			}
 			line = strings.TrimRight(line, "\r\n")
 			if line == "" {
 				if err := flush(); err != nil {
-					chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)}
+					if err == errStreamCanceled {
+						return
+					}
+					send(inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)})
 					return
 				}
 				continue
@@ -1141,6 +1171,14 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 	chunks := make(chan inferenceStreamEvent)
 	go func() {
 		defer close(chunks)
+		send := func(evt inferenceStreamEvent) bool {
+			select {
+			case chunks <- evt:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		endpoint := strings.TrimRight(inferenceURL, "/") + "/v1/messages"
 		systemPrompt, anthropicMsgs := convertMessagesForAnthropic(messages)
 		reqBody := anthropicRequest{
@@ -1153,12 +1191,12 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 		}
 		body, err := json.Marshal(reqBody)
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)})
 			return
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)})
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
@@ -1166,13 +1204,13 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 		req.Header.Set("anthropic-version", "2023-06-01")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)}
+			send(inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)})
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			chunks <- inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))}
+			send(inferenceStreamEvent{Err: fmt.Errorf("inference returned %s: %s", resp.Status, strings.TrimSpace(string(b)))})
 			return
 		}
 
@@ -1182,24 +1220,27 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 			args strings.Builder
 		}
 		pendingByIndex := map[int]*pendingToolCall{}
-		finalize := func(index int) {
+		finalize := func(index int) bool {
 			pc := pendingByIndex[index]
 			if pc == nil {
-				return
+				return true
 			}
 			argText := strings.TrimSpace(pc.args.String())
 			if argText == "" {
 				argText = "{}"
 			}
-			chunks <- inferenceStreamEvent{ToolCalls: []toolCall{{
+			if !send(inferenceStreamEvent{ToolCalls: []toolCall{{
 				ID:   pc.id,
 				Type: "function",
 				Function: toolCallFunction{
 					Name:      pc.name,
 					Arguments: argText,
 				},
-			}}}
+			}}}) {
+				return false
+			}
 			delete(pendingByIndex, index)
+			return true
 		}
 
 		reader := bufio.NewReader(resp.Body)
@@ -1232,7 +1273,9 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 			case "content_block_delta":
 				if evt.Delta != nil {
 					if evt.Delta.Type == "text_delta" && evt.Delta.Text != "" {
-						chunks <- inferenceStreamEvent{Content: evt.Delta.Text}
+						if !send(inferenceStreamEvent{Content: evt.Delta.Text}) {
+							return errStreamCanceled
+						}
 					} else if evt.Delta.Type == "input_json_delta" && evt.Delta.PartialJSON != "" {
 						if pc := pendingByIndex[evt.Index]; pc != nil {
 							pc.args.WriteString(evt.Delta.PartialJSON)
@@ -1240,7 +1283,9 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 					}
 				}
 			case "content_block_stop":
-				finalize(evt.Index)
+				if !finalize(evt.Index) {
+					return errStreamCanceled
+				}
 			case "message_stop":
 				indexes := make([]int, 0, len(pendingByIndex))
 				for idx := range pendingByIndex {
@@ -1248,7 +1293,9 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 				}
 				sort.Ints(indexes)
 				for _, idx := range indexes {
-					finalize(idx)
+					if !finalize(idx) {
+						return errStreamCanceled
+					}
 				}
 			}
 			eventName = ""
@@ -1263,13 +1310,16 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 				break
 			}
 			if err != nil {
-				chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)}
+				send(inferenceStreamEvent{Err: fmt.Errorf("failed reading stream: %w", err)})
 				return
 			}
 			line = strings.TrimRight(line, "\r\n")
 			if line == "" {
 				if err := flush(); err != nil {
-					chunks <- inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)}
+					if err == errStreamCanceled {
+						return
+					}
+					send(inferenceStreamEvent{Err: fmt.Errorf("failed to parse chunk: %w", err)})
 					return
 				}
 				continue

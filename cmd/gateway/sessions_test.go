@@ -85,3 +85,33 @@ func TestSetAndClearActiveRequest(t *testing.T) {
 		t.Fatalf("active session after clear = %q", got)
 	}
 }
+
+// stopAgent / stopAllAgents must tolerate a nil Cancel — delegation_started
+// events register an ActiveRequest via setActiveRequest(target, sid, nil),
+// and previously stopAgent unconditionally dereferenced ar.Cancel.
+func TestStopAgentToleratesNilCancel(t *testing.T) {
+	gw := &gateway{activeRequests: map[string]*ActiveRequest{}}
+	gw.setActiveRequest("rune", "sess-1", nil)
+	if !gw.stopAgent("rune") {
+		t.Fatalf("stopAgent returned false for registered agent")
+	}
+	if got := gw.activeSessionID("rune"); got != "" {
+		t.Fatalf("agent still active after stop: %q", got)
+	}
+}
+
+func TestStopAllAgentsToleratesNilCancel(t *testing.T) {
+	gw := &gateway{activeRequests: map[string]*ActiveRequest{}}
+	gw.setActiveRequest("rune", "sess-1", nil)
+	cancelled := false
+	gw.setActiveRequest("ivar", "sess-2", context.CancelFunc(func() { cancelled = true }))
+	if got := gw.stopAllAgents(); got != 2 {
+		t.Fatalf("stopAllAgents returned %d, want 2", got)
+	}
+	if !cancelled {
+		t.Fatalf("non-nil Cancel was not invoked")
+	}
+	if len(gw.activeRequests) != 0 {
+		t.Fatalf("activeRequests not cleared: %v", gw.activeRequests)
+	}
+}

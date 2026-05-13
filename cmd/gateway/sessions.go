@@ -374,7 +374,9 @@ func (g *gateway) stopAgent(name string) bool {
 	if !ok {
 		return false
 	}
-	ar.Cancel()
+	if ar.Cancel != nil {
+		ar.Cancel()
+	}
 	delete(g.activeRequests, name)
 	return true
 }
@@ -384,7 +386,9 @@ func (g *gateway) stopAllAgents() int {
 	defer g.arMu.Unlock()
 	count := 0
 	for name, ar := range g.activeRequests {
-		ar.Cancel()
+		if ar.Cancel != nil {
+			ar.Cancel()
+		}
 		delete(g.activeRequests, name)
 		count++
 	}

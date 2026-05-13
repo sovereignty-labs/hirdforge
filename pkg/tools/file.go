@@ -12,6 +12,35 @@ import (
 
 const maxFileSize = 1024 * 1024
 
+// atomicWriteFile writes data to a temp file in the same directory as path and
+// then renames it over path, so a crash or kill mid-write leaves either the
+// previous contents or the new contents — never a truncated file. The temp
+// file is removed if the rename fails.
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-write-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		// Best-effort cleanup if anything below this point bails out.
+		_ = os.Remove(tmpName)
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 func resolvePath(workDir, relPath string) (string, error) {
 	if relPath == "" {
 		return "", fmt.Errorf("path is required")
@@ -140,7 +169,7 @@ func (t *WriteTool) Execute(args map[string]interface{}) ToolResult {
 	if err := os.MkdirAll(filepath.Dir(absPath), 0755); err != nil {
 		return ToolResult{Error: err.Error()}
 	}
-	if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
+	if err := atomicWriteFile(absPath, []byte(content), 0644); err != nil {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
@@ -242,7 +271,7 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 	}
 
 	updated := strings.Replace(content, oldStr, newStr, 1)
-	if err := os.WriteFile(absPath, []byte(updated), 0644); err != nil {
+	if err := atomicWriteFile(absPath, []byte(updated), 0644); err != nil {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
