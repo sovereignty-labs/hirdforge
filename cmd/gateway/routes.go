@@ -712,7 +712,7 @@ func registerGiteaRoutes(mux *http.ServeMux, gw *gateway, giteaClient *http.Clie
 		}
 		{
 			var repos []map[string]interface{}
-			status, _, err := giteaGetJSONWithStatus(giteaClient, gw.giteaURL, gw.giteaToken, "/api/v1/orgs/warband/repos?limit=20", &repos)
+			status, _, err := giteaGetJSONWithStatus(giteaClient, gw.giteaURL, gw.giteaToken, "/api/v1/users/warband/repos?limit=20", &repos)
 			if err != nil {
 				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Gitea unreachable"})
 				return

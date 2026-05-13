@@ -20,13 +20,119 @@ import (
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
-var controlTokenRE = regexp.MustCompile(`call:\w+\{[^}]*\}(?:thought\b)?|\}thought\b|</?\|[^>]*>|<\w+\|>|</?(?:thought|channel|start_of_turn|end_of_turn|tool_call|tool_response)\b[^>]*>?`)
+var controlTokenRE = regexp.MustCompile(`<function=[^>]*>[\s\S]*?</function>|</?function(?:=[^>]*)?>|</?parameter(?:=[^>]*)?>|call:\w+\{[^}]*\}(?:thought\b)?|\}thought\b|</?\|[^>]*>|<\w+\|>|</?(?:thought|channel|start_of_turn|end_of_turn|tool_call|tool_response)\b[^>]*>?`)
 
 var (
 	taskPRURLRE   = regexp.MustCompile(`/pulls/(\d+)\b`)
 	taskPRRefRE   = regexp.MustCompile(`\bPR\s*#(\d+)\b`)
 	taskPullRefRE = regexp.MustCompile(`\bpull request\s*#?(\d+)\b`)
 )
+
+// deriveTypedEventFromToolCall maps a raw `tool_call` event into a projector
+// event type the workspace package understands (file_read, file_write, exec,
+// git_clone, git_commit, pr_create). Returns the new event map and true when a
+// translation applies, or (nil, false) when the tool isn't one the projector
+// tracks. The returned map is a shallow copy with `type` replaced and tool-
+// specific top-level fields (path, command, repo, branch, ...) populated from
+// the nested tool_call.arguments — that is what projector.Apply reads.
+func deriveTypedEventFromToolCall(eventMap map[string]interface{}) (map[string]interface{}, bool) {
+	tc, _ := eventMap["tool_call"].(map[string]interface{})
+	if tc == nil {
+		return nil, false
+	}
+	toolName := strings.ToLower(strings.TrimSpace(asString(tc["name"])))
+	if toolName == "" {
+		if fn, ok := tc["function"].(map[string]interface{}); ok {
+			toolName = strings.ToLower(strings.TrimSpace(asString(fn["name"])))
+		}
+	}
+	if toolName == "" {
+		return nil, false
+	}
+	// Arguments can arrive as a JSON-encoded string or as a decoded map. Try
+	// both shapes; if neither yields a map we still emit the typed event with
+	// no extra fields (useful for exec/git_commit which the projector only
+	// needs in order to refresh CurrentRepo / CurrentBranch via applyRepoBranch).
+	var args map[string]interface{}
+	if m, ok := tc["arguments"].(map[string]interface{}); ok {
+		args = m
+	} else if s, ok := tc["arguments"].(string); ok && strings.TrimSpace(s) != "" {
+		_ = json.Unmarshal([]byte(s), &args)
+	}
+	stringArg := func(key string) string {
+		if args == nil {
+			return ""
+		}
+		return strings.TrimSpace(asString(args[key]))
+	}
+
+	var typedType string
+	extra := map[string]interface{}{}
+	switch toolName {
+	case "read":
+		path := stringArg("path")
+		if path == "" {
+			return nil, false
+		}
+		typedType = "file_read"
+		extra["path"] = path
+	case "write", "edit":
+		path := stringArg("path")
+		if path == "" {
+			return nil, false
+		}
+		typedType = "file_write"
+		extra["path"] = path
+		extra["status"] = "writing"
+	case "exec":
+		typedType = "exec"
+		if cmd := stringArg("command"); cmd != "" {
+			extra["command"] = cmd
+		}
+	case "git-clone", "git_clone":
+		typedType = "git_clone"
+		if repo := stringArg("repo"); repo != "" {
+			extra["repo"] = repo
+		}
+		if branch := stringArg("branch"); branch != "" {
+			extra["branch"] = branch
+		}
+	case "git-commit", "git_commit":
+		typedType = "git_commit"
+		if repo := stringArg("repo"); repo != "" {
+			extra["repo"] = repo
+		}
+		if branch := stringArg("branch"); branch != "" {
+			extra["branch"] = branch
+		}
+	case "git-diff", "git_diff":
+		// Read-only inspection — surface as exec so the projector at least
+		// records that the agent did something git-related.
+		typedType = "exec"
+	case "create-pr", "create_pr", "pr_create":
+		typedType = "pr_create"
+		if repo := stringArg("repo"); repo != "" {
+			extra["repo"] = repo
+		}
+		if branch := stringArg("branch"); branch != "" {
+			extra["branch"] = branch
+		} else if head := stringArg("head"); head != "" {
+			extra["branch"] = head
+		}
+	default:
+		return nil, false
+	}
+
+	out := make(map[string]interface{}, len(eventMap)+len(extra))
+	for k, v := range eventMap {
+		out[k] = v
+	}
+	out["type"] = typedType
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out, true
+}
 
 func (g *gateway) addEvent(eventType, agent, summary string) {
 	e := Event{Time: time.Now().Format(time.RFC3339), Type: eventType, Agent: agent, Summary: summary}
@@ -148,6 +254,19 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 					eventMap[k] = v
 				}
 				gw.applyWorkspaceEvent(in.Agent, eventMap)
+				// Agents emit a generic `tool_call` event with the tool name and
+				// args nested under metadata.tool_call. The workspace projector
+				// only understands typed events (file_read, file_write, exec,
+				// git_clone, ...), so without translation the builder surface
+				// never lights up. Derive a typed event from the tool name and
+				// feed it through applyWorkspaceEvent as well so the projector
+				// state — and the workspace_update broadcast — match what the
+				// agent actually did.
+				if in.Type == "tool_call" {
+					if typed, ok := deriveTypedEventFromToolCall(eventMap); ok {
+						gw.applyWorkspaceEvent(in.Agent, typed)
+					}
+				}
 			}
 			if sessionID, ok := in.Metadata["session_id"].(string); ok && sessionID != "" {
 				evt := delegationTimelineEvent{
@@ -180,7 +299,16 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 			}
 			if in.Type == "delegation_ended" {
 				if target, ok := in.Metadata["target_agent"].(string); ok && target != "" {
-					gw.clearActiveRequest(target, nil)
+					// Only the delegated agent itself can close out its own
+					// active-request slot. The caller (e.g. chieftain) emits a
+					// matching `delegation_ended` the instant its `delegate`
+					// tool returns the task ID — which happens long before the
+					// callee finishes. Letting the caller's emit clear the slot
+					// would flip the callee to inactive almost immediately and
+					// hide the delegation chain in the UI.
+					if strings.TrimSpace(in.Agent) == strings.TrimSpace(target) {
+						gw.clearActiveRequest(target, nil)
+					}
 				}
 				if taskID, ok := in.Metadata["task_id"].(string); ok && strings.TrimSpace(taskID) != "" && gw.a2aStore != nil {
 					stateStr, _ := in.Metadata["state"].(string)
