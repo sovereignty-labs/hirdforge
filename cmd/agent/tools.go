@@ -493,8 +493,21 @@ func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult 
 	return toolpkg.ToolResult{Output: b.String()}
 }
 
+// taskStatusPollLimit is the max number of times a single task_id may be
+// polled before task_status returns a synthetic "stop polling" result instead
+// of hitting the gateway. The model's soul instructions tell it to stop after
+// roughly 40 rounds, but the model has been observed to ignore that and spin;
+// this is a hard runtime cap that the model cannot bypass.
+const taskStatusPollLimit = 5
+
+const taskStatusPollLimitMessage = "Task is still in progress. Stop polling and report current status to the Sovereign."
+
 type taskStatusTool struct {
 	gatewayURL string
+
+	mu         sync.Mutex
+	pollCounts map[string]int
+	lastTaskID string
 }
 
 func (t *taskStatusTool) Name() string { return "task_status" }
@@ -508,8 +521,12 @@ func (t *taskStatusTool) Parameters() map[string]string {
 }
 func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	taskID, _ := args["task_id"].(string)
-	if strings.TrimSpace(taskID) == "" {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
 		return toolpkg.ToolResult{Error: "task_id is required"}
+	}
+	if t.recordPoll(taskID) > taskStatusPollLimit {
+		return toolpkg.ToolResult{Output: taskStatusPollLimitMessage}
 	}
 	taskResp, err := fetchGatewayA2ATask(t.gatewayURL, taskID)
 	if err != nil {
@@ -525,6 +542,24 @@ func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult
 		return toolpkg.ToolResult{Error: err.Error()}
 	}
 	return toolpkg.ToolResult{Output: string(out)}
+}
+
+// recordPoll increments the per-task poll counter for taskID and returns the
+// new count. Switching to a different task_id wipes the counter, since the
+// model has clearly moved on and any prior task's poll count is no longer
+// relevant to enforcing the cap.
+func (t *taskStatusTool) recordPoll(taskID string) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.lastTaskID != "" && t.lastTaskID != taskID {
+		t.pollCounts = nil
+	}
+	if t.pollCounts == nil {
+		t.pollCounts = make(map[string]int)
+	}
+	t.lastTaskID = taskID
+	t.pollCounts[taskID]++
+	return t.pollCounts[taskID]
 }
 
 type taskResultTool struct {
