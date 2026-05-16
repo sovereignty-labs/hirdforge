@@ -31,6 +31,7 @@ var (
 
 type delegateTool struct {
 	peers               map[string]string
+	peerRoles           map[string]string
 	agentName           string
 	giteaURL            string
 	gatewayURL          string
@@ -47,13 +48,38 @@ const agentCommTimeout = 120 * time.Second
 
 func (t *delegateTool) Name() string { return "delegate" }
 func (t *delegateTool) Description() string {
-	return "Send a task to another agent and get their response. Use this to delegate work to specialists."
+	return "Delegate a task to a peer agent. The agent will work autonomously — clone repos, write code, create PRs — and report back when done. Always prefer delegation over doing build work yourself."
 }
 func (t *delegateTool) Parameters() map[string]string {
 	return map[string]string{
-		"agent": "Name of the agent to delegate to (e.g. chuck, val, ragnar)",
+		"agent": t.agentParamHint(),
 		"task":  "The task description to send to the agent",
 	}
+}
+
+// agentParamHint builds the `agent` parameter description from the actual
+// configured peers. Peer names appear sorted; when a role is known it is
+// rendered as `name (role)`. With no peers configured the hint says so —
+// never invent example names, since the model would otherwise be tempted to
+// guess them.
+func (t *delegateTool) agentParamHint() string {
+	if len(t.peers) == 0 {
+		return "Name of the agent to delegate to. No peers are configured for this agent."
+	}
+	names := make([]string, 0, len(t.peers))
+	for name := range t.peers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		if role := strings.TrimSpace(t.peerRoles[name]); role != "" {
+			parts = append(parts, fmt.Sprintf("%s (%s)", name, role))
+			continue
+		}
+		parts = append(parts, name)
+	}
+	return "Name of the agent to delegate to. Available: " + strings.Join(parts, ", ")
 }
 func (t *delegateTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	agent, _ := args["agent"].(string)
@@ -1065,6 +1091,7 @@ type toolSetupDeps struct {
 	giteaToken          string
 	agentName           string
 	peers               map[string]string
+	peerRoles           map[string]string
 	gatewayURL          string
 	maxDelegationTokens int
 	memoryURL           string
@@ -1080,6 +1107,7 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	var giteaTool *toolpkg.GiteaAPITool
 	delegateExec := &delegateTool{
 		peers:               deps.peers,
+		peerRoles:           deps.peerRoles,
 		agentName:           deps.agentName,
 		giteaURL:            deps.giteaURL,
 		gatewayURL:          deps.gatewayURL,

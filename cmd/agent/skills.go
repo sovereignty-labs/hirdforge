@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -997,10 +998,11 @@ func collectSharedPersonaFiles(repo *personaRepo) []string {
 		filepath.Join(repo.Root, "shared"),
 		filepath.Join(repo.Root, repo.AgentName, "shared"),
 	}
+	includes := loadSharedIncludePatterns(repo)
 	var files []string
 	seen := map[string]bool{}
 	for _, root := range candidates {
-		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 			if err != nil || d == nil || d.IsDir() {
 				return nil
 			}
@@ -1008,16 +1010,67 @@ func collectSharedPersonaFiles(repo *personaRepo) []string {
 			if ext != ".md" && ext != ".txt" {
 				return nil
 			}
-			if seen[path] {
+			if seen[p] {
 				return nil
 			}
-			seen[path] = true
-			files = append(files, path)
+			rel := p
+			if r, relErr := filepath.Rel(repo.Root, p); relErr == nil {
+				rel = filepath.ToSlash(r)
+			}
+			if !sharedFileAllowed(rel, includes) {
+				return nil
+			}
+			seen[p] = true
+			files = append(files, p)
 			return nil
 		})
 	}
 	sort.Strings(files)
 	return files
+}
+
+// loadSharedIncludePatterns reads optional per-agent include globs from
+// <persona-repo>/<agent>/shared-skills.txt. Each non-blank, non-`#` line is a
+// glob pattern matched against shared files' slash-paths relative to the
+// persona repo root (e.g. `shared/skills/delegation.md`). When the file is
+// absent or empty, every shared file is included — preserving prior behavior
+// for agents that haven't opted into filtering. Coordinator-tier agents use
+// this to drop builder-skill files they shouldn't be tempted to imitate.
+func loadSharedIncludePatterns(repo *personaRepo) []string {
+	if repo == nil {
+		return nil
+	}
+	path := filepath.Join(repo.Root, repo.AgentName, "shared-skills.txt")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var patterns []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, line)
+	}
+	return patterns
+}
+
+// sharedFileAllowed reports whether a shared file's repo-relative slash-path
+// matches any of the include patterns. An empty pattern list opts every file
+// in (current behavior). Patterns use path.Match semantics, which is enough
+// for the two-level shared/ tree; if deeper trees ever appear, switch to a
+// proper glob library.
+func sharedFileAllowed(rel string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, pattern := range patterns {
+		if ok, err := path.Match(pattern, rel); err == nil && ok {
+			return true
+		}
+	}
+	return false
 }
 
 func loadPersonaSessionContext(repo *personaRepo) string {
