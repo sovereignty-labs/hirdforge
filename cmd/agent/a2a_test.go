@@ -105,6 +105,90 @@ func TestAgentCardV1Format(t *testing.T) {
 	}
 }
 
+func TestToolCallEventShape(t *testing.T) {
+	// The gateway's deriveTypedEventFromToolCall reads
+	// metadata.tool_call.{name,arguments}. Lock that contract from the agent
+	// side so a future sseChunk refactor can't silently break the projector
+	// pipeline again.
+	events := make(chan map[string]interface{}, 4)
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/events" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode event payload: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		events <- payload
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer gateway.Close()
+
+	runtime := newA2ARuntime("ragnar", gateway.URL, func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error) {
+		emit(sseChunk{
+			Type: "tool_call",
+			Tool: "read",
+			Args: map[string]interface{}{"path": "cmd/gateway/main.go"},
+			Done: false,
+		})
+		return "ok", nil
+	})
+
+	_, done, err := runtime.submit(a2aSendMessageRequest{
+		Message: a2aMessage{
+			Role:      "user",
+			Parts:     []a2aPart{{Text: "go"}},
+			MessageID: "ctx-tool-call",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("task did not complete")
+	}
+
+	var toolCallEvt map[string]interface{}
+	deadline := time.After(2 * time.Second)
+	for toolCallEvt == nil {
+		select {
+		case evt := <-events:
+			if t, _ := evt["type"].(string); t == "tool_call" {
+				toolCallEvt = evt
+			}
+		case <-deadline:
+			t.Fatalf("did not receive tool_call event; got %d others", len(events))
+		}
+	}
+
+	meta, _ := toolCallEvt["metadata"].(map[string]interface{})
+	if meta == nil {
+		t.Fatalf("metadata missing: %#v", toolCallEvt)
+	}
+	tc, _ := meta["tool_call"].(map[string]interface{})
+	if tc == nil {
+		t.Fatalf("metadata.tool_call missing or wrong shape: %#v", meta)
+	}
+	if name, _ := tc["name"].(string); name != "read" {
+		t.Fatalf("metadata.tool_call.name = %q, want %q", name, "read")
+	}
+	args, _ := tc["arguments"].(map[string]interface{})
+	if args == nil {
+		t.Fatalf("metadata.tool_call.arguments missing or not a map: %#v", tc)
+	}
+	if path, _ := args["path"].(string); path != "cmd/gateway/main.go" {
+		t.Fatalf("metadata.tool_call.arguments.path = %q", path)
+	}
+	if sid, _ := meta["session_id"].(string); sid != "ctx-tool-call" {
+		t.Fatalf("metadata.session_id = %q", sid)
+	}
+}
+
 func TestPushNotification(t *testing.T) {
 	pushes := make(chan a2aPushPayload, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

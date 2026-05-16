@@ -380,12 +380,20 @@ func (rt *a2aRuntime) runTask(ctx context.Context, task *a2aTask, content string
 	baseEmit := rt.eventEmitter(task.ID, sink)
 	emit := func(chunk interface{}) bool {
 		if c, ok := chunk.(sseChunk); ok && c.Type == "tool_call" {
-			buf, _ := json.Marshal(c)
-			meta := map[string]interface{}{}
-			_ = json.Unmarshal(buf, &meta)
-			meta["session_id"] = task.ContextID
-			meta["task_id"] = task.ID
-			rt.postGatewayEvent(c.Type, rt.agentName, meta)
+			// The gateway's deriveTypedEventFromToolCall reads
+			// metadata.tool_call.{name,arguments} (matching the OpenAI tool-call
+			// shape used in derive_typed_event_test.go). The streaming SSE chunk
+			// still flows out flat as before via baseEmit(chunk); only the
+			// out-of-band /api/v1/events post is reshaped to the contract.
+			rt.postGatewayEvent(c.Type, rt.agentName, map[string]interface{}{
+				"tool_call": map[string]interface{}{
+					"name":      c.Tool,
+					"arguments": c.Args,
+				},
+				"session_id": task.ContextID,
+				"task_id":    task.ID,
+				"done":       c.Done,
+			})
 		}
 		return baseEmit(chunk)
 	}
