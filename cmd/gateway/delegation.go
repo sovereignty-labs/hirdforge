@@ -36,14 +36,35 @@ var (
 // specific top-level fields (path, command, repo, branch, ...) populated from
 // the nested tool_call.arguments — that is what projector.Apply reads.
 func deriveTypedEventFromToolCall(eventMap map[string]interface{}) (map[string]interface{}, bool) {
-	tc, _ := eventMap["tool_call"].(map[string]interface{})
-	if tc == nil {
-		return nil, false
+	// Two shapes reach the gateway in practice:
+	//   1. Post-#248 agents send a nested `metadata.tool_call.{name, arguments}`
+	//      (the OpenAI tool-call shape — what the original derive function
+	//      was designed for).
+	//   2. Older agent images and the sseChunk-marshal fallback send a flat
+	//      `metadata.{tool, args}` (sseChunk's json tags). Until this is
+	//      handled too, those agents silently leave the workspace projector
+	//      empty: FilesTouched never populates, even though the activity
+	//      timeline still lights up via the typed broadcasts.
+	// Try the nested shape first, then fall back to the flat shape so the
+	// gateway is robust to either agent version.
+	var toolName string
+	var rawArgs interface{}
+	if tc, ok := eventMap["tool_call"].(map[string]interface{}); ok && tc != nil {
+		toolName = strings.ToLower(strings.TrimSpace(asString(tc["name"])))
+		rawArgs = tc["arguments"]
+		if toolName == "" {
+			if fn, ok := tc["function"].(map[string]interface{}); ok {
+				toolName = strings.ToLower(strings.TrimSpace(asString(fn["name"])))
+				if rawArgs == nil {
+					rawArgs = fn["arguments"]
+				}
+			}
+		}
 	}
-	toolName := strings.ToLower(strings.TrimSpace(asString(tc["name"])))
 	if toolName == "" {
-		if fn, ok := tc["function"].(map[string]interface{}); ok {
-			toolName = strings.ToLower(strings.TrimSpace(asString(fn["name"])))
+		toolName = strings.ToLower(strings.TrimSpace(asString(eventMap["tool"])))
+		if rawArgs == nil {
+			rawArgs = eventMap["args"]
 		}
 	}
 	if toolName == "" {
@@ -54,9 +75,9 @@ func deriveTypedEventFromToolCall(eventMap map[string]interface{}) (map[string]i
 	// no extra fields (useful for exec/git_commit which the projector only
 	// needs in order to refresh CurrentRepo / CurrentBranch via applyRepoBranch).
 	var args map[string]interface{}
-	if m, ok := tc["arguments"].(map[string]interface{}); ok {
+	if m, ok := rawArgs.(map[string]interface{}); ok {
 		args = m
-	} else if s, ok := tc["arguments"].(string); ok && strings.TrimSpace(s) != "" {
+	} else if s, ok := rawArgs.(string); ok && strings.TrimSpace(s) != "" {
 		_ = json.Unmarshal([]byte(s), &args)
 	}
 	stringArg := func(key string) string {

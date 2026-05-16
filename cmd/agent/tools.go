@@ -526,13 +526,25 @@ func (t *broadcastTool) Execute(args map[string]interface{}) toolpkg.ToolResult 
 // this is a hard runtime cap that the model cannot bypass.
 const taskStatusPollLimit = 5
 
+// taskStatusMinInterval is the floor on time between successful task_status
+// polls for the same task_id. The 5-poll cap protects against runaway loops
+// but allowed an agent to burn the whole budget in a few seconds; the
+// interval forces the agent to actually wait for work to make progress
+// between checks. Construction sites that leave the per-tool minInterval as
+// the zero value (existing test fakes) bypass the gate, so legacy tight-loop
+// tests keep working.
+const taskStatusMinInterval = 10 * time.Second
+
 const taskStatusPollLimitMessage = "Task is still in progress. Stop polling and report current status to the Sovereign."
 
 type taskStatusTool struct {
-	gatewayURL string
+	gatewayURL  string
+	minInterval time.Duration
+	nowFn       func() time.Time
 
 	mu         sync.Mutex
 	pollCounts map[string]int
+	lastPollAt map[string]time.Time
 	lastTaskID string
 }
 
@@ -551,7 +563,14 @@ func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult
 	if taskID == "" {
 		return toolpkg.ToolResult{Error: "task_id is required"}
 	}
-	if t.recordPoll(taskID) > taskStatusPollLimit {
+	switch action, remaining := t.tryAcquirePoll(taskID); action {
+	case "wait":
+		secs := int(remaining.Round(time.Second).Seconds())
+		if secs < 1 {
+			secs = 1
+		}
+		return toolpkg.ToolResult{Output: fmt.Sprintf("Task still in progress. Next check available in %ds.", secs)}
+	case "limit":
 		return toolpkg.ToolResult{Output: taskStatusPollLimitMessage}
 	}
 	taskResp, err := fetchGatewayA2ATask(t.gatewayURL, taskID)
@@ -570,22 +589,48 @@ func (t *taskStatusTool) Execute(args map[string]interface{}) toolpkg.ToolResult
 	return toolpkg.ToolResult{Output: string(out)}
 }
 
-// recordPoll increments the per-task poll counter for taskID and returns the
-// new count. Switching to a different task_id wipes the counter, since the
-// model has clearly moved on and any prior task's poll count is no longer
-// relevant to enforcing the cap.
-func (t *taskStatusTool) recordPoll(taskID string) int {
+// tryAcquirePoll combines the min-interval gate and the 5-poll cap into a
+// single locked operation. Returns:
+//   - ("ok", 0): caller should hit the gateway; poll has been recorded.
+//   - ("wait", remaining): caller should return a synthetic "next check in
+//     Xs" message; the poll is NOT counted toward the cap.
+//   - ("limit", 0): caller should return the synthetic "stop polling"
+//     message; the poll is NOT counted (the cap is sticky on its own).
+//
+// Switching to a different task_id wipes both counters, since the model has
+// moved on. minInterval == 0 disables the interval gate; nowFn == nil falls
+// back to time.Now.
+func (t *taskStatusTool) tryAcquirePoll(taskID string) (string, time.Duration) {
+	now := time.Now()
+	if t.nowFn != nil {
+		now = t.nowFn()
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.lastTaskID != "" && t.lastTaskID != taskID {
 		t.pollCounts = nil
+		t.lastPollAt = nil
 	}
 	if t.pollCounts == nil {
 		t.pollCounts = make(map[string]int)
 	}
+	if t.lastPollAt == nil {
+		t.lastPollAt = make(map[string]time.Time)
+	}
 	t.lastTaskID = taskID
+	if t.pollCounts[taskID] >= taskStatusPollLimit {
+		return "limit", 0
+	}
+	if t.minInterval > 0 {
+		if last, ok := t.lastPollAt[taskID]; ok {
+			if elapsed := now.Sub(last); elapsed < t.minInterval {
+				return "wait", t.minInterval - elapsed
+			}
+		}
+	}
 	t.pollCounts[taskID]++
-	return t.pollCounts[taskID]
+	t.lastPollAt[taskID] = now
+	return "ok", 0
 }
 
 type taskResultTool struct {
@@ -1116,7 +1161,10 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		legacyDelegate:      deps.legacyDelegate,
 	}
 	broadcastExec := &broadcastTool{peers: deps.peers}
-	taskStatusExec := &taskStatusTool{gatewayURL: deps.gatewayURL}
+	taskStatusExec := &taskStatusTool{
+		gatewayURL:  deps.gatewayURL,
+		minInterval: taskStatusMinInterval,
+	}
 	taskResultExec := &taskResultTool{gatewayURL: deps.gatewayURL}
 	delegateExecValue = delegateExec
 	broadcastExecValue = broadcastExec
