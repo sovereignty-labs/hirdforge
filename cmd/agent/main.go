@@ -2340,8 +2340,12 @@ func main() {
 		delegationGates = append(delegationGates, "require_pr_pattern="+strings.TrimSpace(*requirePRPattern))
 	}
 	reg := toolpkg.NewRegistry()
-	reg.Register(toolpkg.NewPlanTool())
-	reg.Register(toolpkg.NewPlanStepCompleteTool())
+	if enabled["plan"] {
+		reg.Register(toolpkg.NewPlanTool())
+	}
+	if enabled["plan-step-complete"] {
+		reg.Register(toolpkg.NewPlanStepCompleteTool())
+	}
 	giteaTool, toolDefs := configureToolRegistry(reg, toolSetupDeps{
 		workspace:           *workspace,
 		giteaURL:            *giteaURL,

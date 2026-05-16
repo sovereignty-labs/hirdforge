@@ -1144,7 +1144,7 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	if deps.enabled["edit"] {
 		reg.Register(toolpkg.NewEditTool(deps.workspace))
 	}
-	if deps.enabled["git-clone"] || deps.enabled["git-commit"] || deps.enabled["git-diff"] || deps.enabled["gitea"] || deps.enabled["parallel-build"] {
+	if deps.enabled["git-clone"] || deps.enabled["git-commit"] || deps.enabled["git-diff"] || deps.enabled["gitea"] || deps.enabled["create-pr"] || deps.enabled["parallel-build"] {
 		if deps.enabled["git-clone"] {
 			reg.Register(toolpkg.NewGitCloneTool(deps.workspace, deps.giteaURL, deps.giteaToken, deps.agentName))
 		}
@@ -1154,8 +1154,15 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		if deps.enabled["git-diff"] {
 			reg.Register(toolpkg.NewGitDiffTool(deps.workspace))
 		}
-		if deps.enabled["gitea"] {
+		// Builder-tier agents only need create-pr from the gitea suite. Build
+		// the GiteaAPITool once if either gitea or create-pr is enabled, then
+		// register the full eleven-tool suite for gitea or just create-pr for
+		// builders. reviewTracker.SetPRLookup is gitea-only — builders don't
+		// drive PR review context.
+		if deps.enabled["gitea"] || deps.enabled["create-pr"] {
 			giteaTool = toolpkg.NewGiteaAPITool(deps.giteaURL, deps.giteaToken)
+		}
+		if deps.enabled["gitea"] {
 			deps.reviewTracker.SetPRLookup(func(ref *prRef) bool {
 				if ref == nil || giteaTool == nil {
 					return false
@@ -1185,17 +1192,27 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 			reg.Register(toolpkg.NewUpdateLabelsTool(giteaTool))
 			reg.Register(toolpkg.NewGetIssueTool(giteaTool))
 			reg.Register(toolpkg.NewListBranchesTool(giteaTool))
+		} else if deps.enabled["create-pr"] {
+			reg.Register(toolpkg.NewCreatePRTool(giteaTool))
 		}
 		if deps.enabled["parallel-build"] {
 			reg.Register(toolpkg.NewParallelBuildTool(deps.workspace))
 		}
 	}
-	if deps.enabled["delegate"] || len(deps.peers) > 0 {
+	if deps.enabled["delegate"] {
 		reg.Register(delegateExec)
+	}
+	if deps.enabled["task_status"] {
 		reg.Register(taskStatusExec)
+	}
+	// task_result keeps auto-registering when --peers is non-empty: a builder
+	// is the *target* of delegation, and the gateway pushes its artifacts back
+	// through the A2A task store, so the builder needs to read its own
+	// results even if it never initiates delegation itself.
+	if deps.enabled["task_result"] || len(deps.peers) > 0 {
 		reg.Register(taskResultExec)
 	}
-	if deps.enabled["broadcast"] || len(deps.peers) > 0 {
+	if deps.enabled["broadcast"] {
 		reg.Register(broadcastExec)
 	}
 	if deps.memoryToolsEnabled && strings.TrimSpace(deps.memoryURL) != "" {
