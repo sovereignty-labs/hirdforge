@@ -753,6 +753,31 @@ func executeRegistryTool(reg *toolpkg.Registry, name string, args map[string]int
 	return result
 }
 
+// openSelfImprovementPR opens a PR with the soul change, preferring the
+// standalone create-pr tool that builder-tier agents have post-hirdforge#249
+// and falling back to the gitea umbrella's action=create-pr for agents that
+// still register the full suite.
+func openSelfImprovementPR(reg *toolpkg.Registry, repoSlug, agentName, shortDescription, body, branch string) toolpkg.ToolResult {
+	title := fmt.Sprintf("soul: %s learned — %s", agentName, shortDescription)
+	if _, ok := reg.Get("create-pr"); ok {
+		return executeRegistryTool(reg, "create-pr", map[string]interface{}{
+			"repo":  repoSlug,
+			"title": title,
+			"body":  body,
+			"head":  branch,
+			"base":  "main",
+		})
+	}
+	return executeRegistryTool(reg, "gitea", map[string]interface{}{
+		"action": "create-pr",
+		"repo":   repoSlug,
+		"title":  title,
+		"body":   body,
+		"head":   branch,
+		"base":   "main",
+	})
+}
+
 func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Registry, soulMaxLines int) {
 	now := time.Now().UTC()
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" || reg == nil {
@@ -761,11 +786,21 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 	if !selfImprovementAllowed(agentName, now) {
 		return
 	}
-	for _, toolName := range []string{"git-clone", "read", "write", "git-commit", "gitea"} {
+	for _, toolName := range []string{"git-clone", "read", "write", "git-commit"} {
 		if _, ok := reg.Get(toolName); !ok {
 			logJSON("warn", "self improvement skipped; required tool missing", map[string]interface{}{"tool": toolName, "agent": agentName})
 			return
 		}
+	}
+	// Post-hirdforge#249, builders register `create-pr` standalone while
+	// architects/coordinators keep the full `gitea` umbrella. Self-improvement
+	// only needs to open one PR, so accept either path: prefer create-pr when
+	// present, fall back to gitea-with-action=create-pr for the umbrella case.
+	_, hasCreatePR := reg.Get("create-pr")
+	_, hasGitea := reg.Get("gitea")
+	if !hasCreatePR && !hasGitea {
+		logJSON("warn", "self improvement skipped; required tool missing", map[string]interface{}{"tool": "create-pr or gitea", "agent": agentName})
+		return
 	}
 
 	triggerTool := ""
@@ -898,14 +933,7 @@ func checkSelfImprovementTrigger(memoryURL, agentName string, reg *toolpkg.Regis
 	if recoveryHint != "" {
 		prBody += "\n\nRecovery observed:\n- " + recoveryHint
 	}
-	prRes := executeRegistryTool(reg, "gitea", map[string]interface{}{
-		"action": "create-pr",
-		"repo":   repoSlug,
-		"title":  fmt.Sprintf("soul: %s learned — %s", agentName, shortDescription),
-		"body":   prBody,
-		"head":   branch,
-		"base":   "main",
-	})
+	prRes := openSelfImprovementPR(reg, repoSlug, agentName, shortDescription, prBody, branch)
 	if prRes.Error != "" {
 		logJSON("warn", "self improvement PR failed", map[string]interface{}{"agent": agentName, "error": prRes.Error})
 		return
