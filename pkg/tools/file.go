@@ -68,6 +68,31 @@ func resolvePath(workDir, relPath string) (string, error) {
 	return absPath, nil
 }
 
+// looksLikePersonaPath reports true for paths that match common persona-repo
+// file conventions (top-level `<agent>/soul.md`, `<agent>/shared-skills.txt`,
+// `<agent>/playbook.md`, `<agent>/tools.md`, or anything under `shared/`).
+// Used to extend ReadTool's not-found error with a hint pointing at the
+// personas repo when the path looks like one of those files. The heuristic
+// is intentionally tight — false positives just add a hint paragraph, which
+// is cheap, but it shouldn't fire for ordinary workspace paths.
+func looksLikePersonaPath(p string) bool {
+	if p = strings.TrimSpace(p); p == "" {
+		return false
+	}
+	if strings.HasPrefix(p, "shared/") {
+		return true
+	}
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	if len(parts) != 2 {
+		return false
+	}
+	switch parts[1] {
+	case "soul.md", "shared-skills.txt", "playbook.md", "tools.md":
+		return true
+	}
+	return false
+}
+
 // ReadTool reads workspace files.
 type ReadTool struct {
 	WorkDir string
@@ -110,7 +135,11 @@ func (t *ReadTool) Execute(args map[string]interface{}) ToolResult {
 				parentDir = "/workspace"
 			}
 			filename := filepath.Base(path)
-			return ToolResult{Error: fmt.Sprintf("Error: %s not found. Use `exec: ls %s` to see available files, or `exec: find /workspace -name '%s'` to search.", path, parentDir, filename)}
+			msg := fmt.Sprintf("Error: %s not found. Use `exec: ls %s` to see available files, or `exec: find /workspace -name '%s'` to search.", path, parentDir, filename)
+			if looksLikePersonaPath(path) {
+				msg += fmt.Sprintf(" This path looks like a persona file. Persona files live in the personas repo, not the agent workspace — clone it first with `git-clone kit/hirdforge-personas`, then read `hirdforge-personas/%s`.", path)
+			}
+			return ToolResult{Error: msg}
 		}
 		return ToolResult{Error: err.Error()}
 	}
