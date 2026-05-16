@@ -621,27 +621,65 @@ func die(msg string, err error) {
 	os.Exit(1)
 }
 
-func parsePeers(raw string) (map[string]string, error) {
+// validPeerRoles mirrors the gateway's validAgentRoles set so that --peers and
+// --agents accept the same name=url[:role][:warband] entries.
+var validPeerRoles = map[string]bool{
+	"builder":     true,
+	"reviewer":    true,
+	"coordinator": true,
+	"assistant":   true,
+	"specialist":  true,
+	"architect":   true,
+}
+
+// parsePeers parses a comma-separated --peers value into a URL map and a role
+// map (keyed by peer name). Entries are name=url[:role][:warband]; role and
+// warband segments are optional and only recognized when role matches
+// validPeerRoles. URLs may contain their own colons (scheme/port), so role
+// detection works right-to-left and bails out as soon as the candidate isn't
+// a known role.
+func parsePeers(raw string) (map[string]string, map[string]string, error) {
 	peers := map[string]string{}
+	roles := map[string]string{}
 	if strings.TrimSpace(raw) == "" {
-		return peers, nil
+		return peers, roles, nil
 	}
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
 		if part == "" {
 			continue
 		}
-		name, url, ok := strings.Cut(part, "=")
-		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(url) == "" {
-			return nil, fmt.Errorf("invalid peer entry %q", part)
+		name, rest, ok := strings.Cut(part, "=")
+		if !ok || strings.TrimSpace(name) == "" || strings.TrimSpace(rest) == "" {
+			return nil, nil, fmt.Errorf("invalid peer entry %q", part)
 		}
 		name = strings.TrimSpace(name)
-		if _, exists := peers[name]; exists {
-			return nil, fmt.Errorf("duplicate peer name %q", name)
+		rest = strings.TrimSpace(rest)
+		role := ""
+		segments := strings.Split(rest, ":")
+		if len(segments) >= 3 {
+			candidate := strings.TrimSpace(segments[len(segments)-2])
+			if validPeerRoles[candidate] {
+				role = candidate
+				rest = strings.TrimSpace(strings.Join(segments[:len(segments)-2], ":"))
+			}
 		}
-		peers[name] = strings.TrimRight(strings.TrimSpace(url), "/")
+		if role == "" && len(segments) >= 2 {
+			candidate := strings.TrimSpace(segments[len(segments)-1])
+			if validPeerRoles[candidate] {
+				role = candidate
+				rest = strings.TrimSpace(strings.Join(segments[:len(segments)-1], ":"))
+			}
+		}
+		if _, exists := peers[name]; exists {
+			return nil, nil, fmt.Errorf("duplicate peer name %q", name)
+		}
+		peers[name] = strings.TrimRight(rest, "/")
+		if role != "" {
+			roles[name] = role
+		}
 	}
-	return peers, nil
+	return peers, roles, nil
 }
 
 func useResponsesAPI(model string) bool {
@@ -2197,8 +2235,9 @@ func main() {
 		die("failed to create workspace", err)
 	}
 	peers := map[string]string{}
+	peerRoles := map[string]string{}
 	for _, rawPeers := range []string{*peersFlag, *agentsFlag} {
-		parsedPeers, parseErr := parsePeers(rawPeers)
+		parsedPeers, parsedRoles, parseErr := parsePeers(rawPeers)
 		if parseErr != nil {
 			die("failed to parse peers", parseErr)
 		}
@@ -2207,6 +2246,12 @@ func main() {
 				die("failed to parse peers", fmt.Errorf("duplicate peer %q with conflicting URLs", name))
 			}
 			peers[name] = value
+		}
+		for name, role := range parsedRoles {
+			if existing, ok := peerRoles[name]; ok && existing != role {
+				die("failed to parse peers", fmt.Errorf("duplicate peer %q with conflicting roles", name))
+			}
+			peerRoles[name] = role
 		}
 	}
 	peerNames := make([]string, 0, len(peers))
@@ -2303,6 +2348,7 @@ func main() {
 		giteaToken:          giteaToken,
 		agentName:           agentName,
 		peers:               peers,
+		peerRoles:           peerRoles,
 		gatewayURL:          *gatewayURL,
 		maxDelegationTokens: *maxDelegationTokens,
 		memoryURL:           *memoryURL,
@@ -2341,6 +2387,8 @@ func main() {
 		playbookFile:     *playbookFile,
 		agentName:        agentName,
 		soul:             soul,
+		peers:            peers,
+		peerRoles:        peerRoles,
 		persona:          persona,
 		reg:              reg,
 		toolDefs:         toolDefs,

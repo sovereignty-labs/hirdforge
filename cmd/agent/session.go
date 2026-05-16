@@ -321,6 +321,33 @@ func firstPositiveIntArg(args map[string]interface{}, keys ...string) int {
 	return 0
 }
 
+// buildPeerSystemBlock renders the "## Your Peers" block injected between the
+// soul and the bootstrap context. The model only learns peer names through
+// this block (and the delegate tool's agent-param hint); without it the soul
+// would be the only source of peer knowledge. Returns "" when no peers are
+// configured so the block is omitted entirely rather than rendered empty.
+func buildPeerSystemBlock(peers, roles map[string]string) string {
+	if len(peers) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(peers))
+	for name := range peers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("## Your Peers\n")
+	b.WriteString("Use the delegate tool to send tasks to these agents. Each one runs autonomously and reports back.\n\n")
+	for _, name := range names {
+		if role := strings.TrimSpace(roles[name]); role != "" {
+			fmt.Fprintf(&b, "- %s (%s)\n", name, role)
+			continue
+		}
+		fmt.Fprintf(&b, "- %s\n", name)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 type conversationProcessor func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error)
 
 type conversationDeps struct {
@@ -343,6 +370,8 @@ type conversationDeps struct {
 	playbookFile     string
 	agentName        string
 	soul             string
+	peers            map[string]string
+	peerRoles        map[string]string
 	persona          *personaRepo
 	reg              *toolpkg.Registry
 	toolDefs         []toolDef
@@ -526,9 +555,12 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			}
 		}
 		systemContent := deps.soul
+		if peersBlock := buildPeerSystemBlock(deps.peers, deps.peerRoles); peersBlock != "" {
+			systemContent += "\n\n" + peersBlock
+		}
 		if deps.bootstrap {
 			if strings.TrimSpace(bootstrapContext) != "" {
-				systemContent = deps.soul + "\n\n" + bootstrapContext
+				systemContent += "\n\n" + bootstrapContext
 			}
 			if strings.TrimSpace(reflectionContext) != "" {
 				systemContent += "\n\n" + reflectionContext
