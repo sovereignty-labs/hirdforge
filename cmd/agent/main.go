@@ -2204,6 +2204,7 @@ func main() {
 	reviewContextIdleTimeout := flag.Duration("review-context-idle-timeout", 30*time.Minute, "Idle timeout before clearing PR review context")
 	agentNameFlag := flag.String("agent-name", "", "agent name override (defaults to soul filename)")
 	personaRepoFlag := flag.String("persona-repo", "", "git URL of persona repository")
+	modelTemplateFlag := flag.String("model-template", "", "Override model template auto-detection. One of qwen|claude|gpt|gemini|default, or any string containing one of those substrings. Empty means auto-detect from --model.")
 	toolsFile := flag.String("tools-file", "/etc/valhalla/tools.md", "path to tools context file")
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write,edit", "comma-separated enabled tools")
@@ -2371,6 +2372,12 @@ func main() {
 	giteaTokenValue = giteaToken
 	gatewayURLValue = *gatewayURL
 
+	personaRoot := ""
+	if persona != nil {
+		personaRoot = persona.Root
+	}
+	templateName, templateContent, templateSource := resolveModelTemplate(*model, *modelTemplateFlag, personaRoot)
+
 	processConversation := newConversationProcessor(conversationDeps{
 		workspace:        *workspace,
 		inferenceTimeout: *inferenceTimeout,
@@ -2391,6 +2398,7 @@ func main() {
 		playbookFile:     *playbookFile,
 		agentName:        agentName,
 		soul:             soul,
+		modelTemplate:    templateContent,
 		peers:            peers,
 		peerRoles:        peerRoles,
 		persona:          persona,
@@ -2429,11 +2437,13 @@ func main() {
 
 	addr := ":" + *port
 	logJSON("info", "agent started", map[string]interface{}{
-		"port":      *port,
-		"grpc_port": *grpcPort,
-		"model":     *model,
-		"tools":     enabledTools,
-		"peers":     peerNames,
+		"port":            *port,
+		"grpc_port":       *grpcPort,
+		"model":           *model,
+		"template":        templateName,
+		"template_source": templateSource,
+		"tools":           enabledTools,
+		"peers":           peerNames,
 	})
 	die("server failed", http.ListenAndServe(addr, mux))
 }

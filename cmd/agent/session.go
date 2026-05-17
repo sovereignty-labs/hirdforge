@@ -370,6 +370,7 @@ type conversationDeps struct {
 	playbookFile     string
 	agentName        string
 	soul             string
+	modelTemplate    string
 	peers            map[string]string
 	peerRoles        map[string]string
 	persona          *personaRepo
@@ -554,7 +555,16 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				reflectionContext = fetchReflectionContext(deps.memoryURL, deps.agentName)
 			}
 		}
+		// Final system-prompt assembly order:
+		//   [model template] + "\n\n" + [soul] + [peers block] + [bootstrap] + [reflection]
+		// The model template is prepended so model-specific behavioral
+		// anchoring (e.g. Qwen's "DO THE TASK IN THE MESSAGE.") frames the
+		// soul rather than being buried beneath it. Empty modelTemplate
+		// preserves prior soul-only behavior for tests and back-compat.
 		systemContent := deps.soul
+		if tmpl := strings.TrimRight(deps.modelTemplate, "\n"); strings.TrimSpace(tmpl) != "" {
+			systemContent = tmpl + "\n\n" + systemContent
+		}
 		if peersBlock := buildPeerSystemBlock(deps.peers, deps.peerRoles); peersBlock != "" {
 			systemContent += "\n\n" + peersBlock
 		}
