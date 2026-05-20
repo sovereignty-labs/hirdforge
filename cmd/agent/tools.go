@@ -1194,7 +1194,7 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	}
 	if deps.enabled["git-clone"] || deps.enabled["git-commit"] || deps.enabled["git-diff"] || deps.enabled["gitea"] || deps.enabled["create-pr"] || deps.enabled["parallel-build"] {
 		if deps.enabled["git-clone"] {
-			reg.Register(toolpkg.NewGitCloneTool(deps.workspace, deps.giteaURL, deps.giteaToken, deps.agentName))
+			reg.Register(toolpkg.NewGitCloneTool(deps.workspace, deps.giteaURL, deps.giteaToken, deps.agentName, deps.memoryURL))
 		}
 		if deps.enabled["git-commit"] {
 			reg.Register(toolpkg.NewGitCommitTool(deps.workspace, deps.giteaURL, deps.giteaToken, deps.agentName))
