@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -113,6 +114,90 @@ func taskObjectMap(value interface{}) (map[string]interface{}, bool) {
 		return nil, false
 	}
 	return out, true
+}
+
+func truncateTaskText(s string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= maxChars {
+		return string(runes)
+	}
+	return string(runes[:maxChars])
+}
+
+func captureTaskCompletion(memoryURL, agentName string, task taskspkg.Task, startTime time.Time) {
+	if strings.TrimSpace(memoryURL) == "" {
+		return
+	}
+	agentName = strings.TrimSpace(agentName)
+	go func() {
+		objective := truncateTaskText(task.Content, 200)
+		outcome := truncateTaskText(task.Result, 200)
+		toolNames := make([]string, 0, len(task.Tools))
+		seenTools := map[string]struct{}{}
+		for _, tool := range task.Tools {
+			name := strings.TrimSpace(tool.Name)
+			if name == "" {
+				continue
+			}
+			if _, ok := seenTools[name]; ok {
+				continue
+			}
+			seenTools[name] = struct{}{}
+			toolNames = append(toolNames, name)
+		}
+		sort.Strings(toolNames)
+		content := fmt.Sprintf(
+			"TASK COMPLETED | objective: %s | outcome: %s | tools: %s | duration: %s | from: %s",
+			objective,
+			outcome,
+			strings.Join(toolNames, ","),
+			time.Since(startTime).Round(time.Second).String(),
+			strings.TrimSpace(task.From),
+		)
+		tags := []string{"task_completion", agentName}
+		repoRE := regexp.MustCompile(`(?:^|[^A-Za-z0-9_.-])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?:$|[^A-Za-z0-9_.-])`)
+		if matches := repoRE.FindStringSubmatch(task.Content); len(matches) == 2 {
+			tags = append(tags, "repo:"+matches[1])
+		}
+		payload := map[string]interface{}{
+			"agent":   agentName,
+			"content": content,
+			"tags":    tags,
+			"type":    "fact",
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			logJSON("warn", "task completion memory marshal failed", map[string]interface{}{
+				"agent": agentName,
+				"error": err.Error(),
+			})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(memoryURL, "/")+"/remember", bytes.NewReader(body))
+		if err != nil {
+			logJSON("warn", "task completion memory request failed", map[string]interface{}{
+				"agent": agentName,
+				"error": err.Error(),
+			})
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			logJSON("warn", "task completion memory POST failed", map[string]interface{}{
+				"agent": agentName,
+				"error": err.Error(),
+			})
+			return
+		}
+		_ = resp.Body.Close()
+	}()
 }
 
 func taskWorkspaceUpdateEmitter(gatewayURL, agentName, taskSessionID string) func(interface{}) bool {
@@ -273,6 +358,7 @@ func registerTaskRoutes(mux *http.ServeMux, deps serverDeps) {
 		deps.taskCancels[task.ID] = cancel
 		deps.taskCancelMu.Unlock()
 		go func(taskID string, content string) {
+			startTime := time.Now()
 			defer func() {
 				deps.taskCancelMu.Lock()
 				delete(deps.taskCancels, taskID)
@@ -445,6 +531,7 @@ func registerTaskRoutes(mux *http.ServeMux, deps serverDeps) {
 			if len(summary) > 200 {
 				summary = summary[:200] + "..."
 			}
+			captureTaskCompletion(memoryURLValue, deps.agentName, cur, startTime)
 			notifyGateway(gatewayURLValue, "task_completed", deps.agentName, map[string]interface{}{
 				"task_id":    cur.ID,
 				"from":       cur.From,

@@ -194,7 +194,7 @@ func fetchIntuitiveContext(memoryURL, agentName, messageContent string) string {
 	if len(query) > 500 {
 		query = query[:500]
 	}
-	agentResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": agentName, "n_results": 5})
+	agentResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": agentName, "limit": 3, "collections": []string{agentName, "warband_shared"}})
 	warbandResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": "warband", "n_results": 5})
 	merged := append([]intuitiveResult{}, agentResults...)
 	seenPrefixes := make([]string, 0, len(agentResults))

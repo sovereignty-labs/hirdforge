@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,14 +54,16 @@ type GitCloneTool struct {
 	GiteaURL  string
 	Token     string
 	AgentName string
+	MemoryURL string
 }
 
-func NewGitCloneTool(workDir, giteaURL, token, agentName string) *GitCloneTool {
+func NewGitCloneTool(workDir, giteaURL, token, agentName, memoryURL string) *GitCloneTool {
 	return &GitCloneTool{
 		WorkDir:   workDir,
 		GiteaURL:  giteaURL,
 		Token:     resolveGiteaToken(token),
 		AgentName: strings.TrimSpace(agentName),
+		MemoryURL: memoryURL,
 	}
 }
 
@@ -140,7 +143,7 @@ func (t *GitCloneTool) Execute(args map[string]interface{}) ToolResult {
 	runGit(repoDir, []string{"git", "config", "user.name", "Valhalla Agent"}, 5*time.Second)
 	t.ensureCredentialedOrigin(repoDir, repo)
 
-	return ToolResult{Output: fmt.Sprintf("cloned %s to %s", repo, repoDir)}
+	return ToolResult{Output: t.appendRepoContext(repo, fmt.Sprintf("cloned %s to %s", repo, repoDir))}
 }
 
 func (t *GitCloneTool) AppendProjectAwareness(repo string, output string) string {
@@ -167,6 +170,86 @@ func (t *GitCloneTool) AppendProjectAwareness(repo string, output string) string
 		b.WriteString(activitySection)
 	}
 	return b.String()
+}
+
+func (t *GitCloneTool) appendRepoContext(repo, output string) string {
+	repo = strings.TrimSpace(repo)
+	if repo == "" || strings.TrimSpace(t.MemoryURL) == "" || strings.TrimSpace(t.AgentName) == "" {
+		return output
+	}
+	contextSection, err := t.fetchRepoContext(repo)
+	if err != nil || contextSection == "" {
+		return output
+	}
+	return output + "\n\n" + contextSection
+}
+
+func (t *GitCloneTool) fetchRepoContext(repo string) (string, error) {
+	owner, name := resolveRepoOwnerName(repo)
+	if owner == "" || name == "" {
+		return "", nil
+	}
+	payload := map[string]interface{}{
+		"query":       owner + "/" + name,
+		"agent":       t.AgentName,
+		"limit":       5,
+		"collections": []string{t.AgentName, "warband_shared"},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(t.MemoryURL, "/")+"/query", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("http %d", resp.StatusCode)
+	}
+	var out struct {
+		Results []struct {
+			Content    string  `json:"content"`
+			Similarity float64 `json:"similarity"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	type repoContextResult struct {
+		Content    string
+		Similarity float64
+	}
+	results := make([]repoContextResult, 0, len(out.Results))
+	for _, item := range out.Results {
+		content := strings.TrimSpace(item.Content)
+		if content == "" || item.Similarity <= 0.5 {
+			continue
+		}
+		results = append(results, repoContextResult{Content: content, Similarity: item.Similarity})
+	}
+	if len(results) == 0 {
+		return "", nil
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		return results[i].Similarity > results[j].Similarity
+	})
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\n\n[REPO CONTEXT] Relevant knowledge about %s/%s:\n", owner, name))
+	for _, item := range results {
+		b.WriteString("- ")
+		b.WriteString(item.Content)
+		b.WriteString("\n")
+	}
+	return b.String(), nil
 }
 
 func (t *GitCloneTool) buildRecentActivitySection(repo string) string {

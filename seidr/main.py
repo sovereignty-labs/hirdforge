@@ -18,7 +18,7 @@ from typing import Literal, Optional
 import asyncpg
 import httpx
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # --- Config ---
@@ -130,6 +130,7 @@ class QueryRequest(BaseModel):
     query: str
     agent: Optional[str] = None
     limit: int = 5
+    collections: Optional[list[str]] = None
     type: Optional[Literal["general", "failure", "recovery", "lesson", "fact", "observation"]] = None
     layer: Optional[Literal["experience", "lesson", "soul_candidate"]] = None
     importance_weight: float = 0.0
@@ -141,8 +142,9 @@ class QueryRequest(BaseModel):
 class RememberRequest(BaseModel):
     agent: str
     content: str
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
     source: str = "agent"
+    shared: bool = False
     type: Literal["general", "failure", "recovery", "lesson", "fact", "observation"] = "general"
     layer: Optional[Literal["experience", "lesson", "soul_candidate"]] = None
     confidence: Optional[float] = None
@@ -310,6 +312,20 @@ def vector_literal(values: list[float]) -> str:
     return "[" + ",".join(f"{float(v):.8f}" for v in values) + "]"
 
 
+def normalize_collection_names(collections: Optional[list[str]]) -> list[str]:
+    if not collections:
+        return []
+    normalized = []
+    seen = set()
+    for collection in collections:
+        name = sanitize_agent_name(collection)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        normalized.append(name)
+    return normalized
+
+
 def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> list[str]:
     chunks = []
     start = 0
@@ -461,6 +477,30 @@ def memory_row_to_result(row, vector_score: float = 0.0, keyword_score: float = 
         "vector_score": round(float(vector_score), 4),
         "bm25_score": round(float(keyword_score), 4),
     }
+
+
+async def dedupe_results_by_content(results: list[dict], threshold: float = 0.92) -> list[dict]:
+    if len(results) < 2:
+        return results
+    embeddings = await embed([str(item.get("content", "")) for item in results])
+    kept: list[dict] = []
+    kept_embeddings: list[list[float]] = []
+    for item, item_embedding in zip(results, embeddings):
+        duplicate_index = None
+        for idx, kept_embedding in enumerate(kept_embeddings):
+            similarity = sum(float(a) * float(b) for a, b in zip(item_embedding, kept_embedding))
+            if similarity > threshold:
+                duplicate_index = idx
+                break
+        if duplicate_index is None:
+            kept.append(item)
+            kept_embeddings.append(item_embedding)
+            continue
+        if float(item.get("similarity", 0.0)) > float(kept[duplicate_index].get("similarity", 0.0)):
+            kept[duplicate_index] = item
+            kept_embeddings[duplicate_index] = item_embedding
+    kept.sort(key=lambda item: item.get("similarity", 0.0), reverse=True)
+    return kept
 
 
 async def init_db():
@@ -668,8 +708,15 @@ async def find_memory_record(memory_id: str):
     )
 
 
-async def list_memories_for_agent(agent: Optional[str], limit: int = 100, memory_type: Optional[str] = None):
+async def list_memories_for_agent(
+    agent: Optional[str],
+    limit: int = 100,
+    memory_type: Optional[str] = None,
+    offset: int = 0,
+):
     pool = ensure_pool()
+    limit = max(1, int(limit))
+    offset = max(0, int(offset))
     sql = """
         SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source,
                metadata, superseded_by, supersede_reason, valid_until, source_ids,
@@ -689,8 +736,9 @@ async def list_memories_for_agent(agent: Optional[str], limit: int = 100, memory
         idx += 1
     if conditions:
         sql += " WHERE " + " AND ".join(conditions)
-    sql += f" ORDER BY created_at DESC LIMIT ${idx}"
+    sql += f" ORDER BY created_at DESC LIMIT ${idx} OFFSET ${idx + 1}"
     params.append(limit)
+    params.append(offset)
     return await pool.fetch(sql, *params)
 
 
@@ -733,11 +781,17 @@ async def get_co_access_scores(agent: str, memory_ids: list[str], limit: int = 1
     return scores
 
 
-async def run_hybrid_search(query: str, limit: int = 5, agent: Optional[str] = None, where: Optional[dict] = None):
+async def run_hybrid_search(
+    query: str,
+    limit: int = 5,
+    agent: Optional[str] = None,
+    where: Optional[dict] = None,
+    query_embedding: Optional[list[float]] = None,
+):
     if not query.strip():
         return []
     pool = ensure_pool()
-    embeddings = await embed([query])
+    embeddings = [query_embedding] if query_embedding is not None else await embed([query])
     query_vector = vector_literal(embeddings[0])
     limit = max(1, limit)
     filters = where.copy() if where else {}
@@ -818,6 +872,35 @@ async def run_hybrid_search(query: str, limit: int = 5, agent: Optional[str] = N
             combined = 0.6 * vector_score + 0.4 * normalized_keyword
         merged.append(memory_row_to_result(row, vector_score=vector_score, keyword_score=normalized_keyword, similarity=combined))
     merged.sort(key=lambda item: item["similarity"], reverse=True)
+    return merged[:limit]
+
+
+async def run_hybrid_search_across_collections(
+    query: str,
+    collections: list[str],
+    limit: int = 5,
+    where: Optional[dict] = None,
+    query_embedding: Optional[list[float]] = None,
+):
+    limit = max(1, int(limit))
+    collection_names = normalize_collection_names(collections)
+    if not collection_names:
+        return await run_hybrid_search(query, limit=limit, where=where, query_embedding=query_embedding)
+
+    per_collection_limit = max(limit * 3, limit + 2)
+    search_tasks = [
+        run_hybrid_search(query, limit=per_collection_limit, agent=collection, where=where, query_embedding=query_embedding)
+        for collection in collection_names
+    ]
+    search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+    merged = []
+    for collection, result in zip(collection_names, search_results):
+        if isinstance(result, Exception):
+            log("warn", "collection search failed", {"collection": collection, "error": str(result)})
+            continue
+        merged.extend(result)
+    merged.sort(key=lambda item: item.get("similarity", 0.0), reverse=True)
+    merged = await dedupe_results_by_content(merged, threshold=0.92)
     return merged[:limit]
 
 
@@ -1453,7 +1536,18 @@ async def query(req: QueryRequest):
         as_of_dt = None
     if not where:
         where = None
-    results = await run_hybrid_search(req.query, limit=req.limit, agent=req.agent, where=where)
+    query_embedding = None
+    if req.collections:
+        query_embedding = (await embed([req.query]))[0]
+        results = await run_hybrid_search_across_collections(
+            req.query,
+            req.collections,
+            limit=req.limit,
+            where=where,
+            query_embedding=query_embedding,
+        )
+    else:
+        results = await run_hybrid_search(req.query, limit=req.limit, agent=req.agent, where=where)
     if as_of_dt is not None:
         filtered = []
         for item in results:
@@ -1483,6 +1577,7 @@ async def remember(req: RememberRequest):
     memory_type = resolve_memory_type(req)
     source_layer = normalize_layer(req.layer)
     agent = sanitize_agent_name(req.agent)
+    target_collection = "warband_shared" if req.shared else agent
 
     def base_metadata(layer_override: Optional[str] = None) -> dict:
         layer = normalize_layer(layer_override or source_layer)
@@ -1506,24 +1601,31 @@ async def remember(req: RememberRequest):
         metadata["tags"] = metadata.get("tags", "")
         return metadata
 
-    async def store_one(content: str, metadata: dict, check_contradiction: bool):
-        embedding_values = (await embed([content]))[0]
-        embedding_text = vector_literal(embedding_values)
-        duplicate_rows = await fetch_similar_for_dedup(agent, memory_type, embedding_text, limit=3)
+    async def store_one(
+        content: str,
+        metadata: dict,
+        check_contradiction: bool,
+        collection_agent: str = target_collection,
+        embedding_text: Optional[str] = None,
+    ):
+        collection_agent = sanitize_agent_name(collection_agent)
+        if embedding_text is None:
+            embedding_values = (await embed([content]))[0]
+            embedding_text = vector_literal(embedding_values)
+        duplicate_rows = await fetch_similar_for_dedup(collection_agent, memory_type, embedding_text, limit=3)
         for row in duplicate_rows:
             similarity = float(row["similarity"] or 0.0)
             existing_meta = safe_metadata(row["metadata"])
             if existing_meta.get("type", "general") == memory_type and similarity > 0.92:
-                log("info", "memory deduplicated", {"agent": req.agent, "similar_to": row["id"]})
+                log("info", "memory deduplicated", {"agent": req.agent, "collection": collection_agent, "similar_to": row["id"]})
                 return None, row["id"]
 
-        new_id = f"{agent}-{int(time.time())}-{os.urandom(4).hex()}"
         contradictions = []
         if check_contradiction:
-            contradictions = await detect_fact_contradictions(agent, content, embedding_text)
+            contradictions = await detect_fact_contradictions(collection_agent, content, embedding_text)
 
         stored_id = await store_memory_row(
-            agent=agent,
+            agent=collection_agent,
             content=content,
             metadata=metadata,
             memory_type=memory_type,
@@ -1540,6 +1642,22 @@ async def remember(req: RememberRequest):
         if contradictions:
             await apply_contradictions(stored_id, contradictions)
         return stored_id, None
+
+    async def auto_promote_shared_fact(content: str, metadata: dict, embedding_text: str):
+        try:
+            promoted_id, duplicate_id = await store_one(
+                content,
+                metadata,
+                check_contradiction=False,
+                collection_agent="warband_shared",
+                embedding_text=embedding_text,
+            )
+            if promoted_id is None:
+                log("info", "shared memory deduplicated", {"agent": req.agent, "similar_to": duplicate_id})
+            else:
+                log("info", "memory auto-promoted", {"agent": req.agent, "id": promoted_id})
+        except Exception as e:
+            log("warn", "shared auto-promotion failed", {"agent": req.agent, "error": str(e)})
 
     if not cognition_enabled():
         metadata = base_metadata()
@@ -1563,8 +1681,8 @@ async def remember(req: RememberRequest):
         embedding_values = (await embed([fact]))[0]
         embedding_text = vector_literal(embedding_values)
         importance_task = score_importance(fact)
-        contradictions_task = detect_fact_contradictions(agent, fact, embedding_text)
-        relationships_task = extract_relationships(fact, agent)
+        contradictions_task = detect_fact_contradictions(target_collection, fact, embedding_text)
+        relationships_task = extract_relationships(fact, target_collection)
         importance_scope, contradictions, _ = await asyncio.gather(
             importance_task,
             contradictions_task,
@@ -1584,7 +1702,7 @@ async def remember(req: RememberRequest):
         COGNITIVE_STATS["importance_total"] += float(importance)
         COGNITIVE_STATS["importance_count"] += 1
 
-        duplicate_rows = await fetch_similar_for_dedup(agent, memory_type, embedding_text, limit=3)
+        duplicate_rows = await fetch_similar_for_dedup(target_collection, memory_type, embedding_text, limit=3)
         duplicate_id = None
         for row in duplicate_rows:
             similarity = float(row["similarity"] or 0.0)
@@ -1593,29 +1711,23 @@ async def remember(req: RememberRequest):
                 duplicate_id = row["id"]
                 break
         if duplicate_id:
-            log("info", "memory deduplicated", {"agent": req.agent, "similar_to": duplicate_id})
+            log("info", "memory deduplicated", {"agent": req.agent, "collection": target_collection, "similar_to": duplicate_id})
             duplicate_hits.append(duplicate_id)
             continue
 
-        stored_id = await store_memory_row(
-            agent=agent,
-            content=fact,
-            metadata=fact_meta,
-            memory_type=memory_type,
-            layer=normalize_layer(fact_meta.get("layer")),
-            importance=float(fact_meta.get("importance", 0.5)),
-            confidence=normalize_confidence(fact_meta.get("confidence"), normalize_layer(fact_meta.get("layer"))),
-            scope=str(fact_meta.get("scope", "session")).strip().lower() or "session",
-            source=str(fact_meta.get("source", req.source)),
-            tags=str(fact_meta.get("tags", "")),
-            source_ids=normalize_source_ids(fact_meta.get("source_ids")),
-            validation_count=normalize_validation_count(fact_meta.get("validation_count")),
-            embedding_text=embedding_text,
-        )
-        if contradictions:
-            await apply_contradictions(stored_id, contradictions)
+        stored_id, duplicate_id = await store_one(fact, fact_meta, check_contradiction=True, collection_agent=target_collection, embedding_text=embedding_text)
+        if stored_id is None:
+            if duplicate_id:
+                duplicate_hits.append(duplicate_id)
+            continue
         stored_ids.append(stored_id)
         log("info", "memory stored", {"agent": req.agent, "id": stored_id, "tags": req.tags, "layer": fact_meta.get("layer")})
+        if not req.shared and importance > 0.7 and scope == "universal":
+            shared_meta = dict(fact_meta)
+            shared_meta["auto_promoted"] = True
+            shared_meta["source_agent"] = req.agent
+            shared_meta["agent"] = req.agent
+            asyncio.create_task(auto_promote_shared_fact(fact, shared_meta, embedding_text))
 
     if not stored_ids:
         return {"id": None, "stored": False, "reason": "duplicate", "similar_to": duplicate_hits[0] if duplicate_hits else None}
@@ -1700,6 +1812,27 @@ async def list_memories(agent: str = None, limit: int = 100, type: str = None):
     memories.sort(key=lambda x: x["timestamp"], reverse=True)
     memories = memories[:limit]
     return {"memories": memories, "count": len(memories)}
+
+
+@app.get("/shared/memories")
+async def list_shared_memories(limit: int = 100, offset: int = 0):
+    rows = await list_memories_for_agent("warband_shared", limit=limit, offset=offset)
+    memories = []
+    for row in rows:
+        meta = row_to_metadata(row)
+        memories.append(
+            {
+                "id": row["id"],
+                "content": row["content"],
+                "metadata": meta,
+                "agent": meta.get("agent", ""),
+                "source": meta.get("source", ""),
+                "timestamp": meta.get("timestamp", ""),
+                "type": meta.get("type", "general"),
+                "tags": meta.get("tags", "").split(",") if meta.get("tags") else [],
+            }
+        )
+    return {"memories": memories, "count": len(memories), "limit": limit, "offset": offset}
 
 
 @app.patch("/memories/{memory_id}")

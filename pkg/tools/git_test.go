@@ -1,6 +1,9 @@
 package tools
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +72,72 @@ func TestGitCommitToolKeepsExistingRemoteBranchName(t *testing.T) {
 
 	assertCurrentBranch(t, repoDir, "feat/existing")
 	assertRemoteBranch(t, repoDir, "feat/existing")
+}
+
+func TestGitCloneToolAppendsRepoContextFromSeidr(t *testing.T) {
+	t.Parallel()
+
+	type queryRequest struct {
+		Query       string   `json:"query"`
+		Agent       string   `json:"agent"`
+		Limit       int      `json:"limit"`
+		Collections []string `json:"collections"`
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/query" {
+			http.NotFound(w, r)
+			return
+		}
+		var req queryRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode query request: %v", err)
+		}
+		if req.Query != "kit/hirdforge" {
+			t.Fatalf("query = %q", req.Query)
+		}
+		if req.Agent != "ragnar" {
+			t.Fatalf("agent = %q", req.Agent)
+		}
+		if req.Limit != 5 {
+			t.Fatalf("limit = %d", req.Limit)
+		}
+		gotCollections := strings.Join(req.Collections, ",")
+		if gotCollections != "ragnar,warband_shared" {
+			t.Fatalf("collections = %q", gotCollections)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"results": []map[string]interface{}{
+				{"content": "shared clone lesson", "similarity": 0.91},
+				{"content": "ignored", "similarity": 0.41},
+				{"content": "agent-specific note", "similarity": 0.73},
+			},
+		})
+	}))
+	defer server.Close()
+
+	tool := &GitCloneTool{
+		WorkDir:   t.TempDir(),
+		GiteaURL:  "http://gitea.example.com",
+		Token:     "",
+		AgentName: "ragnar",
+		MemoryURL: server.URL,
+	}
+
+	out := tool.appendRepoContext("kit/hirdforge", "cloned kit/hirdforge to /workspace/hirdforge")
+	if !strings.Contains(out, "[REPO CONTEXT] Relevant knowledge about kit/hirdforge:") {
+		t.Fatalf("missing repo context section: %q", out)
+	}
+	if !strings.Contains(out, "- shared clone lesson") {
+		t.Fatalf("missing shared lesson: %q", out)
+	}
+	if !strings.Contains(out, "- agent-specific note") {
+		t.Fatalf("missing agent-specific note: %q", out)
+	}
+	if strings.Contains(out, "ignored") {
+		t.Fatalf("low-similarity result should have been filtered: %q", out)
+	}
 }
 
 func setupWorkspaceRepo(t *testing.T) (string, string) {
