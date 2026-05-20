@@ -147,3 +147,67 @@ assertions:
 		t.Fatalf("workspace current_session_id = %q", got)
 	}
 }
+
+func TestCaptureTaskCompletionPostsStructuredMemory(t *testing.T) {
+	type rememberRequest struct {
+		Agent   string   `json:"agent"`
+		Content string   `json:"content"`
+		Tags    []string `json:"tags"`
+		Type    string   `json:"type"`
+	}
+
+	reqCh := make(chan rememberRequest, 1)
+	memory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/remember" {
+			http.NotFound(w, r)
+			return
+		}
+		var req rememberRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode remember request: %v", err)
+		}
+		reqCh <- req
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer memory.Close()
+
+	task := taskspkg.Task{
+		Content: "Update kit/hirdforge to support memory capture " + strings.Repeat("a", 240),
+		Result:  "Completed the capture flow " + strings.Repeat("b", 240),
+		From:    "freya",
+		Tools: []taskspkg.ToolLog{
+			{Name: "deploy"},
+			{Name: "build"},
+			{Name: "build"},
+		},
+	}
+
+	startTime := time.Now().Add(-90 * time.Second)
+	captureTaskCompletion(memory.URL, "ragnar", task, startTime)
+
+	var req rememberRequest
+	select {
+	case req = <-reqCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive memory request")
+	}
+
+	if req.Agent != "ragnar" {
+		t.Fatalf("agent = %q", req.Agent)
+	}
+	if req.Type != "fact" {
+		t.Fatalf("type = %q", req.Type)
+	}
+	expectedObjective := truncateTaskText(task.Content, 200)
+	expectedOutcome := truncateTaskText(task.Result, 200)
+	expectedPrefix := "TASK COMPLETED | objective: " + expectedObjective + " | outcome: " + expectedOutcome + " | tools: build,deploy | duration: "
+	if !strings.HasPrefix(req.Content, expectedPrefix) {
+		t.Fatalf("content prefix mismatch: %q", req.Content)
+	}
+	if !strings.HasSuffix(req.Content, " | from: freya") {
+		t.Fatalf("content suffix mismatch: %q", req.Content)
+	}
+	if got := strings.Join(req.Tags, ","); got != "task_completion,ragnar,repo:kit/hirdforge" {
+		t.Fatalf("tags = %q", got)
+	}
+}
