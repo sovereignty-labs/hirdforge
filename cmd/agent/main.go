@@ -449,6 +449,7 @@ var (
 	giteaURLValue   string
 	giteaTokenValue string
 	gatewayURLValue string
+	memoryURLValue  string
 )
 
 func logJSON(level, msg string, fields map[string]interface{}) {
@@ -2371,6 +2372,7 @@ func main() {
 	giteaURLValue = *giteaURL
 	giteaTokenValue = giteaToken
 	gatewayURLValue = *gatewayURL
+	memoryURLValue = *memoryURL
 
 	personaRoot := ""
 	if persona != nil {
