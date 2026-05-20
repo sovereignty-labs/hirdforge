@@ -1681,8 +1681,8 @@ async def remember(req: RememberRequest):
         embedding_values = (await embed([fact]))[0]
         embedding_text = vector_literal(embedding_values)
         importance_task = score_importance(fact)
-        contradictions_task = detect_fact_contradictions(agent, fact, embedding_text)
-        relationships_task = extract_relationships(fact, agent)
+        contradictions_task = detect_fact_contradictions(target_collection, fact, embedding_text)
+        relationships_task = extract_relationships(fact, target_collection)
         importance_scope, contradictions, _ = await asyncio.gather(
             importance_task,
             contradictions_task,
@@ -1702,7 +1702,7 @@ async def remember(req: RememberRequest):
         COGNITIVE_STATS["importance_total"] += float(importance)
         COGNITIVE_STATS["importance_count"] += 1
 
-        duplicate_rows = await fetch_similar_for_dedup(agent, memory_type, embedding_text, limit=3)
+        duplicate_rows = await fetch_similar_for_dedup(target_collection, memory_type, embedding_text, limit=3)
         duplicate_id = None
         for row in duplicate_rows:
             similarity = float(row["similarity"] or 0.0)
