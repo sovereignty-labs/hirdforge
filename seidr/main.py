@@ -21,6 +21,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from mcp_server import create_mcp_app
+
 
 # --- Config ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://seidr:seidr@seidr-postgres:5432/seidr")
@@ -277,6 +279,7 @@ class A2MLifecycleParams(BaseModel):
 
 # --- App ---
 app = FastAPI(title="Seidr", description="Valhalla Knowledge Service")
+app.mount("/mcp", create_mcp_app())
 
 
 def log(level: str, msg: str, fields: dict = None):
