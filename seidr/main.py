@@ -21,6 +21,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from mcp_server import create_mcp_app
+
 
 # --- Config ---
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://seidr:seidr@seidr-postgres:5432/seidr")
@@ -277,6 +279,7 @@ class A2MLifecycleParams(BaseModel):
 
 # --- App ---
 app = FastAPI(title="Seidr", description="Valhalla Knowledge Service")
+app.mount("/mcp", create_mcp_app())
 
 
 def log(level: str, msg: str, fields: dict = None):
@@ -378,6 +381,15 @@ def schedule_audit_log(agent: str, operation: str, memory_id: str, collection: s
         asyncio.create_task(append_audit_log(agent, operation, memory_id, collection, content))
     except Exception as e:
         log("warn", "audit log scheduling failed", {"agent": agent, "operation": operation, "memory_id": memory_id, "error": str(e)})
+
+
+def memory_ttl_days_for_type(memory_type: str) -> Optional[int]:
+    normalized = (memory_type or "").strip().lower()
+    if normalized == "soul_candidate":
+        return None
+    if normalized in {"lesson", "workflow"}:
+        return 90
+    return 10
 
 
 def normalize_layer(value: Optional[str]) -> str:
@@ -2255,9 +2267,156 @@ async def a2m_capability_card():
     }
 
 
+async def compute_memory_health(agent: str) -> dict:
+    agent_name = sanitize_agent_name(agent)
+    pool = ensure_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, agent, content, type, confidence, created_at, embedding, metadata, superseded_by
+        FROM memories
+        WHERE agent = $1
+        ORDER BY created_at DESC
+        """,
+        agent_name,
+    )
+    total_count = len(rows)
+    if total_count == 0:
+        return {
+            "score": 1.0,
+            "staleness_ratio": 0.0,
+            "contradiction_density": 0.0,
+            "confidence_distribution": {"high": 1.0, "medium": 0.0, "low": 0.0},
+            "dedup_pressure": 0.0,
+            "recommendations": [],
+        }
+
+    now = utcnow()
+    stale_count = 0
+    contradicted_count = 0
+    confidence_high = 0
+    confidence_medium = 0
+    confidence_low = 0
+
+    for row in rows:
+        meta = row_to_metadata(row)
+        mem_type = str(meta.get("type") or row["type"] or "general").strip().lower()
+        ttl_days = memory_ttl_days_for_type(mem_type)
+        if ttl_days is not None and row["created_at"] is not None:
+            age_days = (now - row["created_at"]).total_seconds() / 86400.0
+            if age_days > ttl_days:
+                stale_count += 1
+
+        contradiction_count = 0
+        try:
+            contradiction_count = int(meta.get("contradiction_count", 0) or 0)
+        except Exception:
+            contradiction_count = 0
+        if contradiction_count > 0 or row["superseded_by"]:
+            contradicted_count += 1
+
+        confidence = normalize_confidence(meta.get("confidence"), normalize_layer(meta.get("layer")))
+        if confidence > 0.7:
+            confidence_high += 1
+        elif confidence >= 0.4:
+            confidence_medium += 1
+        else:
+            confidence_low += 1
+
+    recent_rows = rows[:100]
+    checked_count = 0
+    near_duplicate_count = 0
+    dedup_tasks = []
+    for row in recent_rows:
+        if not row["embedding"]:
+            continue
+        checked_count += 1
+        dedup_tasks.append(
+            pool.fetchrow(
+                """
+                SELECT 1 - (embedding <=> $2::vector) AS similarity
+                FROM memories
+                WHERE agent = $1 AND id <> $3
+                ORDER BY embedding <=> $2::vector
+                LIMIT 1
+                """,
+                agent_name,
+                row["embedding"],
+                row["id"],
+            )
+        )
+
+    if dedup_tasks:
+        dedup_results = await asyncio.gather(*dedup_tasks, return_exceptions=True)
+        for result in dedup_results:
+            if isinstance(result, Exception) or result is None:
+                continue
+            if float(result["similarity"] or 0.0) > 0.85:
+                near_duplicate_count += 1
+
+    staleness_ratio = stale_count / total_count
+    contradiction_density = contradicted_count / total_count
+    confidence_distribution = {
+        "high": confidence_high / total_count,
+        "medium": confidence_medium / total_count,
+        "low": confidence_low / total_count,
+    }
+    dedup_pressure = (near_duplicate_count / checked_count) if checked_count > 0 else 0.0
+    score = 1.0 - (
+        0.3 * staleness_ratio
+        + 0.25 * contradiction_density
+        + 0.25 * (1.0 - confidence_distribution["high"])
+        + 0.2 * dedup_pressure
+    )
+    score = max(0.0, min(1.0, score))
+
+    recommendations = []
+    if staleness_ratio > 0.3:
+        recommendations.append("Consider running prune to remove expired memories")
+    if contradiction_density > 0.1:
+        recommendations.append("High contradiction rate - review contradicted memories")
+    if dedup_pressure > 0.2:
+        recommendations.append("Consider running consolidate to merge similar memories")
+    if confidence_distribution["low"] > 0.2:
+        recommendations.append("Many low-confidence memories - consider validation")
+
+    return {
+        "score": round(score, 4),
+        "staleness_ratio": round(staleness_ratio, 4),
+        "contradiction_density": round(contradiction_density, 4),
+        "confidence_distribution": {
+            "high": round(confidence_distribution["high"], 4),
+            "medium": round(confidence_distribution["medium"], 4),
+            "low": round(confidence_distribution["low"], 4),
+        },
+        "dedup_pressure": round(dedup_pressure, 4),
+        "recommendations": recommendations,
+    }
+
+
 @app.get("/health")
 async def health():
     return await health_data()
+
+
+@app.get("/health/agent/{agent_name}")
+async def agent_memory_health(agent_name: str):
+    agent = sanitize_agent_name(agent_name)
+    pool = ensure_pool()
+    count_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM memories WHERE agent = $1", agent)
+    total_memories = int(count_row["count"] or 0)
+    try:
+        health = await asyncio.wait_for(compute_memory_health(agent), timeout=5.0)
+        recommendations = health.pop("recommendations", [])
+    except Exception as e:
+        log("warn", "memory health computation failed", {"agent": agent, "error": str(e)})
+        health = None
+        recommendations = []
+    return {
+        "agent": agent_name,
+        "total_memories": total_memories,
+        "health": health,
+        "recommendations": recommendations,
+    }
 
 
 @app.get("/collections")
