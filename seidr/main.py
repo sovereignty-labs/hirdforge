@@ -21,7 +21,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from mcp_server import create_mcp_app
+try:
+    from mcp_server import create_mcp_app
+    _mcp_available = True
+except ImportError:
+    _mcp_available = False
 
 
 # --- Config ---
@@ -279,7 +283,8 @@ class A2MLifecycleParams(BaseModel):
 
 # --- App ---
 app = FastAPI(title="Seidr", description="Valhalla Knowledge Service")
-app.mount("/mcp", create_mcp_app())
+if _mcp_available:
+    app.mount("/mcp", create_mcp_app())
 
 
 def log(level: str, msg: str, fields: dict = None):
