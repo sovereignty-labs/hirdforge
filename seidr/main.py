@@ -2277,7 +2277,9 @@ async def compute_memory_health(agent: str) -> dict:
     pool = ensure_pool()
     rows = await pool.fetch(
         """
-        SELECT id, agent, content, type, confidence, created_at, embedding, metadata, superseded_by
+        SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source,
+               metadata, superseded_by, supersede_reason, valid_until, source_ids,
+               validation_count, created_at, expires_at, access_count, last_accessed, embedding
         FROM memories
         WHERE agent = $1
         ORDER BY created_at DESC
