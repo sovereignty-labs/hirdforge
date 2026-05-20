@@ -1,9 +1,14 @@
 package tools
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"strings"
+	"time"
 )
 
 // Individual Gitea action tools. Each wraps the shared GiteaAPITool backend.
@@ -11,9 +16,9 @@ import (
 
 type createIssueTool struct{ api *GiteaAPITool }
 
-func NewCreateIssueTool(api *GiteaAPITool) *createIssueTool    { return &createIssueTool{api: api} }
-func (t *createIssueTool) Name() string                        { return "create-issue" }
-func (t *createIssueTool) Description() string                 { return "Create a new issue in a Gitea repository." }
+func NewCreateIssueTool(api *GiteaAPITool) *createIssueTool { return &createIssueTool{api: api} }
+func (t *createIssueTool) Name() string                     { return "create-issue" }
+func (t *createIssueTool) Description() string              { return "Create a new issue in a Gitea repository." }
 func (t *createIssueTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
@@ -60,9 +65,9 @@ func (t *createIssueTool) Execute(args map[string]interface{}) ToolResult {
 
 type createPRTool struct{ api *GiteaAPITool }
 
-func NewCreatePRTool(api *GiteaAPITool) *createPRTool    { return &createPRTool{api: api} }
-func (t *createPRTool) Name() string                     { return "create-pr" }
-func (t *createPRTool) Description() string               { return "Create a pull request in a Gitea repository." }
+func NewCreatePRTool(api *GiteaAPITool) *createPRTool { return &createPRTool{api: api} }
+func (t *createPRTool) Name() string                  { return "create-pr" }
+func (t *createPRTool) Description() string           { return "Create a pull request in a Gitea repository." }
 func (t *createPRTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
@@ -113,9 +118,11 @@ func (t *createPRTool) Execute(args map[string]interface{}) ToolResult {
 
 type listIssuesTool struct{ api *GiteaAPITool }
 
-func NewListIssuesTool(api *GiteaAPITool) *listIssuesTool    { return &listIssuesTool{api: api} }
-func (t *listIssuesTool) Name() string                      { return "list-issues" }
-func (t *listIssuesTool) Description() string               { return "List issues in a Gitea repository with optional state and label filters." }
+func NewListIssuesTool(api *GiteaAPITool) *listIssuesTool { return &listIssuesTool{api: api} }
+func (t *listIssuesTool) Name() string                    { return "list-issues" }
+func (t *listIssuesTool) Description() string {
+	return "List issues in a Gitea repository with optional state and label filters."
+}
 func (t *listIssuesTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
@@ -158,9 +165,9 @@ func (t *listIssuesTool) Execute(args map[string]interface{}) ToolResult {
 
 type closeIssueTool struct{ api *GiteaAPITool }
 
-func NewCloseIssueTool(api *GiteaAPITool) *closeIssueTool    { return &closeIssueTool{api: api} }
-func (t *closeIssueTool) Name() string                       { return "close-issue" }
-func (t *closeIssueTool) Description() string                { return "Close an issue in a Gitea repository." }
+func NewCloseIssueTool(api *GiteaAPITool) *closeIssueTool { return &closeIssueTool{api: api} }
+func (t *closeIssueTool) Name() string                    { return "close-issue" }
+func (t *closeIssueTool) Description() string             { return "Close an issue in a Gitea repository." }
 func (t *closeIssueTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
@@ -190,9 +197,11 @@ func (t *closeIssueTool) Execute(args map[string]interface{}) ToolResult {
 
 type commentTool struct{ api *GiteaAPITool }
 
-func NewCommentTool(api *GiteaAPITool) *commentTool    { return &commentTool{api: api} }
-func (t *commentTool) Name() string                   { return "comment" }
-func (t *commentTool) Description() string             { return "Add a comment to an issue or pull request in a Gitea repository." }
+func NewCommentTool(api *GiteaAPITool) *commentTool { return &commentTool{api: api} }
+func (t *commentTool) Name() string                 { return "comment" }
+func (t *commentTool) Description() string {
+	return "Add a comment to an issue or pull request in a Gitea repository."
+}
 func (t *commentTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
@@ -225,17 +234,25 @@ func (t *commentTool) Execute(args map[string]interface{}) ToolResult {
 	return ToolResult{Output: fmt.Sprintf("commented on issue #%d", issueNum)}
 }
 
-type createReviewTool struct{ api *GiteaAPITool }
+type createReviewTool struct {
+	api       *GiteaAPITool
+	memoryURL string
+	agentName string
+}
 
-func NewCreateReviewTool(api *GiteaAPITool) *createReviewTool    { return &createReviewTool{api: api} }
-func (t *createReviewTool) Name() string                         { return "create-review" }
-func (t *createReviewTool) Description() string                  { return "Submit a formal review (APPROVED or REQUEST_CHANGES) on a pull request." }
+func NewCreateReviewTool(api *GiteaAPITool, memoryURL, agentName string) *createReviewTool {
+	return &createReviewTool{api: api, memoryURL: memoryURL, agentName: strings.TrimSpace(agentName)}
+}
+func (t *createReviewTool) Name() string { return "create-review" }
+func (t *createReviewTool) Description() string {
+	return "Submit a formal review (APPROVED or REQUEST_CHANGES) on a pull request."
+}
 func (t *createReviewTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
-		"index":  "PR number",
-		"state":  "Review state: APPROVED or REQUEST_CHANGES",
-		"body":   "Review text",
+		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"index": "PR number",
+		"state": "Review state: APPROVED or REQUEST_CHANGES",
+		"body":  "Review text",
 	}
 }
 func (t *createReviewTool) Execute(args map[string]interface{}) ToolResult {
@@ -268,14 +285,63 @@ func (t *createReviewTool) Execute(args map[string]interface{}) ToolResult {
 	if status >= 400 {
 		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(resp))}
 	}
+	t.captureReviewOutcomeAsync(owner, name, prNum, body, state)
 	return ToolResult{Output: fmt.Sprintf("submitted %s review on PR #%d", state, prNum)}
+}
+
+func truncateReviewSummary(s string, maxChars int) string {
+	if maxChars <= 0 {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= maxChars {
+		return string(runes)
+	}
+	return string(runes[:maxChars])
+}
+
+func (t *createReviewTool) captureReviewOutcomeAsync(owner, repo string, prNum int, body, verdict string) {
+	if strings.TrimSpace(t.memoryURL) == "" || strings.TrimSpace(t.agentName) == "" {
+		return
+	}
+	go func() {
+		summary := truncateReviewSummary(body, 200)
+		content := fmt.Sprintf("REVIEW %s | repo: %s/%s | PR #%d | summary: %s", strings.ToUpper(strings.TrimSpace(verdict)), owner, repo, prNum, summary)
+		payload := map[string]interface{}{
+			"agent":   t.agentName,
+			"content": content,
+			"tags":    []string{"review", t.agentName, owner + "/" + repo},
+			"type":    "observation",
+			"shared":  true,
+		}
+		bodyBytes, err := json.Marshal(payload)
+		if err != nil {
+			log.Printf("create-review memory marshal failed: %v", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(t.memoryURL, "/")+"/remember", bytes.NewReader(bodyBytes))
+		if err != nil {
+			log.Printf("create-review memory request failed: %v", err)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("create-review memory POST failed: %v", err)
+			return
+		}
+		_ = resp.Body.Close()
+	}()
 }
 
 type mergePRTool struct{ api *GiteaAPITool }
 
-func NewMergePRTool(api *GiteaAPITool) *mergePRTool    { return &mergePRTool{api: api} }
-func (t *mergePRTool) Name() string                   { return "merge-pr" }
-func (t *mergePRTool) Description() string            { return "Merge a pull request in a Gitea repository." }
+func NewMergePRTool(api *GiteaAPITool) *mergePRTool { return &mergePRTool{api: api} }
+func (t *mergePRTool) Name() string                 { return "merge-pr" }
+func (t *mergePRTool) Description() string          { return "Merge a pull request in a Gitea repository." }
 func (t *mergePRTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
@@ -305,9 +371,9 @@ func (t *mergePRTool) Execute(args map[string]interface{}) ToolResult {
 
 type listPRFilesTool struct{ api *GiteaAPITool }
 
-func NewListPRFilesTool(api *GiteaAPITool) *listPRFilesTool    { return &listPRFilesTool{api: api} }
-func (t *listPRFilesTool) Name() string                       { return "list-pr-files" }
-func (t *listPRFilesTool) Description() string                { return "List the files changed in a pull request." }
+func NewListPRFilesTool(api *GiteaAPITool) *listPRFilesTool { return &listPRFilesTool{api: api} }
+func (t *listPRFilesTool) Name() string                     { return "list-pr-files" }
+func (t *listPRFilesTool) Description() string              { return "List the files changed in a pull request." }
 func (t *listPRFilesTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
@@ -344,9 +410,11 @@ func (t *listPRFilesTool) Execute(args map[string]interface{}) ToolResult {
 
 type updateLabelsTool struct{ api *GiteaAPITool }
 
-func NewUpdateLabelsTool(api *GiteaAPITool) *updateLabelsTool    { return &updateLabelsTool{api: api} }
-func (t *updateLabelsTool) Name() string                        { return "update-labels" }
-func (t *updateLabelsTool) Description() string                 { return "Replace all labels on an issue. Labels are resolved by name to IDs automatically." }
+func NewUpdateLabelsTool(api *GiteaAPITool) *updateLabelsTool { return &updateLabelsTool{api: api} }
+func (t *updateLabelsTool) Name() string                      { return "update-labels" }
+func (t *updateLabelsTool) Description() string {
+	return "Replace all labels on an issue. Labels are resolved by name to IDs automatically."
+}
 func (t *updateLabelsTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
@@ -382,9 +450,11 @@ func (t *updateLabelsTool) Execute(args map[string]interface{}) ToolResult {
 
 type getIssueTool struct{ api *GiteaAPITool }
 
-func NewGetIssueTool(api *GiteaAPITool) *getIssueTool    { return &getIssueTool{api: api} }
-func (t *getIssueTool) Name() string                    { return "get-issue" }
-func (t *getIssueTool) Description() string             { return "Get the full details of an issue, including body and comments." }
+func NewGetIssueTool(api *GiteaAPITool) *getIssueTool { return &getIssueTool{api: api} }
+func (t *getIssueTool) Name() string                  { return "get-issue" }
+func (t *getIssueTool) Description() string {
+	return "Get the full details of an issue, including body and comments."
+}
 func (t *getIssueTool) Parameters() map[string]string {
 	return map[string]string{
 		"owner": "Repository owner (optional if repo is owner/repo format)",
@@ -449,9 +519,9 @@ func (t *getIssueTool) Execute(args map[string]interface{}) ToolResult {
 
 type listBranchesTool struct{ api *GiteaAPITool }
 
-func NewListBranchesTool(api *GiteaAPITool) *listBranchesTool    { return &listBranchesTool{api: api} }
-func (t *listBranchesTool) Name() string                        { return "list-branches" }
-func (t *listBranchesTool) Description() string                 { return "List all branches in a Gitea repository." }
+func NewListBranchesTool(api *GiteaAPITool) *listBranchesTool { return &listBranchesTool{api: api} }
+func (t *listBranchesTool) Name() string                      { return "list-branches" }
+func (t *listBranchesTool) Description() string               { return "List all branches in a Gitea repository." }
 func (t *listBranchesTool) Parameters() map[string]string {
 	return map[string]string{
 		"repo": "Repository name (e.g. project_valhalla) or owner/repo",
