@@ -17,7 +17,8 @@ from typing import Literal, Optional
 
 import asyncpg
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 
@@ -43,6 +44,7 @@ COGNITIVE_STATS = {
 DB_POOL = None
 EMBED_MODEL = None
 MAIN_LOOP = None
+APP_START_TIME = time.time()
 
 SCHEMA_STATEMENTS = [
     "CREATE EXTENSION IF NOT EXISTS vector;",
@@ -131,6 +133,8 @@ class QueryRequest(BaseModel):
     agent: Optional[str] = None
     limit: int = 5
     collections: Optional[list[str]] = None
+    similarity_threshold: Optional[float] = None
+    cursor: Optional[str] = None
     type: Optional[Literal["general", "failure", "recovery", "lesson", "fact", "observation"]] = None
     layer: Optional[Literal["experience", "lesson", "soul_candidate"]] = None
     importance_weight: float = 0.0
@@ -156,10 +160,12 @@ class RememberRequest(BaseModel):
 class ValidateRequest(BaseModel):
     memory_id: str
     outcome: Literal["success", "contradiction"]
+    context: Optional[dict] = None
 
 
 class ReflectRequest(BaseModel):
     agent: str
+    collections: Optional[list[str]] = None
 
 
 class IngestRequest(BaseModel):
@@ -192,6 +198,65 @@ class UpdateMemoryRequest(BaseModel):
     layer: Optional[str] = None
     importance: Optional[float] = None
     tags: Optional[str] = None
+    expires_at: Optional[str] = None
+    collection: Optional[str] = None
+
+
+class A2MMemoryCreate(BaseModel):
+    agent: str
+    content: str
+    type: Literal["general", "failure", "recovery", "lesson", "fact", "observation"] = "general"
+    scope: Optional[str] = None
+    shared: bool = False
+    provenance: Optional[str] = None
+    metadata: Optional[dict] = None
+    tags: Optional[list[str]] = None
+
+
+class A2MStoreParams(BaseModel):
+    memories: list[A2MMemoryCreate]
+
+
+class A2MQueryFilters(BaseModel):
+    types: Optional[list[str]] = None
+    min_importance: Optional[float] = None
+    tags_any: Optional[list[str]] = None
+
+
+class A2MQueryParams(BaseModel):
+    agent: str
+    query: str
+    collections: Optional[list[str]] = None
+    limit: int = 10
+    similarity_threshold: Optional[float] = None
+    importance_weight: float = 0.0
+    filters: Optional[A2MQueryFilters] = None
+    cursor: Optional[str] = None
+
+
+class A2MValidationItem(BaseModel):
+    memory_id: str
+    outcome: Literal["success", "contradiction"]
+    context: Optional[dict] = None
+
+
+class A2MValidateParams(BaseModel):
+    validations: list[A2MValidationItem]
+
+
+class A2MReflectParams(BaseModel):
+    agent: str
+    collections: Optional[list[str]] = None
+
+
+class A2MLifecycleParams(BaseModel):
+    action: str
+    memory_id: Optional[str] = None
+    memory_ids: Optional[list[str]] = None
+    expires_at: Optional[str] = None
+    collection: Optional[str] = None
+    target_collection: Optional[str] = None
+    agent: Optional[str] = None
 
 
 # --- App ---
@@ -501,6 +566,634 @@ async def dedupe_results_by_content(results: list[dict], threshold: float = 0.92
             kept_embeddings[duplicate_index] = item_embedding
     kept.sort(key=lambda item: item.get("similarity", 0.0), reverse=True)
     return kept
+
+
+def parse_a2m_major_version(value: Optional[str]) -> Optional[int]:
+    if not value:
+        return None
+    match = re.match(r"^\s*(\d+)(?:\.\d+)?\s*$", str(value))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def coerce_tag_list(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, str):
+        items = value.split(",")
+    else:
+        items = [value]
+    out = []
+    seen = set()
+    for item in items:
+        tag = str(item).strip()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    return out
+
+
+def memory_recency_score(meta: dict) -> float:
+    ts = parse_iso_datetime(meta.get("timestamp")) or parse_iso_datetime(meta.get("created_at")) or parse_iso_datetime(meta.get("updated_at"))
+    if ts is None:
+        return 0.0
+    age_seconds = max(0.0, (utcnow() - ts).total_seconds())
+    age_days = age_seconds / 86400.0
+    return max(0.0, min(1.0, 1.0 - (age_days / 30.0)))
+
+
+def serialize_memory_record(row) -> dict:
+    if row is None:
+        return None
+    meta = row_to_metadata(row)
+    tags = coerce_tag_list(meta.get("tags", ""))
+    return {
+        "id": row["id"],
+        "agent": row["agent"],
+        "content": row["content"],
+        "type": row["type"],
+        "layer": row["layer"],
+        "importance": float(row["importance"] or 0.0),
+        "confidence": float(row["confidence"] or 0.0),
+        "scope": row["scope"],
+        "tags": tags,
+        "source": row["source"],
+        "metadata": meta,
+        "source_ids": meta.get("source_ids", row["source_ids"] or "[]"),
+        "validation_count": int(row["validation_count"] or 0),
+        "created_at": format_timestamp(row["created_at"]) if row["created_at"] else "",
+        "expires_at": format_timestamp(row["expires_at"]) if row["expires_at"] else None,
+        "access_count": int(row["access_count"] or 0),
+        "last_accessed": format_timestamp(row["last_accessed"]) if row["last_accessed"] else None,
+        "valid_until": format_timestamp(row["valid_until"]) if row["valid_until"] else None,
+        "superseded_by": row["superseded_by"],
+        "supersede_reason": row["supersede_reason"],
+    }
+
+
+def serialize_query_memory(item: dict) -> dict:
+    meta = item.get("metadata", {}) or {}
+    return {
+        "id": item.get("id"),
+        "agent": meta.get("agent", ""),
+        "content": item.get("content", ""),
+        "type": meta.get("type", "general"),
+        "layer": meta.get("layer", "experience"),
+        "importance": float(meta.get("importance", 0.0) or 0.0),
+        "confidence": float(meta.get("confidence", 0.0) or 0.0),
+        "scope": meta.get("scope", "session"),
+        "tags": coerce_tag_list(meta.get("tags", "")),
+        "source": meta.get("source", ""),
+        "metadata": meta,
+        "source_ids": meta.get("source_ids", "[]"),
+        "validation_count": int(meta.get("validation_count", 0) or 0),
+        "created_at": meta.get("timestamp", ""),
+        "expires_at": meta.get("expires_at"),
+        "access_count": int(meta.get("access_count", 0) or 0),
+        "last_accessed": meta.get("last_accessed"),
+        "valid_until": meta.get("valid_until"),
+        "superseded_by": meta.get("superseded_by"),
+        "supersede_reason": meta.get("supersede_reason"),
+    }
+
+
+def build_score_components(item: dict) -> dict:
+    meta = item.get("metadata", {}) or {}
+    return {
+        "similarity": round(float(item.get("similarity", 0.0) or 0.0), 4),
+        "importance": round(max(0.0, min(1.0, float(meta.get("importance", 0.0) or 0.0))), 4),
+        "confidence": round(max(0.0, min(1.0, float(meta.get("confidence", 0.0) or 0.0))), 4),
+        "recency": round(memory_recency_score(meta), 4),
+    }
+
+
+def jsonrpc_error(code: int, message: str, request_id=None) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
+
+
+def jsonrpc_result(result, request_id=None) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+
+
+async def query_memory_data(req: QueryRequest):
+    where = req.where.copy() if req.where else {}
+    if req.filter:
+        where.update(req.filter)
+    if req.type:
+        where["type"] = req.type
+    if req.layer:
+        where["layer"] = req.layer
+    if req.as_of:
+        as_of_dt = parse_iso_datetime(req.as_of)
+        if as_of_dt is not None:
+            where["as_of"] = as_of_dt
+    else:
+        as_of_dt = None
+    if not where:
+        where = None
+    query_embedding = None
+    if req.collections:
+        query_embedding = (await embed([req.query]))[0]
+        results = await run_hybrid_search_across_collections(
+            req.query,
+            req.collections,
+            limit=req.limit,
+            where=where,
+            query_embedding=query_embedding,
+        )
+    else:
+        results = await run_hybrid_search(req.query, limit=req.limit, agent=req.agent, where=where)
+    if as_of_dt is not None:
+        filtered = []
+        for item in results:
+            meta = item.get("metadata", {}) or {}
+            valid_until = parse_iso_datetime(meta.get("valid_until"))
+            if valid_until is not None and valid_until < as_of_dt:
+                continue
+            filtered.append(item)
+        results = filtered
+    weight = max(0.0, min(1.0, float(req.importance_weight or 0.0)))
+    if weight > 0.0:
+        for item in results:
+            meta = item.get("metadata", {}) or {}
+            importance = max(0.0, min(1.0, float(meta.get("importance", 0.0) or 0.0)))
+            similarity_score = float(item.get("similarity", 0.0))
+            final_score = (1.0 - weight) * similarity_score + weight * importance
+            item["final_score"] = round(final_score, 4)
+        results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
+        results = results[: req.limit]
+    if req.similarity_threshold is not None:
+        threshold = float(req.similarity_threshold)
+        results = [item for item in results if float(item.get("similarity", 0.0)) >= threshold]
+    if req.agent:
+        asyncio.create_task(log_memory_access(req.agent, req.query, [item["id"] for item in results if item.get("id")]))
+    return {"results": results, "count": len(results)}
+
+
+async def remember_memory_data(req: RememberRequest):
+    memory_type = resolve_memory_type(req)
+    source_layer = normalize_layer(req.layer)
+    agent = sanitize_agent_name(req.agent)
+    target_collection = "warband_shared" if req.shared else agent
+
+    def base_metadata(layer_override: Optional[str] = None) -> dict:
+        layer = normalize_layer(layer_override or source_layer)
+        metadata = {
+            "agent": req.agent,
+            "source": req.source,
+            "timestamp": format_timestamp(),
+            "tags": ",".join(req.tags) if req.tags else "",
+            "type": memory_type,
+            "layer": layer,
+            "confidence": normalize_confidence(req.confidence, layer),
+            "source_ids": normalize_source_ids(req.source_ids),
+            "validation_count": normalize_validation_count(req.validation_count),
+        }
+        if req.metadata:
+            metadata.update(req.metadata)
+        metadata["layer"] = normalize_layer(metadata.get("layer"))
+        metadata["confidence"] = normalize_confidence(metadata.get("confidence"), metadata["layer"])
+        metadata["source_ids"] = normalize_source_ids(metadata.get("source_ids"))
+        metadata["validation_count"] = normalize_validation_count(metadata.get("validation_count"))
+        metadata["tags"] = metadata.get("tags", "")
+        return metadata
+
+    async def store_one(
+        content: str,
+        metadata: dict,
+        check_contradiction: bool,
+        collection_agent: str = target_collection,
+        embedding_text: Optional[str] = None,
+        contradictions: Optional[list[tuple[str, str]]] = None,
+    ):
+        collection_agent = sanitize_agent_name(collection_agent)
+        if embedding_text is None:
+            embedding_values = (await embed([content]))[0]
+            embedding_text = vector_literal(embedding_values)
+        duplicate_rows = await fetch_similar_for_dedup(collection_agent, memory_type, embedding_text, limit=3)
+        for row in duplicate_rows:
+            similarity = float(row["similarity"] or 0.0)
+            existing_meta = safe_metadata(row["metadata"])
+            if existing_meta.get("type", "general") == memory_type and similarity > 0.92:
+                log("info", "memory deduplicated", {"agent": req.agent, "collection": collection_agent, "similar_to": row["id"]})
+                return None, row["id"], 0
+
+        detected_contradictions = contradictions if contradictions is not None else []
+        if check_contradiction and contradictions is None:
+            detected_contradictions = await detect_fact_contradictions(collection_agent, content, embedding_text)
+
+        stored_id = await store_memory_row(
+            agent=collection_agent,
+            content=content,
+            metadata=metadata,
+            memory_type=memory_type,
+            layer=normalize_layer(metadata.get("layer")),
+            importance=float(metadata.get("importance", 0.5)),
+            confidence=normalize_confidence(metadata.get("confidence"), normalize_layer(metadata.get("layer"))),
+            scope=str(metadata.get("scope", "session")).strip().lower() or "session",
+            source=str(metadata.get("source", req.source)),
+            tags=str(metadata.get("tags", "")),
+            source_ids=normalize_source_ids(metadata.get("source_ids")),
+            validation_count=normalize_validation_count(metadata.get("validation_count")),
+            embedding_text=embedding_text,
+        )
+        if detected_contradictions:
+            await apply_contradictions(stored_id, detected_contradictions)
+        return stored_id, None, len(detected_contradictions)
+
+    async def auto_promote_shared_fact(content: str, metadata: dict, embedding_text: str):
+        try:
+            promoted_id, duplicate_id, _ = await store_one(
+                content,
+                metadata,
+                check_contradiction=False,
+                collection_agent="warband_shared",
+                embedding_text=embedding_text,
+            )
+            if promoted_id is None:
+                log("info", "shared memory deduplicated", {"agent": req.agent, "similar_to": duplicate_id})
+            else:
+                log("info", "memory auto-promoted", {"agent": req.agent, "id": promoted_id})
+        except Exception as e:
+            log("warn", "shared auto-promotion failed", {"agent": req.agent, "error": str(e)})
+
+    facts_extracted = 0
+    contradictions_found = 0
+    auto_promoted = 0
+
+    if not cognition_enabled():
+        metadata = base_metadata()
+        stored_id, similar_to, _ = await store_one(req.content, metadata, check_contradiction=False)
+        if stored_id is None:
+            row = await find_memory_record(similar_to) if similar_to else None
+            return {
+                "id": None,
+                "stored": False,
+                "reason": "duplicate",
+                "similar_to": similar_to,
+                "memory": serialize_memory_record(row) if row else None,
+                "facts_extracted": facts_extracted,
+                "contradictions_found": contradictions_found,
+                "auto_promoted": auto_promoted,
+                "cognitive_status": "skipped",
+            }
+        row = await find_memory_record(stored_id)
+        log("info", "memory stored", {"agent": req.agent, "id": stored_id, "tags": req.tags})
+        return {
+            "id": stored_id,
+            "stored": True,
+            "memory": serialize_memory_record(row) if row else None,
+            "facts_extracted": facts_extracted,
+            "contradictions_found": contradictions_found,
+            "auto_promoted": auto_promoted,
+            "cognitive_status": "skipped",
+        }
+
+    if len(req.content or "") > 100:
+        facts = await extract_atomic_facts(req.content)
+        force_experience_layer = True
+    else:
+        facts = [req.content]
+        force_experience_layer = False
+    facts_extracted = len([fact for fact in facts if (fact or "").strip()])
+
+    stored_ids = []
+    duplicate_hits = []
+    for fact in [f.strip() for f in facts if (f or "").strip()]:
+        fact_meta = base_metadata("experience" if force_experience_layer else source_layer)
+        embedding_values = (await embed([fact]))[0]
+        embedding_text = vector_literal(embedding_values)
+        importance_task = score_importance(fact)
+        contradictions_task = detect_fact_contradictions(target_collection, fact, embedding_text)
+        relationships_task = extract_relationships(fact, target_collection)
+        importance_scope, contradictions, _ = await asyncio.gather(
+            importance_task,
+            contradictions_task,
+            relationships_task,
+            return_exceptions=True,
+        )
+        if isinstance(importance_scope, Exception):
+            log("warn", "importance scoring failed", {"agent": agent, "error": str(importance_scope)})
+            importance_scope = (0.5, "session")
+        if isinstance(contradictions, Exception):
+            log("warn", "contradiction detection failed", {"agent": agent, "error": str(contradictions)})
+            contradictions = []
+        importance, scope = importance_scope
+        fact_meta["importance"] = round(importance, 4)
+        fact_meta["scope"] = scope
+        fact_meta["layer"] = "experience" if force_experience_layer else normalize_layer(fact_meta.get("layer"))
+        COGNITIVE_STATS["importance_total"] += float(importance)
+        COGNITIVE_STATS["importance_count"] += 1
+        duplicate_rows = await fetch_similar_for_dedup(target_collection, memory_type, embedding_text, limit=3)
+        duplicate_id = None
+        for row in duplicate_rows:
+            similarity = float(row["similarity"] or 0.0)
+            existing_meta = safe_metadata(row["metadata"])
+            if existing_meta.get("type", "general") == memory_type and similarity > 0.92:
+                duplicate_id = row["id"]
+                break
+        if duplicate_id:
+            log("info", "memory deduplicated", {"agent": req.agent, "collection": target_collection, "similar_to": duplicate_id})
+            duplicate_hits.append(duplicate_id)
+            continue
+
+        stored_id, duplicate_id, contradiction_count = await store_one(
+            fact,
+            fact_meta,
+            check_contradiction=True,
+            collection_agent=target_collection,
+            embedding_text=embedding_text,
+            contradictions=contradictions if not isinstance(contradictions, list) else contradictions,
+        )
+        contradictions_found += contradiction_count
+        if stored_id is None:
+            if duplicate_id:
+                duplicate_hits.append(duplicate_id)
+            continue
+        stored_ids.append(stored_id)
+        log("info", "memory stored", {"agent": req.agent, "id": stored_id, "tags": req.tags, "layer": fact_meta.get("layer")})
+        if not req.shared and importance > 0.7 and scope == "universal":
+            shared_meta = dict(fact_meta)
+            shared_meta["auto_promoted"] = True
+            shared_meta["source_agent"] = req.agent
+            shared_meta["agent"] = req.agent
+            auto_promoted += 1
+            asyncio.create_task(auto_promote_shared_fact(fact, shared_meta, embedding_text))
+
+    if not stored_ids:
+        return {
+            "id": None,
+            "stored": False,
+            "reason": "duplicate",
+            "similar_to": duplicate_hits[0] if duplicate_hits else None,
+            "memory": serialize_memory_record(await find_memory_record(duplicate_hits[0])) if duplicate_hits else None,
+            "facts_extracted": facts_extracted,
+            "contradictions_found": contradictions_found,
+            "auto_promoted": auto_promoted,
+            "cognitive_status": "processed",
+        }
+    row = await find_memory_record(stored_ids[0])
+    return {
+        "id": stored_ids[0],
+        "ids": stored_ids,
+        "stored": True,
+        "facts_stored": len(stored_ids),
+        "memory": serialize_memory_record(row) if row else None,
+        "facts_extracted": facts_extracted,
+        "contradictions_found": contradictions_found,
+        "auto_promoted": auto_promoted,
+        "cognitive_status": "processed",
+    }
+
+
+async def validate_memory_data(req: ValidateRequest):
+    row = await find_memory_record(req.memory_id)
+    if not row:
+        return {"updated": False, "error": "memory not found"}
+    meta = row_to_metadata(row)
+    current_conf = normalize_confidence(meta.get("confidence"), normalize_layer(meta.get("layer")))
+    current_validations = normalize_validation_count(meta.get("validation_count"))
+    if req.outcome == "success":
+        current_validations += 1
+        current_conf = min(1.0, current_conf + 0.1)
+    else:
+        current_conf = max(0.0, current_conf - 0.2)
+    meta["validation_count"] = current_validations
+    meta["confidence"] = round(current_conf, 4)
+    if req.context:
+        meta["validation_context"] = req.context
+    await ensure_pool().execute(
+        """
+        UPDATE memories
+        SET validation_count = $2, confidence = $3, metadata = $4::jsonb
+        WHERE id = $1
+        """,
+        req.memory_id,
+        current_validations,
+        current_conf,
+        json.dumps(meta),
+    )
+    updated = await find_memory_record(req.memory_id)
+    return {"updated": True, "memory_id": req.memory_id, "metadata": meta, "memory": serialize_memory_record(updated) if updated else None}
+
+
+async def update_memory_data(memory_id: str, req: UpdateMemoryRequest):
+    row = await find_memory_record(memory_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="memory not found")
+    if req.type is not None and req.type not in MEMORY_TYPES:
+        raise HTTPException(status_code=400, detail="invalid memory type")
+    if req.layer is not None and req.layer not in COGNITIVE_LAYERS:
+        raise HTTPException(status_code=400, detail="invalid cognitive layer")
+    if req.importance is not None and not (0.0 <= float(req.importance) <= 1.0):
+        raise HTTPException(status_code=400, detail="importance must be between 0.0 and 1.0")
+
+    content = row["content"]
+    memory_type = row["type"]
+    layer = row["layer"]
+    importance = float(row["importance"] or 0.5)
+    tags = row["tags"] or ""
+    embedding_text = None
+    expires_at = row["expires_at"]
+    metadata = row_to_metadata(row)
+    agent = row["agent"]
+
+    if req.content is not None:
+        content = req.content
+        embedding_values = (await embed([content]))[0]
+        embedding_text = vector_literal(embedding_values)
+        metadata["content_updated_at"] = format_timestamp()
+    if req.type is not None:
+        memory_type = req.type
+        metadata["type"] = req.type
+    if req.layer is not None:
+        layer = req.layer
+        expires_at = expires_at_for_layer(layer)
+        metadata["layer"] = req.layer
+    if req.importance is not None:
+        importance = max(0.0, min(1.0, float(req.importance)))
+        metadata["importance"] = round(importance, 4)
+    if req.tags is not None:
+        tags = req.tags
+        metadata["tags"] = req.tags
+    if req.expires_at is not None:
+        parsed_expires_at = parse_iso_datetime(req.expires_at)
+        if parsed_expires_at is None:
+            raise HTTPException(status_code=400, detail="invalid expires_at")
+        expires_at = parsed_expires_at
+    if req.collection is not None:
+        agent = sanitize_agent_name(req.collection)
+        metadata["agent"] = agent
+        metadata["collection"] = req.collection
+
+    metadata["updated_at"] = format_timestamp()
+    if embedding_text is None:
+        existing_embedding = await ensure_pool().fetchrow("SELECT embedding FROM memories WHERE id = $1", memory_id)
+        embedding_text = str(existing_embedding["embedding"])
+
+    await ensure_pool().execute(
+        """
+        UPDATE memories
+        SET agent = $2,
+            content = $3,
+            embedding = $4::vector,
+            type = $5,
+            layer = $6,
+            importance = $7,
+            tags = $8,
+            metadata = $9::jsonb,
+            expires_at = $10
+        WHERE id = $1
+        """,
+        memory_id,
+        agent,
+        content,
+        embedding_text,
+        memory_type,
+        layer,
+        importance,
+        tags,
+        json.dumps(metadata),
+        expires_at,
+    )
+    updated = await find_memory_record(memory_id)
+    return {"updated": True, "memory": serialize_memory_record(updated)}
+
+
+async def prune_memory_data() -> dict:
+    return await prune_expired_memories()
+
+
+async def consolidate_memory_data(req: ConsolidateRequest) -> dict:
+    return await consolidate_agent_memories(req.agent)
+
+
+async def delete_memory_data(memory_id: str) -> dict:
+    await ensure_pool().execute("DELETE FROM memories WHERE id = $1", memory_id)
+    return {"deleted": memory_id}
+
+
+async def health_data():
+    try:
+        pool = ensure_pool()
+        count_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM memories")
+        ss_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM session_states")
+        collections = await fetch_agent_names()
+        return {
+            "status": "ok",
+            "memories": int(count_row["count"] or 0),
+            "collections": collections,
+            "session_states": int(ss_row["count"] or 0),
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def cognitive_status_data():
+    count = COGNITIVE_STATS["importance_count"]
+    avg_importance = (COGNITIVE_STATS["importance_total"] / count) if count > 0 else 0.0
+    return {
+        "enabled": cognition_enabled(),
+        "inference_url": COGNITION_INFERENCE_URL,
+        "stats": {
+            "total_facts_extracted": COGNITIVE_STATS["facts_extracted"],
+            "contradictions_detected": COGNITIVE_STATS["contradictions_detected"],
+            "average_importance_score": round(avg_importance, 4),
+        },
+    }
+
+
+async def reflect_data(req: ReflectRequest):
+    agent = (req.agent or "").strip()
+    if not agent and not req.collections:
+        return {"agent": "", "clusters": [], "count": 0, "total_memories_analyzed": 0}
+    pool = ensure_pool()
+    cutoff = utcnow() - timedelta(days=14)
+    collections = normalize_collection_names(req.collections) if req.collections else [sanitize_agent_name(agent)]
+    if not collections:
+        return {"agent": agent, "clusters": [], "count": 0, "total_memories_analyzed": 0}
+    experiences = await pool.fetch(
+        """
+        SELECT id, content, metadata, created_at, confidence, validation_count, embedding
+        FROM memories
+        WHERE agent = ANY($1::text[]) AND layer = 'experience' AND created_at >= $2
+        ORDER BY created_at DESC
+        """,
+        collections,
+        cutoff,
+    )
+    if len(experiences) < 3:
+        return {"agent": agent or collections[0], "clusters": [], "count": 0, "total_memories_analyzed": len(experiences)}
+
+    parent = list(range(len(experiences)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    id_to_idx = {row["id"]: idx for idx, row in enumerate(experiences)}
+    for idx, row in enumerate(experiences):
+        results = await pool.fetch(
+            """
+            SELECT id, 1 - (embedding <=> $2::vector) AS similarity
+            FROM memories
+            WHERE agent = ANY($1::text[]) AND layer = 'experience'
+            ORDER BY embedding <=> $2::vector
+            LIMIT $3
+            """,
+            collections,
+            row["embedding"],
+            len(experiences),
+        )
+        for other in results:
+            other_id = other["id"]
+            similarity = float(other["similarity"] or 0.0)
+            if other_id == row["id"] or other_id not in id_to_idx:
+                continue
+            if similarity > 0.80:
+                union(idx, id_to_idx[other_id])
+
+    grouped = {}
+    for idx in range(len(experiences)):
+        grouped.setdefault(find(idx), []).append(idx)
+
+    clusters = []
+    for members in grouped.values():
+        if len(members) < 3:
+            continue
+        cluster_memories = []
+        memory_ids = []
+        for i in members:
+            row = experiences[i]
+            memory_ids.append(row["id"])
+            cluster_memories.append(
+                {
+                    "id": row["id"],
+                    "content": row["content"],
+                    "timestamp": format_timestamp(row["created_at"]),
+                    "confidence": normalize_confidence(row["confidence"], "experience"),
+                    "validation_count": normalize_validation_count(row["validation_count"]),
+                }
+            )
+        synthesis_prompt = (
+            "Synthesize these related experiences into one reusable lesson with actionable steps. "
+            f"Memory IDs: {', '.join(memory_ids)}."
+        )
+        clusters.append({"size": len(cluster_memories), "members": cluster_memories, "suggested_synthesis_prompt": synthesis_prompt})
+
+    clusters.sort(key=lambda c: c["size"], reverse=True)
+    return {"agent": agent or collections[0], "clusters": clusters, "count": len(clusters), "total_memories_analyzed": len(experiences)}
 
 
 async def init_db():
@@ -1423,21 +2116,35 @@ def background_prune_loop():
 # --- Endpoints ---
 
 
+@app.get("/.well-known/a2m.json")
+async def a2m_capability_card():
+    return {
+        "a2m": "0.3",
+        "name": "seidr",
+        "description": "Cognitive memory system with fact extraction, contradiction detection, and cross-agent sharing",
+        "transport": {"jsonrpc": "2.0", "endpoint": "/a2m", "streaming": ["sse"], "content_type": "application/json"},
+        "auth": {"schemes": ["bearer", "none"], "agent_identity_binding": True},
+        "methods": ["memory/store", "memory/query", "memory/validate", "memory/reflect", "memory/lifecycle", "memory/status"],
+        "capabilities": {
+            "store": {"batch": True, "partial_success": True},
+            "query": {"semantic": True, "temporal": True, "multi_collection": True, "importance_ranking": True, "pagination": True},
+            "validate": True,
+            "reflect": True,
+            "lifecycle": {"ttl": True, "prune": True, "delete": True, "expire": True, "consolidate": True, "promote": True},
+            "cognitive": {"fact_extraction": True, "importance_scoring": True, "contradiction_detection": True, "relationship_extraction": True},
+            "sharing": {"scoped_collections": True, "auto_promotion": True, "write_tier_enforcement": True},
+        },
+        "limits": {"max_batch_size": 100, "max_content_length": 100000, "max_query_results": 100, "default_timeout_ms": 3000},
+        "constraints": {
+            "supported_types": ["general", "fact", "lesson", "observation", "failure", "recovery", "workflow", "soul_candidate"],
+            "embedding_dimensions": 384,
+        },
+    }
+
+
 @app.get("/health")
 async def health():
-    try:
-        pool = ensure_pool()
-        count_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM memories")
-        ss_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM session_states")
-        collections = await fetch_agent_names()
-        return {
-            "status": "ok",
-            "memories": int(count_row["count"] or 0),
-            "collections": collections,
-            "session_states": int(ss_row["count"] or 0),
-        }
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
+    return await health_data()
 
 
 @app.get("/collections")
@@ -1448,19 +2155,14 @@ async def list_collections():
         return {"collections": [], "error": str(e)}
 
 
+@app.get("/a2m/health")
+async def a2m_health():
+    return {"healthy": True, "a2m_version": "0.3", "provider": "seidr"}
+
+
 @app.get("/cognitive/status")
 async def cognitive_status():
-    count = COGNITIVE_STATS["importance_count"]
-    avg_importance = (COGNITIVE_STATS["importance_total"] / count) if count > 0 else 0.0
-    return {
-        "enabled": cognition_enabled(),
-        "inference_url": COGNITION_INFERENCE_URL,
-        "stats": {
-            "total_facts_extracted": COGNITIVE_STATS["facts_extracted"],
-            "contradictions_detected": COGNITIVE_STATS["contradictions_detected"],
-            "average_importance_score": round(avg_importance, 4),
-        },
-    }
+    return await cognitive_status_data()
 
 
 @app.get("/relationships")
@@ -1519,219 +2221,234 @@ async def co_access(agent: str, memory_id: str, limit: int = 10):
     return {"agent": sanitize_agent_name(agent), "memory_id": memory_id, "associations": items[:limit], "count": len(items[:limit])}
 
 
+@app.post("/a2m")
+async def a2m_dispatch(request: Request):
+    version = request.headers.get("A2M-Version")
+    if version is not None and parse_a2m_major_version(version) != 0:
+        return jsonrpc_error(-32050, "Unsupported A2M version")
+
+    request_id = None
+    try:
+        raw_body = await request.body()
+        if not raw_body:
+            return jsonrpc_error(-32700, "Parse error")
+        payload = json.loads(raw_body)
+    except Exception:
+        return jsonrpc_error(-32700, "Parse error")
+
+    if not isinstance(payload, dict):
+        return jsonrpc_error(-32600, "Invalid Request")
+
+    request_id = payload.get("id")
+    if payload.get("jsonrpc") != "2.0" or not isinstance(payload.get("method"), str):
+        return jsonrpc_error(-32600, "Invalid Request", request_id)
+
+    method = payload["method"]
+    params = payload.get("params") or {}
+    if not isinstance(params, dict):
+        return jsonrpc_error(-32600, "Invalid Request", request_id)
+
+    try:
+        if method == "memory/store":
+            store_params = A2MStoreParams.model_validate(params)
+            if len(store_params.memories) > 100:
+                return jsonrpc_error(-32600, "Invalid Request", request_id)
+            stored_results = []
+            for item in store_params.memories:
+                metadata = dict(item.metadata or {})
+                if item.scope is not None:
+                    metadata["scope"] = item.scope
+                if item.provenance is not None:
+                    metadata["provenance"] = item.provenance
+                tags = []
+                tags.extend(coerce_tag_list(metadata.pop("tags", None)))
+                tags.extend(item.tags or [])
+                tags = coerce_tag_list(tags)
+                remember_req = RememberRequest(
+                    agent=item.agent,
+                    content=item.content,
+                    type=item.type,
+                    shared=item.shared,
+                    metadata=metadata or None,
+                    tags=tags,
+                )
+                result = await remember_memory_data(remember_req)
+                memory = result.get("memory")
+                if memory is None and result.get("id"):
+                    stored_row = await find_memory_record(result["id"])
+                    memory = serialize_memory_record(stored_row) if stored_row else None
+                if memory is None and result.get("similar_to"):
+                    similar_row = await find_memory_record(result["similar_to"])
+                    memory = serialize_memory_record(similar_row) if similar_row else None
+                stored_results.append(
+                    {
+                        "id": result.get("id") or result.get("similar_to"),
+                        "status": "stored" if result.get("stored") else "deduplicated",
+                        "memory": memory,
+                        "cognitive": {
+                            "status": result.get("cognitive_status", "processed"),
+                            "facts_extracted": result.get("facts_extracted", 0),
+                            "contradictions_found": result.get("contradictions_found", 0),
+                            "auto_promoted": bool(result.get("auto_promoted", 0)),
+                        },
+                    }
+                )
+            return jsonrpc_result({"stored": stored_results}, request_id)
+
+        if method == "memory/query":
+            query_params = A2MQueryParams.model_validate(params)
+            limit = max(1, min(100, int(query_params.limit or 10)))
+            fetch_limit = max(1, min(100, max(limit * 3, limit)))
+            query_req = QueryRequest(
+                query=query_params.query,
+                agent=query_params.agent,
+                limit=fetch_limit,
+                collections=query_params.collections,
+                importance_weight=query_params.importance_weight,
+            )
+            if query_params.filters and query_params.filters.types:
+                types = [str(item).strip() for item in query_params.filters.types if str(item).strip()]
+                if len(types) == 1:
+                    query_req.type = types[0]
+            result = await query_memory_data(query_req)
+            threshold = query_params.similarity_threshold
+            filtered = []
+            for item in result["results"]:
+                if threshold is not None and float(item.get("similarity", 0.0)) < float(threshold):
+                    continue
+                memory = serialize_query_memory(item)
+                if query_params.filters:
+                    meta = item.get("metadata", {}) or {}
+                    if query_params.filters.min_importance is not None:
+                        importance = float(meta.get("importance", 0.0) or 0.0)
+                        if importance < float(query_params.filters.min_importance):
+                            continue
+                    if query_params.filters.types:
+                        allowed_types = {str(t).strip() for t in query_params.filters.types if str(t).strip()}
+                        if memory["type"] not in allowed_types:
+                            continue
+                    if query_params.filters.tags_any:
+                        memory_tags = set(coerce_tag_list(memory.get("tags", [])))
+                        requested_tags = {str(tag).strip() for tag in query_params.filters.tags_any if str(tag).strip()}
+                        if requested_tags and memory_tags.isdisjoint(requested_tags):
+                            continue
+                score_components = build_score_components(item)
+                filtered.append(
+                    {
+                        "memory": memory,
+                        "score": round(float(item.get("final_score", item.get("similarity", 0.0)) or 0.0), 4),
+                        "score_components": score_components,
+                    }
+                )
+            filtered.sort(key=lambda item: item["score_components"]["similarity"], reverse=True)
+            return jsonrpc_result({"results": filtered[:limit]}, request_id)
+
+        if method == "memory/validate":
+            validate_params = A2MValidateParams.model_validate(params)
+            validations = []
+            for item in validate_params.validations:
+                result = await validate_memory_data(ValidateRequest(memory_id=item.memory_id, outcome=item.outcome, context=item.context))
+                validations.append(
+                    {
+                        "memory_id": item.memory_id,
+                        "outcome": item.outcome,
+                        "updated": result.get("updated", False),
+                        "metadata": result.get("metadata"),
+                        "memory": result.get("memory"),
+                        "error": result.get("error"),
+                    }
+                )
+            return jsonrpc_result({"validations": validations}, request_id)
+
+        if method == "memory/reflect":
+            reflect_params = A2MReflectParams.model_validate(params)
+            result = await reflect_data(ReflectRequest(agent=reflect_params.agent, collections=reflect_params.collections))
+            return jsonrpc_result(
+                {
+                    "clusters": result.get("clusters", []),
+                    "total_memories_analyzed": result.get("total_memories_analyzed", 0),
+                    "agent": result.get("agent", reflect_params.agent),
+                },
+                request_id,
+            )
+
+        if method == "memory/lifecycle":
+            lifecycle = A2MLifecycleParams.model_validate(params)
+            action = (lifecycle.action or "").strip().lower()
+            memory_ids = lifecycle.memory_ids or ([lifecycle.memory_id] if lifecycle.memory_id else [])
+            if action == "prune":
+                return jsonrpc_result(await prune_memory_data(), request_id)
+            if action == "delete":
+                if not memory_ids:
+                    return jsonrpc_error(-32600, "Invalid Request", request_id)
+                deleted = []
+                for memory_id in memory_ids:
+                    try:
+                        deleted.append(await delete_memory_data(memory_id))
+                    except HTTPException as exc:
+                        deleted.append({"memory_id": memory_id, "error": exc.detail or "error"})
+                return jsonrpc_result({"deleted": deleted}, request_id)
+            if action == "expire":
+                if not memory_ids or not lifecycle.expires_at:
+                    return jsonrpc_error(-32600, "Invalid Request", request_id)
+                expired = []
+                for memory_id in memory_ids:
+                    try:
+                        expired.append(await update_memory_data(memory_id, UpdateMemoryRequest(expires_at=lifecycle.expires_at)))
+                    except HTTPException as exc:
+                        expired.append({"memory_id": memory_id, "error": exc.detail or "error"})
+                return jsonrpc_result({"expired": expired}, request_id)
+            if action == "consolidate":
+                consolidate_agent = lifecycle.agent or lifecycle.collection or lifecycle.target_collection
+                if not consolidate_agent:
+                    return jsonrpc_error(-32600, "Invalid Request", request_id)
+                return jsonrpc_result(await consolidate_memory_data(ConsolidateRequest(agent=consolidate_agent)), request_id)
+            if action == "promote":
+                if not memory_ids:
+                    return jsonrpc_error(-32600, "Invalid Request", request_id)
+                target_collection = lifecycle.collection or lifecycle.target_collection or lifecycle.agent
+                if not target_collection:
+                    return jsonrpc_error(-32600, "Invalid Request", request_id)
+                promoted = []
+                for memory_id in memory_ids:
+                    try:
+                        promoted.append(await update_memory_data(memory_id, UpdateMemoryRequest(collection=target_collection)))
+                    except HTTPException as exc:
+                        promoted.append({"memory_id": memory_id, "error": exc.detail or "error"})
+                return jsonrpc_result({"promoted": promoted}, request_id)
+            return jsonrpc_error(-32601, "Method not found", request_id)
+
+        if method == "memory/status":
+            health_result = await health_data()
+            cognitive_result = await cognitive_status_data()
+            uptime_seconds = max(0, int(time.time() - APP_START_TIME))
+            return jsonrpc_result(
+                {
+                    "healthy": health_result.get("status") == "ok",
+                    "memory_count": health_result.get("memories", 0),
+                    "collections": health_result.get("collections", []),
+                    "cognitive": cognitive_result,
+                    "uptime_seconds": uptime_seconds,
+                },
+                request_id,
+            )
+
+        return jsonrpc_error(-32601, "Method not found", request_id)
+    except HTTPException as exc:
+        return jsonrpc_error(-32600, "Invalid Request", request_id) if exc.status_code < 500 else jsonrpc_error(-32603, "Internal error", request_id)
+    except Exception as exc:
+        log("warn", "a2m dispatch failed", {"method": method, "error": str(exc)})
+        return jsonrpc_error(-32603, "Internal error", request_id)
+
+
 @app.post("/query")
 async def query(req: QueryRequest):
-    where = req.where.copy() if req.where else {}
-    if req.filter:
-        where.update(req.filter)
-    if req.type:
-        where["type"] = req.type
-    if req.layer:
-        where["layer"] = req.layer
-    if req.as_of:
-        as_of_dt = parse_iso_datetime(req.as_of)
-        if as_of_dt is not None:
-            where["as_of"] = as_of_dt
-    else:
-        as_of_dt = None
-    if not where:
-        where = None
-    query_embedding = None
-    if req.collections:
-        query_embedding = (await embed([req.query]))[0]
-        results = await run_hybrid_search_across_collections(
-            req.query,
-            req.collections,
-            limit=req.limit,
-            where=where,
-            query_embedding=query_embedding,
-        )
-    else:
-        results = await run_hybrid_search(req.query, limit=req.limit, agent=req.agent, where=where)
-    if as_of_dt is not None:
-        filtered = []
-        for item in results:
-            meta = item.get("metadata", {}) or {}
-            valid_until = parse_iso_datetime(meta.get("valid_until"))
-            if valid_until is not None and valid_until < as_of_dt:
-                continue
-            filtered.append(item)
-        results = filtered
-    weight = max(0.0, min(1.0, float(req.importance_weight or 0.0)))
-    if weight > 0.0:
-        for item in results:
-            meta = item.get("metadata", {}) or {}
-            importance = normalize_confidence(meta.get("importance"), normalize_layer(meta.get("layer")))
-            similarity_score = float(item.get("similarity", 0.0))
-            final_score = (1.0 - weight) * similarity_score + weight * importance
-            item["final_score"] = round(final_score, 4)
-        results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-        results = results[: req.limit]
-    if req.agent:
-        asyncio.create_task(log_memory_access(req.agent, req.query, [item["id"] for item in results if item.get("id")]))
-    return {"results": results, "count": len(results)}
+    return await query_memory_data(req)
 
 
 @app.post("/remember")
 async def remember(req: RememberRequest):
-    memory_type = resolve_memory_type(req)
-    source_layer = normalize_layer(req.layer)
-    agent = sanitize_agent_name(req.agent)
-    target_collection = "warband_shared" if req.shared else agent
-
-    def base_metadata(layer_override: Optional[str] = None) -> dict:
-        layer = normalize_layer(layer_override or source_layer)
-        metadata = {
-            "agent": req.agent,
-            "source": req.source,
-            "timestamp": format_timestamp(),
-            "tags": ",".join(req.tags) if req.tags else "",
-            "type": memory_type,
-            "layer": layer,
-            "confidence": normalize_confidence(req.confidence, layer),
-            "source_ids": normalize_source_ids(req.source_ids),
-            "validation_count": normalize_validation_count(req.validation_count),
-        }
-        if req.metadata:
-            metadata.update(req.metadata)
-        metadata["layer"] = normalize_layer(metadata.get("layer"))
-        metadata["confidence"] = normalize_confidence(metadata.get("confidence"), metadata["layer"])
-        metadata["source_ids"] = normalize_source_ids(metadata.get("source_ids"))
-        metadata["validation_count"] = normalize_validation_count(metadata.get("validation_count"))
-        metadata["tags"] = metadata.get("tags", "")
-        return metadata
-
-    async def store_one(
-        content: str,
-        metadata: dict,
-        check_contradiction: bool,
-        collection_agent: str = target_collection,
-        embedding_text: Optional[str] = None,
-    ):
-        collection_agent = sanitize_agent_name(collection_agent)
-        if embedding_text is None:
-            embedding_values = (await embed([content]))[0]
-            embedding_text = vector_literal(embedding_values)
-        duplicate_rows = await fetch_similar_for_dedup(collection_agent, memory_type, embedding_text, limit=3)
-        for row in duplicate_rows:
-            similarity = float(row["similarity"] or 0.0)
-            existing_meta = safe_metadata(row["metadata"])
-            if existing_meta.get("type", "general") == memory_type and similarity > 0.92:
-                log("info", "memory deduplicated", {"agent": req.agent, "collection": collection_agent, "similar_to": row["id"]})
-                return None, row["id"]
-
-        contradictions = []
-        if check_contradiction:
-            contradictions = await detect_fact_contradictions(collection_agent, content, embedding_text)
-
-        stored_id = await store_memory_row(
-            agent=collection_agent,
-            content=content,
-            metadata=metadata,
-            memory_type=memory_type,
-            layer=normalize_layer(metadata.get("layer")),
-            importance=float(metadata.get("importance", 0.5)),
-            confidence=normalize_confidence(metadata.get("confidence"), normalize_layer(metadata.get("layer"))),
-            scope=str(metadata.get("scope", "session")).strip().lower() or "session",
-            source=str(metadata.get("source", req.source)),
-            tags=str(metadata.get("tags", "")),
-            source_ids=normalize_source_ids(metadata.get("source_ids")),
-            validation_count=normalize_validation_count(metadata.get("validation_count")),
-            embedding_text=embedding_text,
-        )
-        if contradictions:
-            await apply_contradictions(stored_id, contradictions)
-        return stored_id, None
-
-    async def auto_promote_shared_fact(content: str, metadata: dict, embedding_text: str):
-        try:
-            promoted_id, duplicate_id = await store_one(
-                content,
-                metadata,
-                check_contradiction=False,
-                collection_agent="warband_shared",
-                embedding_text=embedding_text,
-            )
-            if promoted_id is None:
-                log("info", "shared memory deduplicated", {"agent": req.agent, "similar_to": duplicate_id})
-            else:
-                log("info", "memory auto-promoted", {"agent": req.agent, "id": promoted_id})
-        except Exception as e:
-            log("warn", "shared auto-promotion failed", {"agent": req.agent, "error": str(e)})
-
-    if not cognition_enabled():
-        metadata = base_metadata()
-        stored_id, similar_to = await store_one(req.content, metadata, check_contradiction=False)
-        if stored_id is None:
-            return {"id": None, "stored": False, "reason": "duplicate", "similar_to": similar_to}
-        log("info", "memory stored", {"agent": req.agent, "id": stored_id, "tags": req.tags})
-        return {"id": stored_id, "stored": True}
-
-    if len(req.content or "") > 100:
-        facts = await extract_atomic_facts(req.content)
-        force_experience_layer = True
-    else:
-        facts = [req.content]
-        force_experience_layer = False
-
-    stored_ids = []
-    duplicate_hits = []
-    for fact in [f.strip() for f in facts if (f or "").strip()]:
-        fact_meta = base_metadata("experience" if force_experience_layer else source_layer)
-        embedding_values = (await embed([fact]))[0]
-        embedding_text = vector_literal(embedding_values)
-        importance_task = score_importance(fact)
-        contradictions_task = detect_fact_contradictions(target_collection, fact, embedding_text)
-        relationships_task = extract_relationships(fact, target_collection)
-        importance_scope, contradictions, _ = await asyncio.gather(
-            importance_task,
-            contradictions_task,
-            relationships_task,
-            return_exceptions=True,
-        )
-        if isinstance(importance_scope, Exception):
-            log("warn", "importance scoring failed", {"agent": agent, "error": str(importance_scope)})
-            importance_scope = (0.5, "session")
-        if isinstance(contradictions, Exception):
-            log("warn", "contradiction detection failed", {"agent": agent, "error": str(contradictions)})
-            contradictions = []
-        importance, scope = importance_scope
-        fact_meta["importance"] = round(importance, 4)
-        fact_meta["scope"] = scope
-        fact_meta["layer"] = "experience" if force_experience_layer else normalize_layer(fact_meta.get("layer"))
-        COGNITIVE_STATS["importance_total"] += float(importance)
-        COGNITIVE_STATS["importance_count"] += 1
-
-        duplicate_rows = await fetch_similar_for_dedup(target_collection, memory_type, embedding_text, limit=3)
-        duplicate_id = None
-        for row in duplicate_rows:
-            similarity = float(row["similarity"] or 0.0)
-            existing_meta = safe_metadata(row["metadata"])
-            if existing_meta.get("type", "general") == memory_type and similarity > 0.92:
-                duplicate_id = row["id"]
-                break
-        if duplicate_id:
-            log("info", "memory deduplicated", {"agent": req.agent, "collection": target_collection, "similar_to": duplicate_id})
-            duplicate_hits.append(duplicate_id)
-            continue
-
-        stored_id, duplicate_id = await store_one(fact, fact_meta, check_contradiction=True, collection_agent=target_collection, embedding_text=embedding_text)
-        if stored_id is None:
-            if duplicate_id:
-                duplicate_hits.append(duplicate_id)
-            continue
-        stored_ids.append(stored_id)
-        log("info", "memory stored", {"agent": req.agent, "id": stored_id, "tags": req.tags, "layer": fact_meta.get("layer")})
-        if not req.shared and importance > 0.7 and scope == "universal":
-            shared_meta = dict(fact_meta)
-            shared_meta["auto_promoted"] = True
-            shared_meta["source_agent"] = req.agent
-            shared_meta["agent"] = req.agent
-            asyncio.create_task(auto_promote_shared_fact(fact, shared_meta, embedding_text))
-
-    if not stored_ids:
-        return {"id": None, "stored": False, "reason": "duplicate", "similar_to": duplicate_hits[0] if duplicate_hits else None}
-    return {"id": stored_ids[0], "ids": stored_ids, "stored": True, "facts_stored": len(stored_ids)}
+    return await remember_memory_data(req)
 
 
 @app.post("/session-state")
@@ -1837,195 +2554,22 @@ async def list_shared_memories(limit: int = 100, offset: int = 0):
 
 @app.patch("/memories/{memory_id}")
 async def update_memory(memory_id: str, req: UpdateMemoryRequest):
-    row = await find_memory_record(memory_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="memory not found")
-    if req.type is not None and req.type not in MEMORY_TYPES:
-        raise HTTPException(status_code=400, detail="invalid memory type")
-    if req.layer is not None and req.layer not in COGNITIVE_LAYERS:
-        raise HTTPException(status_code=400, detail="invalid cognitive layer")
-    if req.importance is not None and not (0.0 <= float(req.importance) <= 1.0):
-        raise HTTPException(status_code=400, detail="importance must be between 0.0 and 1.0")
-
-    content = row["content"]
-    memory_type = row["type"]
-    layer = row["layer"]
-    importance = float(row["importance"] or 0.5)
-    tags = row["tags"] or ""
-    embedding_text = None
-    expires_at = row["expires_at"]
-    metadata = row_to_metadata(row)
-
-    if req.content is not None:
-        content = req.content
-        embedding_values = (await embed([content]))[0]
-        embedding_text = vector_literal(embedding_values)
-        metadata["content_updated_at"] = format_timestamp()
-    if req.type is not None:
-        memory_type = req.type
-        metadata["type"] = req.type
-    if req.layer is not None:
-        layer = req.layer
-        expires_at = expires_at_for_layer(layer)
-        metadata["layer"] = req.layer
-    if req.importance is not None:
-        importance = max(0.0, min(1.0, float(req.importance)))
-        metadata["importance"] = round(importance, 4)
-    if req.tags is not None:
-        tags = req.tags
-        metadata["tags"] = req.tags
-
-    metadata["updated_at"] = format_timestamp()
-    if embedding_text is None:
-        existing_embedding = await ensure_pool().fetchrow("SELECT embedding FROM memories WHERE id = $1", memory_id)
-        embedding_text = str(existing_embedding["embedding"])
-
-    await ensure_pool().execute(
-        """
-        UPDATE memories
-        SET content = $2,
-            embedding = $3::vector,
-            type = $4,
-            layer = $5,
-            importance = $6,
-            tags = $7,
-            metadata = $8::jsonb,
-            expires_at = $9
-        WHERE id = $1
-        """,
-        memory_id,
-        content,
-        embedding_text,
-        memory_type,
-        layer,
-        importance,
-        tags,
-        json.dumps(metadata),
-        expires_at,
-    )
-    updated = await find_memory_record(memory_id)
-    return {"updated": True, "memory": memory_row_to_result(updated)}
+    return await update_memory_data(memory_id, req)
 
 
 @app.post("/prune")
 async def prune():
-    return await prune_expired_memories()
+    return await prune_memory_data()
 
 
 @app.post("/validate")
 async def validate_memory(req: ValidateRequest):
-    row = await find_memory_record(req.memory_id)
-    if not row:
-        return {"updated": False, "error": "memory not found"}
-    meta = row_to_metadata(row)
-    current_conf = normalize_confidence(meta.get("confidence"), normalize_layer(meta.get("layer")))
-    current_validations = normalize_validation_count(meta.get("validation_count"))
-    if req.outcome == "success":
-        current_validations += 1
-        current_conf = min(1.0, current_conf + 0.1)
-    else:
-        current_conf = max(0.0, current_conf - 0.2)
-    meta["validation_count"] = current_validations
-    meta["confidence"] = round(current_conf, 4)
-    await ensure_pool().execute(
-        """
-        UPDATE memories
-        SET validation_count = $2, confidence = $3, metadata = $4::jsonb
-        WHERE id = $1
-        """,
-        req.memory_id,
-        current_validations,
-        current_conf,
-        json.dumps(meta),
-    )
-    return {"updated": True, "memory_id": req.memory_id, "metadata": meta}
+    return await validate_memory_data(req)
 
 
 @app.post("/reflect")
 async def reflect(req: ReflectRequest):
-    agent = (req.agent or "").strip()
-    if not agent:
-        return {"agent": "", "clusters": [], "count": 0}
-    pool = ensure_pool()
-    cutoff = utcnow() - timedelta(days=14)
-    experiences = await pool.fetch(
-        """
-        SELECT id, content, metadata, created_at, confidence, validation_count, embedding
-        FROM memories
-        WHERE agent = $1 AND layer = 'experience' AND created_at >= $2
-        ORDER BY created_at DESC
-        """,
-        sanitize_agent_name(agent),
-        cutoff,
-    )
-    if len(experiences) < 3:
-        return {"agent": agent, "clusters": [], "count": 0}
-
-    parent = list(range(len(experiences)))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    id_to_idx = {row["id"]: idx for idx, row in enumerate(experiences)}
-    for idx, row in enumerate(experiences):
-        results = await pool.fetch(
-            """
-            SELECT id, 1 - (embedding <=> $2::vector) AS similarity
-            FROM memories
-            WHERE agent = $1 AND layer = 'experience'
-            ORDER BY embedding <=> $2::vector
-            LIMIT $3
-            """,
-            sanitize_agent_name(agent),
-            row["embedding"],
-            len(experiences),
-        )
-        for other in results:
-            other_id = other["id"]
-            similarity = float(other["similarity"] or 0.0)
-            if other_id == row["id"] or other_id not in id_to_idx:
-                continue
-            if similarity > 0.80:
-                union(idx, id_to_idx[other_id])
-
-    grouped = {}
-    for idx in range(len(experiences)):
-        grouped.setdefault(find(idx), []).append(idx)
-
-    clusters = []
-    for members in grouped.values():
-        if len(members) < 3:
-            continue
-        cluster_memories = []
-        memory_ids = []
-        for i in members:
-            row = experiences[i]
-            memory_ids.append(row["id"])
-            cluster_memories.append(
-                {
-                    "id": row["id"],
-                    "content": row["content"],
-                    "timestamp": format_timestamp(row["created_at"]),
-                    "confidence": normalize_confidence(row["confidence"], "experience"),
-                    "validation_count": normalize_validation_count(row["validation_count"]),
-                }
-            )
-        synthesis_prompt = (
-            "Synthesize these related experiences into one reusable lesson with actionable steps. "
-            f"Memory IDs: {', '.join(memory_ids)}."
-        )
-        clusters.append({"size": len(cluster_memories), "members": cluster_memories, "suggested_synthesis_prompt": synthesis_prompt})
-
-    clusters.sort(key=lambda c: c["size"], reverse=True)
-    return {"agent": agent, "clusters": clusters, "count": len(clusters)}
+    return await reflect_data(req)
 
 
 @app.post("/migrate")
@@ -2035,13 +2579,12 @@ async def migrate(req: MigrateRequest):
 
 @app.post("/consolidate")
 async def consolidate(req: ConsolidateRequest):
-    return await consolidate_agent_memories(req.agent)
+    return await consolidate_memory_data(req)
 
 
 @app.delete("/memories/{memory_id}")
 async def delete_memory(memory_id: str):
-    await ensure_pool().execute("DELETE FROM memories WHERE id = $1", memory_id)
-    return {"deleted": memory_id}
+    return await delete_memory_data(memory_id)
 
 
 @app.post("/ingest")
