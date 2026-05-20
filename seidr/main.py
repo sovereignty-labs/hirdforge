@@ -45,6 +45,7 @@ DB_POOL = None
 EMBED_MODEL = None
 MAIN_LOOP = None
 APP_START_TIME = time.time()
+AUDIT_CHAIN_LOCK_KEY = 424242
 
 SCHEMA_STATEMENTS = [
     "CREATE EXTENSION IF NOT EXISTS vector;",
@@ -124,6 +125,21 @@ SCHEMA_STATEMENTS = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_access_agent ON access_log(agent, accessed_at DESC);",
+    """
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        agent TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        memory_id TEXT NOT NULL,
+        collection TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        prev_hash TEXT NOT NULL,
+        chain_hash TEXT NOT NULL
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_chain ON audit_log(chain_hash);",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_agent ON audit_log(agent);",
 ]
 
 
@@ -322,6 +338,46 @@ def resolve_memory_type(req: RememberRequest) -> str:
     if req.metadata and req.metadata.get("type") in MEMORY_TYPES:
         return req.metadata["type"]
     return req.type
+
+
+def sha256_hex(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def compute_chain_hash(prev_hash, agent, operation, memory_id, content, timestamp_str):
+    content_hash = sha256_hex(content)
+    payload = "|".join(
+        [
+            str(prev_hash or ""),
+            str(agent or ""),
+            str(operation or ""),
+            str(memory_id or ""),
+            content_hash,
+            str(timestamp_str or ""),
+        ]
+    )
+    return sha256_hex(payload)
+
+
+def compute_chain_hash_from_content_hash(prev_hash, agent, operation, memory_id, content_hash, timestamp_str):
+    payload = "|".join(
+        [
+            str(prev_hash or ""),
+            str(agent or ""),
+            str(operation or ""),
+            str(memory_id or ""),
+            str(content_hash or ""),
+            str(timestamp_str or ""),
+        ]
+    )
+    return sha256_hex(payload)
+
+
+def schedule_audit_log(agent: str, operation: str, memory_id: str, collection: str, content: str):
+    try:
+        asyncio.create_task(append_audit_log(agent, operation, memory_id, collection, content))
+    except Exception as e:
+        log("warn", "audit log scheduling failed", {"agent": agent, "operation": operation, "memory_id": memory_id, "error": str(e)})
 
 
 def normalize_layer(value: Optional[str]) -> str:
@@ -978,6 +1034,7 @@ async def validate_memory_data(req: ValidateRequest):
         json.dumps(meta),
     )
     updated = await find_memory_record(req.memory_id)
+    schedule_audit_log(row["agent"], "update", req.memory_id, row["agent"], row["content"])
     return {"updated": True, "memory_id": req.memory_id, "metadata": meta, "memory": serialize_memory_record(updated) if updated else None}
 
 
@@ -1061,6 +1118,10 @@ async def update_memory_data(memory_id: str, req: UpdateMemoryRequest):
         expires_at,
     )
     updated = await find_memory_record(memory_id)
+    if updated:
+        schedule_audit_log(updated["agent"], "update", memory_id, updated["agent"], updated["content"])
+        if req.collection is not None and sanitize_agent_name(req.collection) == "warband_shared":
+            schedule_audit_log(updated["agent"], "promote", memory_id, sanitize_agent_name(req.collection), updated["content"])
     return {"updated": True, "memory": serialize_memory_record(updated)}
 
 
@@ -1073,7 +1134,10 @@ async def consolidate_memory_data(req: ConsolidateRequest) -> dict:
 
 
 async def delete_memory_data(memory_id: str) -> dict:
+    row = await find_memory_record(memory_id)
     await ensure_pool().execute("DELETE FROM memories WHERE id = $1", memory_id)
+    if row:
+        schedule_audit_log(row["agent"], "delete", memory_id, row["agent"], row["content"])
     return {"deleted": memory_id}
 
 
@@ -1667,6 +1731,7 @@ async def apply_contradictions(new_id: str, contradictions: list[tuple[str, str]
     pool = ensure_pool()
     now = utcnow()
     for old_id, explanation in contradictions:
+        old_row = await pool.fetchrow("SELECT agent, content FROM memories WHERE id = $1", old_id)
         await pool.execute(
             """
             UPDATE memories
@@ -1692,6 +1757,8 @@ async def apply_contradictions(new_id: str, contradictions: list[tuple[str, str]
             explanation or None,
             format_timestamp(now),
         )
+        if old_row:
+            schedule_audit_log(old_row["agent"], "update", old_id, old_row["agent"], old_row["content"])
         COGNITIVE_STATS["contradictions_detected"] += 1
 
 
@@ -1710,6 +1777,44 @@ async def detect_fact_contradictions(agent: str, fact: str, embedding_text: str)
         if contradicts:
             contradictions.append((old_id, explanation))
     return contradictions
+
+
+async def append_audit_log(agent: str, operation: str, memory_id: str, collection: str, content: str):
+    try:
+        pool = ensure_pool()
+        timestamp_dt = utcnow()
+        timestamp_str = format_timestamp(timestamp_dt)
+        content_hash = sha256_hex(content)
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", AUDIT_CHAIN_LOCK_KEY)
+                prev_row = await conn.fetchrow("SELECT chain_hash FROM audit_log ORDER BY id DESC LIMIT 1")
+                prev_hash = prev_row["chain_hash"] if prev_row else "genesis"
+                chain_hash = compute_chain_hash_from_content_hash(
+                    prev_hash,
+                    agent,
+                    operation,
+                    memory_id,
+                    content_hash,
+                    timestamp_str,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO audit_log (
+                        timestamp, agent, operation, memory_id, collection, content_hash, prev_hash, chain_hash
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    """,
+                    timestamp_dt,
+                    str(agent or ""),
+                    str(operation or ""),
+                    str(memory_id or ""),
+                    str(collection or ""),
+                    content_hash,
+                    prev_hash,
+                    chain_hash,
+                )
+    except Exception as e:
+        log("warn", "audit log append failed", {"agent": agent, "operation": operation, "memory_id": memory_id, "error": str(e)})
 
 
 async def store_memory_row(
@@ -1757,6 +1862,7 @@ async def store_memory_row(
         expires_at,
         utcnow(),
     )
+    schedule_audit_log(sanitize_agent_name(agent), "store", doc_id, sanitize_agent_name(agent), content)
     return doc_id
 
 
@@ -1778,18 +1884,20 @@ async def iter_agent_entries(agent: str):
 
 async def prune_expired_memories() -> dict:
     pool = ensure_pool()
-    pruned_row = await pool.fetchrow(
+    deleted_rows = await pool.fetch(
         """
         WITH deleted AS (
             DELETE FROM memories
             WHERE expires_at IS NOT NULL AND expires_at < NOW()
-            RETURNING id
+            RETURNING id, agent, content
         )
-        SELECT COUNT(*) AS pruned FROM deleted
+        SELECT id, agent, content FROM deleted
         """
     )
+    for row in deleted_rows:
+        schedule_audit_log(row["agent"], "delete", row["id"], row["agent"], row["content"])
     remaining_row = await pool.fetchrow("SELECT COUNT(*) AS remaining FROM memories")
-    return {"pruned": int(pruned_row["pruned"] or 0), "remaining": int(remaining_row["remaining"] or 0)}
+    return {"pruned": len(deleted_rows), "remaining": int(remaining_row["remaining"] or 0)}
 
 
 async def consolidate_agent_memories(agent: str) -> dict:
@@ -1894,6 +2002,9 @@ async def consolidate_agent_memories(agent: str) -> dict:
                         expires_at,
                         utcnow(),
                     )
+            for item in cluster_items:
+                schedule_audit_log(item["agent"], "delete", item["id"], item["agent"], item["content"])
+            schedule_audit_log(sanitize_agent_name(agent), "store", new_id, sanitize_agent_name(agent), merged_content)
             consolidated += 1
 
     remaining_row = await pool.fetchrow("SELECT COUNT(*) AS remaining FROM memories WHERE agent = $1", sanitize_agent_name(agent))
@@ -2056,7 +2167,7 @@ async def migrate_from_chromadb_once(req: MigrateFromChromaRequest):
                 metadata["agent"] = raw_agent
                 if "timestamp" not in metadata:
                     metadata["timestamp"] = format_timestamp()
-                await pool.execute(
+                result = await pool.execute(
                     """
                     INSERT INTO memories (
                         id, agent, content, embedding, type, layer, importance, confidence, scope,
@@ -2088,6 +2199,8 @@ async def migrate_from_chromadb_once(req: MigrateFromChromaRequest):
                     parse_iso_datetime(metadata.get("timestamp")) or utcnow(),
                     expires_at_for_layer(layer),
                 )
+                if str(result).endswith("1"):
+                    schedule_audit_log(agent, "store", str(doc_id), agent, document or "")
                 migrated += 1
     return {"migrated": migrated}
 
@@ -2158,6 +2271,76 @@ async def list_collections():
 @app.get("/a2m/health")
 async def a2m_health():
     return {"healthy": True, "a2m_version": "0.3", "provider": "seidr"}
+
+@app.get("/audit/verify")
+async def verify_audit_log():
+    pool = ensure_pool()
+    rows = await pool.fetch(
+        """
+        SELECT id, timestamp, agent, operation, memory_id, collection, content_hash, prev_hash, chain_hash
+        FROM audit_log
+        ORDER BY id ASC
+        """
+    )
+    prev_hash = "genesis"
+    for row in rows:
+        timestamp_str = format_timestamp(row["timestamp"]) if row["timestamp"] else ""
+        expected = compute_chain_hash_from_content_hash(
+            prev_hash,
+            row["agent"],
+            row["operation"],
+            row["memory_id"],
+            row["content_hash"],
+            timestamp_str,
+        )
+        if expected != row["chain_hash"]:
+            return {"valid": False, "break_at": row["id"], "entries": len(rows)}
+        prev_hash = row["chain_hash"]
+    return {"valid": True, "entries": len(rows)}
+
+
+@app.get("/audit/log")
+async def list_audit_log(agent: Optional[str] = None, limit: int = 100):
+    pool = ensure_pool()
+    limit = max(1, min(int(limit), 500))
+    if agent:
+        rows = await pool.fetch(
+            """
+            SELECT id, timestamp, agent, operation, memory_id, collection, content_hash, prev_hash, chain_hash
+            FROM audit_log
+            WHERE agent = $1
+            ORDER BY id DESC
+            LIMIT $2
+            """,
+            sanitize_agent_name(agent),
+            limit,
+        )
+    else:
+        rows = await pool.fetch(
+            """
+            SELECT id, timestamp, agent, operation, memory_id, collection, content_hash, prev_hash, chain_hash
+            FROM audit_log
+            ORDER BY id DESC
+            LIMIT $1
+            """,
+            limit,
+        )
+    entries = []
+    for row in rows:
+        entries.append(
+            {
+                "id": row["id"],
+                "timestamp": format_timestamp(row["timestamp"]) if row["timestamp"] else "",
+                "agent": row["agent"],
+                "operation": row["operation"],
+                "memory_id": row["memory_id"],
+                "collection": row["collection"],
+                "content_hash": row["content_hash"],
+                "prev_hash": row["prev_hash"],
+                "chain_hash": row["chain_hash"],
+            }
+        )
+    return {"entries": entries, "count": len(entries), "agent": sanitize_agent_name(agent) if agent else None, "limit": limit}
 
 
 @app.get("/cognitive/status")
@@ -2642,6 +2825,7 @@ async def ingest(req: IngestRequest):
                 expires_at_for_layer("experience"),
                 utcnow(),
             )
+            schedule_audit_log("ingest", "store", doc_id, "ingest", chunk)
             total += 1
     log("info", "ingestion complete", {"files": len(files), "chunks": total})
     return {"status": "ok", "files": len(files), "chunks": total}
