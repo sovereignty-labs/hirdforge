@@ -1234,7 +1234,7 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 			reg.Register(toolpkg.NewListIssuesTool(giteaTool))
 			reg.Register(toolpkg.NewCloseIssueTool(giteaTool))
 			reg.Register(toolpkg.NewCommentTool(giteaTool))
-			reg.Register(toolpkg.NewCreateReviewTool(giteaTool))
+			reg.Register(toolpkg.NewCreateReviewTool(giteaTool, deps.memoryURL, deps.agentName))
 			reg.Register(toolpkg.NewMergePRTool(giteaTool))
 			reg.Register(toolpkg.NewListPRFilesTool(giteaTool))
 			reg.Register(toolpkg.NewUpdateLabelsTool(giteaTool))
