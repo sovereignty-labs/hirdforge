@@ -92,6 +92,7 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);",
     "CREATE INDEX IF NOT EXISTS idx_memories_tsv ON memories USING gin(tsv);",
     "CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);",
+    "ALTER TABLE memories ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;",
     """
     CREATE TABLE IF NOT EXISTS session_states (
         id TEXT PRIMARY KEY,
@@ -163,6 +164,7 @@ class QueryRequest(BaseModel):
     as_of: Optional[str] = None
     filter: Optional[dict] = None
     where: Optional[dict] = None
+    deleted: Optional[str] = None
 
 
 class RememberRequest(BaseModel):
@@ -230,7 +232,7 @@ class A2MMemoryCreate(BaseModel):
     type: Literal["general", "failure", "recovery", "lesson", "fact", "observation"] = "general"
     scope: Optional[str] = None
     shared: bool = False
-    provenance: Optional[str] = None
+    provenance: Optional[dict] = None
     metadata: Optional[dict] = None
     tags: Optional[list[str]] = None
 
@@ -243,6 +245,7 @@ class A2MQueryFilters(BaseModel):
     types: Optional[list[str]] = None
     min_importance: Optional[float] = None
     tags_any: Optional[list[str]] = None
+    deleted: Optional[str] = None
 
 
 class A2MQueryParams(BaseModel):
@@ -686,6 +689,10 @@ def serialize_memory_record(row) -> dict:
         return None
     meta = row_to_metadata(row)
     tags = coerce_tag_list(meta.get("tags", ""))
+    source = meta.get("source", row["source"])
+    source_uri = meta.get("source_uri", None)
+    source_ids = json.loads(meta.get("source_ids", "[]")) if isinstance(meta.get("source_ids"), str) else meta.get("source_ids", json.loads(row["source_ids"] or "[]"))
+    provenance = {"source": source, "source_uri": source_uri, "source_ids": source_ids}
     return {
         "id": row["id"],
         "agent": row["agent"],
@@ -696,7 +703,8 @@ def serialize_memory_record(row) -> dict:
         "confidence": float(row["confidence"] or 0.0),
         "scope": row["scope"],
         "tags": tags,
-        "source": row["source"],
+        "source": source,
+        "provenance": provenance,
         "metadata": meta,
         "source_ids": meta.get("source_ids", row["source_ids"] or "[]"),
         "validation_count": int(row["validation_count"] or 0),
@@ -707,11 +715,16 @@ def serialize_memory_record(row) -> dict:
         "valid_until": format_timestamp(row["valid_until"]) if row["valid_until"] else None,
         "superseded_by": row["superseded_by"],
         "supersede_reason": row["supersede_reason"],
+        "deleted_at": format_timestamp(row["deleted_at"]) if row.get("deleted_at") else None,
     }
 
 
 def serialize_query_memory(item: dict) -> dict:
     meta = item.get("metadata", {}) or {}
+    source = meta.get("source", "")
+    source_uri = meta.get("source_uri", None)
+    source_ids = json.loads(meta.get("source_ids", "[]")) if isinstance(meta.get("source_ids"), str) else meta.get("source_ids", "[]")
+    provenance = {"source": source, "source_uri": source_uri, "source_ids": source_ids}
     return {
         "id": item.get("id"),
         "agent": meta.get("agent", ""),
@@ -722,7 +735,8 @@ def serialize_query_memory(item: dict) -> dict:
         "confidence": float(meta.get("confidence", 0.0) or 0.0),
         "scope": meta.get("scope", "session"),
         "tags": coerce_tag_list(meta.get("tags", "")),
-        "source": meta.get("source", ""),
+        "source": source,
+        "provenance": provenance,
         "metadata": meta,
         "source_ids": meta.get("source_ids", "[]"),
         "validation_count": int(meta.get("validation_count", 0) or 0),
@@ -762,6 +776,8 @@ async def query_memory_data(req: QueryRequest):
         where["type"] = req.type
     if req.layer:
         where["layer"] = req.layer
+    if req.deleted:
+        where["deleted"] = req.deleted
     if req.as_of:
         as_of_dt = parse_iso_datetime(req.as_of)
         if as_of_dt is not None:
@@ -1169,10 +1185,19 @@ async def consolidate_memory_data(req: ConsolidateRequest) -> dict:
 
 async def delete_memory_data(memory_id: str) -> dict:
     row = await find_memory_record(memory_id)
-    await ensure_pool().execute("DELETE FROM memories WHERE id = $1", memory_id)
-    if row:
-        schedule_audit_log(row["agent"], "delete", memory_id, row["agent"], row["content"])
-    return {"deleted": memory_id}
+    if row is None:
+        return {"deleted": False, "error": "memory not found"}
+    existing_deleted = row.get("deleted_at")
+    if existing_deleted:
+        return {"deleted": True, "deleted_at": format_timestamp(existing_deleted)}
+    await ensure_pool().execute(
+        "UPDATE memories SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+        memory_id,
+    )
+    updated = await find_memory_record(memory_id)
+    deleted_at = format_timestamp(updated["deleted_at"]) if updated and updated.get("deleted_at") else None
+    schedule_audit_log(row["agent"], "delete", memory_id, row["agent"], row["content"])
+    return {"deleted": True, "deleted_at": deleted_at}
 
 
 async def health_data():
@@ -1490,8 +1515,8 @@ async def find_memory_record(memory_id: str):
     return await pool.fetchrow(
         """
         SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source,
-               metadata, superseded_by, supersede_reason, valid_until, source_ids,
-               validation_count, created_at, expires_at, access_count, last_accessed
+              metadata, superseded_by, supersede_reason, valid_until, source_ids,
+              validation_count, created_at, expires_at, access_count, last_accessed, deleted_at
         FROM memories
         WHERE id = $1
         """,
@@ -1513,6 +1538,7 @@ async def list_memories_for_agent(
                metadata, superseded_by, supersede_reason, valid_until, source_ids,
                validation_count, created_at, expires_at, access_count, last_accessed
         FROM memories
+        WHERE deleted_at IS NULL
     """
     conditions = []
     params = []
@@ -1593,6 +1619,13 @@ async def run_hybrid_search(
         where_clauses.append(f"agent = ${idx}")
         params.append(sanitize_agent_name(agent))
         idx += 1
+    deleted_mode = filters.get("deleted") if filters else None
+    if deleted_mode == "only":
+        where_clauses.append("deleted_at IS NOT NULL")
+    elif deleted_mode == "include":
+        pass
+    else:
+        where_clauses.append("deleted_at IS NULL")
     if filters.get("type"):
         where_clauses.append(f"type = ${idx}")
         params.append(filters["type"])
@@ -1618,7 +1651,7 @@ async def run_hybrid_search(
     vector_sql = f"""
         SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source, metadata,
                superseded_by, supersede_reason, valid_until, source_ids, validation_count,
-               created_at, expires_at, access_count, last_accessed,
+               created_at, expires_at, access_count, last_accessed, deleted_at,
                1 - (embedding <=> ${idx}::vector) AS vector_score
         FROM memories
         WHERE {where_sql}
@@ -1909,7 +1942,7 @@ async def iter_agent_entries(agent: str):
                validation_count, created_at, expires_at, access_count, last_accessed,
                embedding
         FROM memories
-        WHERE agent = $1
+        WHERE agent = $1 AND deleted_at IS NULL
         ORDER BY created_at DESC
         """,
         sanitize_agent_name(agent),
@@ -2624,8 +2657,21 @@ async def a2m_dispatch(request: Request):
                 metadata = dict(item.metadata or {})
                 if item.scope is not None:
                     metadata["scope"] = item.scope
-                if item.provenance is not None:
-                    metadata["provenance"] = item.provenance
+                provenance = item.provenance
+                if provenance is not None:
+                    if isinstance(provenance, dict):
+                        source_val = provenance.get("source")
+                        if source_val is not None:
+                            metadata["source"] = str(source_val)
+                        source_uri_val = provenance.get("source_uri")
+                        if source_uri_val is not None:
+                            metadata["source_uri"] = str(source_uri_val)
+                        source_ids_val = provenance.get("source_ids", [])
+                        if isinstance(source_ids_val, list):
+                            metadata["source_ids"] = json.dumps(source_ids_val)
+                        metadata["provenance"] = provenance
+                    else:
+                        metadata["provenance"] = provenance
                 tags = []
                 tags.extend(coerce_tag_list(metadata.pop("tags", None)))
                 tags.extend(item.tags or [])
@@ -2672,6 +2718,8 @@ async def a2m_dispatch(request: Request):
                 collections=query_params.collections,
                 importance_weight=query_params.importance_weight,
             )
+            if query_params.filters and query_params.filters.deleted:
+                query_req.deleted = query_params.filters.deleted
             if query_params.filters and query_params.filters.types:
                 types = [str(item).strip() for item in query_params.filters.types if str(item).strip()]
                 if len(types) == 1:
@@ -2762,12 +2810,17 @@ async def a2m_dispatch(request: Request):
                 if not memory_ids:
                     return jsonrpc_error(-32600, "Invalid Request", request_id)
                 deleted = []
+                failed = []
                 for memory_id in memory_ids:
                     try:
-                        deleted.append(await delete_memory_data(memory_id))
+                        result = await delete_memory_data(memory_id)
+                        if result.get("error"):
+                            failed.append({"memory_id": memory_id, "error": result.get("error", "error")})
+                        else:
+                            deleted.append({"memory_id": memory_id, "deleted_at": result.get("deleted_at")})
                     except HTTPException as exc:
-                        deleted.append({"memory_id": memory_id, "error": exc.detail or "error"})
-                return jsonrpc_result({"deleted": deleted}, request_id)
+                        failed.append({"memory_id": memory_id, "error": exc.detail or "error"})
+                return jsonrpc_result({"action": "delete", "deleted": deleted, "failed": failed}, request_id)
             if action == "expire":
                 if not memory_ids or not lifecycle.expires_at:
                     return jsonrpc_error(-32600, "Invalid Request", request_id)
