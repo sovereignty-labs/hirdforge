@@ -163,6 +163,9 @@ class _MCPASGIApp:
             return
 
         path = (scope.get("path") or "").rstrip("/") or "/"
+        root = (scope.get("root_path") or "").rstrip("/")
+        if root and path.startswith(root):
+            path = path[len(root):] or "/"
         method = scope.get("method", "GET").upper()
 
         if method == "GET" and path == "/sse":
