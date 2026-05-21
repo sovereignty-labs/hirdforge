@@ -181,7 +181,7 @@ class RememberRequest(BaseModel):
 
 class ValidateRequest(BaseModel):
     memory_id: str
-    outcome: Literal["success", "contradiction"]
+    outcome: Literal["confirmed", "contradicted", "irrelevant"]
     context: Optional[dict] = None
 
 
@@ -578,6 +578,8 @@ def row_to_metadata(row) -> dict:
     meta["tags"] = meta.get("tags", row["tags"] or "")
     meta["source_ids"] = meta.get("source_ids", row["source_ids"] or "[]")
     meta["validation_count"] = meta.get("validation_count", row["validation_count"])
+    meta["contradiction_count"] = meta.get("contradiction_count", 0)
+    meta["irrelevant_count"] = meta.get("irrelevant_count", 0)
     if row["valid_until"] is not None:
         meta["valid_until"] = format_timestamp(row["valid_until"])
     if row["superseded_by"]:
@@ -1030,13 +1032,20 @@ async def validate_memory_data(req: ValidateRequest):
     meta = row_to_metadata(row)
     current_conf = normalize_confidence(meta.get("confidence"), normalize_layer(meta.get("layer")))
     current_validations = normalize_validation_count(meta.get("validation_count"))
-    if req.outcome == "success":
+    current_contradictions = int(meta.get("contradiction_count", 0) or 0)
+    current_irrelevant = int(meta.get("irrelevant_count", 0) or 0)
+    if req.outcome == "confirmed":
         current_validations += 1
         current_conf = min(1.0, current_conf + 0.1)
-    else:
+    elif req.outcome == "contradicted":
+        current_contradictions += 1
         current_conf = max(0.0, current_conf - 0.2)
+    else:
+        current_irrelevant += 1
     meta["validation_count"] = current_validations
     meta["confidence"] = round(current_conf, 4)
+    meta["contradiction_count"] = current_contradictions
+    meta["irrelevant_count"] = current_irrelevant
     if req.context:
         meta["validation_context"] = req.context
     await ensure_pool().execute(
@@ -1052,7 +1061,15 @@ async def validate_memory_data(req: ValidateRequest):
     )
     updated = await find_memory_record(req.memory_id)
     schedule_audit_log(row["agent"], "update", req.memory_id, row["agent"], row["content"])
-    return {"updated": True, "memory_id": req.memory_id, "metadata": meta, "memory": serialize_memory_record(updated) if updated else None}
+    return {
+        "updated": True,
+        "memory_id": req.memory_id,
+        "metadata": meta,
+        "memory": serialize_memory_record(updated) if updated else None,
+        "validation_count": current_validations,
+        "contradiction_count": current_contradictions,
+        "irrelevant_count": current_irrelevant,
+    }
 
 
 async def update_memory_data(memory_id: str, req: UpdateMemoryRequest):
@@ -2642,7 +2659,7 @@ async def a2m_dispatch(request: Request):
                         },
                     }
                 )
-            return jsonrpc_result({"stored": stored_results}, request_id)
+            return jsonrpc_result({"stored": stored_results, "failed": []}, request_id)
 
         if method == "memory/query":
             query_params = A2MQueryParams.model_validate(params)
@@ -2695,8 +2712,20 @@ async def a2m_dispatch(request: Request):
         if method == "memory/validate":
             validate_params = A2MValidateParams.model_validate(params)
             validations = []
-            for item in validate_params.validations:
-                result = await validate_memory_data(ValidateRequest(memory_id=item.memory_id, outcome=item.outcome, context=item.context))
+            failed = []
+            for index, item in enumerate(validate_params.validations):
+                result = await validate_memory_data(
+                    ValidateRequest(memory_id=item.memory_id, outcome=item.outcome, context=item.context)
+                )
+                if result.get("error"):
+                    failed.append(
+                        {
+                            "index": index,
+                            "memory_id": item.memory_id,
+                            "error": {"code": -32046, "message": "Memory not found"},
+                        }
+                    )
+                    continue
                 validations.append(
                     {
                         "memory_id": item.memory_id,
@@ -2704,10 +2733,12 @@ async def a2m_dispatch(request: Request):
                         "updated": result.get("updated", False),
                         "metadata": result.get("metadata"),
                         "memory": result.get("memory"),
-                        "error": result.get("error"),
+                        "validation_count": result.get("validation_count", 0),
+                        "contradiction_count": result.get("contradiction_count", 0),
+                        "irrelevant_count": result.get("irrelevant_count", 0),
                     }
                 )
-            return jsonrpc_result({"validations": validations}, request_id)
+            return jsonrpc_result({"validations": validations, "failed": failed}, request_id)
 
         if method == "memory/reflect":
             reflect_params = A2MReflectParams.model_validate(params)
@@ -2771,12 +2802,19 @@ async def a2m_dispatch(request: Request):
             health_result = await health_data()
             cognitive_result = await cognitive_status_data()
             uptime_seconds = max(0, int(time.time() - APP_START_TIME))
+            cognitive = {
+                "available": bool(cognitive_result.get("enabled", False)),
+                "queue_depth": 0,
+                "processed_total": int(cognitive_result.get("stats", {}).get("total_facts_extracted", 0) or 0),
+                "errors_total": 0,
+                "last_processed_at": None,
+            }
             return jsonrpc_result(
                 {
                     "healthy": health_result.get("status") == "ok",
                     "memory_count": health_result.get("memories", 0),
                     "collections": health_result.get("collections", []),
-                    "cognitive": cognitive_result,
+                    "cognitive": cognitive,
                     "uptime_seconds": uptime_seconds,
                 },
                 request_id,
