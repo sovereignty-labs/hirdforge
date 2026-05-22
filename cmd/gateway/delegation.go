@@ -20,7 +20,7 @@ import (
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)
 
-var controlTokenRE = regexp.MustCompile(`<function=[^>]*>[\s\S]*?</function>|</?function(?:=[^>]*)?>|</?parameter(?:=[^>]*)?>|call:\w+\{[^}]*\}(?:thought\b)?|\}thought\b|</?\|[^>]*>|<\w+\|>|</?(?:thought|channel|start_of_turn|end_of_turn|tool_call|tool_response)\b[^>]*>?`)
+var controlTokenRE = regexp.MustCompile(`<function=[^>]*>[\s\S]*?</function>|</?function(?:=[^>]*)?>|</?parameter(?:=[^>]*)?>|</?call\b[^>]*>?|\bcall:\w+\{[^}]*\}(?:thought\b)?|\}thought\b|</?\|[^>]*>|<\w+\|>|</?(?:thought|channel|start_of_turn|end_of_turn|tool_call|tool_response)\b[^>]*>?`)
 
 var (
 	taskPRURLRE   = regexp.MustCompile(`/pulls/(\d+)\b`)
@@ -868,6 +868,7 @@ func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Cli
 			return true
 		}
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+			log.Printf("proxyMessageSSE: SSE write failed for %s (session %s): %v — draining and closing", agentName, sessionID, err)
 			return false
 		}
 		flusher.Flush()
@@ -875,9 +876,10 @@ func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Cli
 	}
 	forwardReplaceIfNeeded := func() bool {
 		raw := contentBuf.String()
-		cleaned := thinkTagRE.ReplaceAllString(raw, "")
-		if cleaned != raw && cleaned != "" {
-			if !forward(map[string]interface{}{"type": "replace", "content": cleaned, "done": false}) {
+		// Strip both think blocks (structural) and control tokens (model syntax)
+		stripped := thinkTagRE.ReplaceAllString(controlTokenRE.ReplaceAllString(raw, ""), "")
+		if stripped != "" && stripped != strings.TrimSpace(raw) {
+			if !forward(map[string]interface{}{"type": "replace", "content": stripped, "done": false}) {
 				return false
 			}
 		}

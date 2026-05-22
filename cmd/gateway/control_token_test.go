@@ -68,6 +68,41 @@ func TestControlTokenREStripsGemmaCallFormat(t *testing.T) {
 			in:   "<parameter=q>hello</parameter>",
 			want: "hello",
 		},
+		{
+			name: "pipe-delimited tool_call tags with call body are fully stripped",
+			in:   "<|tool_call|>call:task_status{task_id:abc-123}<tool_call|>",
+			want: "",
+		},
+		{
+			name: "channel prefix form is stripped, prefix content remains",
+			in:   "<|channel|>/thought ordinary text",
+			want: "/thought ordinary text",
+		},
+		{
+			name: "bare call tags are stripped, inner text preserved",
+			in:   "text <call>hello world</call> more text",
+			want: "text hello world more text",
+		},
+		{
+			name: "gemma compound call with pipe wrappers and params is fully stripped",
+			in:   "<|tool_call|>call:name{params}<tool_call|> actual content",
+			want: " actual content",
+		},
+		{
+			name: "nested tool_call and tool_response tags stripped, outer content preserved",
+			in:   "<tool_call>exec</tool_call>the command ran<tool_response>done</tool_response>",
+			want: "execthe command randone",
+		},
+		{
+			name: "tool_response with pipe wrappers and content stripped cleanly",
+			in:   "<tool_response>result</tool_response> meaningful output <|tool_response|>",
+			want: "result meaningful output ",
+		},
+		{
+			name: "control tokens at start and end of content are stripped cleanly",
+			in:   "<|channel|>start of message<tool_response|>",
+			want: "start of message",
+		},
 	}
 
 	for _, tc := range cases {
