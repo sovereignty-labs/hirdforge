@@ -3087,7 +3087,7 @@ async def ingest(req: IngestRequest):
         for i, (chunk, embedding_values) in enumerate(zip(chunks, embeddings)):
             doc_id = f"doc-{os.path.basename(filepath)}-{i}"
             metadata = {
-                "agent": "ingest",
+                "agent": "sovereign",
                 "source": filepath,
                 "timestamp": format_timestamp(),
                 "tags": "documentation",
@@ -3114,7 +3114,7 @@ async def ingest(req: IngestRequest):
                     tags = EXCLUDED.tags
                 """,
                 doc_id,
-                sanitize_agent_name("ingest"),
+                sanitize_agent_name("sovereign"),
                 chunk,
                 vector_literal(embedding_values),
                 "general",

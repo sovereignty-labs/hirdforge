@@ -53,7 +53,7 @@ def _build_mcp_server() -> FastMCP:
                     "query": message,
                     "agent": agent,
                     "limit": 3,
-                    "collections": [agent, "warband_shared"],
+                    "collections": [agent, "sovereign", "warband_shared"],
                 },
             )
             results = [item for item in data.get("results", []) if float(item.get("similarity", 0.0)) > 0.55]
