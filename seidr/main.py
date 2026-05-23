@@ -92,6 +92,7 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);",
     "CREATE INDEX IF NOT EXISTS idx_memories_tsv ON memories USING gin(tsv);",
     "CREATE INDEX IF NOT EXISTS idx_memories_embedding ON memories USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);",
+    "ALTER TABLE memories ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;",
     """
     CREATE TABLE IF NOT EXISTS session_states (
         id TEXT PRIMARY KEY,
@@ -155,6 +156,7 @@ class QueryRequest(BaseModel):
     agent: Optional[str] = None
     limit: int = 5
     collections: Optional[list[str]] = None
+    deleted: Literal["exclude", "include", "only"] = "exclude"
     similarity_threshold: Optional[float] = None
     cursor: Optional[str] = None
     type: Optional[Literal["general", "failure", "recovery", "lesson", "fact", "observation"]] = None
@@ -230,7 +232,7 @@ class A2MMemoryCreate(BaseModel):
     type: Literal["general", "failure", "recovery", "lesson", "fact", "observation"] = "general"
     scope: Optional[str] = None
     shared: bool = False
-    provenance: Optional[str] = None
+    provenance: Optional[dict] = None
     metadata: Optional[dict] = None
     tags: Optional[list[str]] = None
 
@@ -243,6 +245,7 @@ class A2MQueryFilters(BaseModel):
     types: Optional[list[str]] = None
     min_importance: Optional[float] = None
     tags_any: Optional[list[str]] = None
+    deleted: Literal["exclude", "include", "only"] = "exclude"
 
 
 class A2MQueryParams(BaseModel):
@@ -258,7 +261,7 @@ class A2MQueryParams(BaseModel):
 
 class A2MValidationItem(BaseModel):
     memory_id: str
-    outcome: Literal["success", "contradiction"]
+    outcome: Literal["confirmed", "contradicted", "irrelevant"]
     context: Optional[dict] = None
 
 
@@ -427,6 +430,25 @@ def normalize_source_ids(value: Optional[str]) -> str:
     if isinstance(value, list):
         return json.dumps(value)
     return "[]"
+
+
+def parse_source_ids_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+        return [stripped]
+    return []
 
 
 def normalize_validation_count(value: Optional[int]) -> int:
@@ -681,12 +703,20 @@ def memory_recency_score(meta: dict) -> float:
     return max(0.0, min(1.0, 1.0 - (age_days / 30.0)))
 
 
-def serialize_memory_record(row) -> dict:
+def build_serialized_provenance(row, meta: dict) -> dict:
+    return {
+        "source": meta.get("source", row["source"]),
+        "source_uri": meta.get("source_uri", None),
+        "source_ids": parse_source_ids_list(meta.get("source_ids", row["source_ids"] or "[]")),
+    }
+
+
+def serialize_memory_record(row, include_a2m_fields: bool = False) -> dict:
     if row is None:
         return None
     meta = row_to_metadata(row)
     tags = coerce_tag_list(meta.get("tags", ""))
-    return {
+    payload = {
         "id": row["id"],
         "agent": row["agent"],
         "content": row["content"],
@@ -696,9 +726,9 @@ def serialize_memory_record(row) -> dict:
         "confidence": float(row["confidence"] or 0.0),
         "scope": row["scope"],
         "tags": tags,
-        "source": row["source"],
+        "source": meta.get("source", row["source"]),
         "metadata": meta,
-        "source_ids": meta.get("source_ids", row["source_ids"] or "[]"),
+        "source_ids": normalize_source_ids(meta.get("source_ids", row["source_ids"] or "[]")),
         "validation_count": int(row["validation_count"] or 0),
         "created_at": format_timestamp(row["created_at"]) if row["created_at"] else "",
         "expires_at": format_timestamp(row["expires_at"]) if row["expires_at"] else None,
@@ -708,11 +738,15 @@ def serialize_memory_record(row) -> dict:
         "superseded_by": row["superseded_by"],
         "supersede_reason": row["supersede_reason"],
     }
+    if include_a2m_fields:
+        payload["provenance"] = build_serialized_provenance(row, meta)
+        payload["deleted_at"] = format_timestamp(row["deleted_at"]) if row.get("deleted_at") else None
+    return payload
 
 
-def serialize_query_memory(item: dict) -> dict:
+def serialize_query_memory(item: dict, include_a2m_fields: bool = False) -> dict:
     meta = item.get("metadata", {}) or {}
-    return {
+    payload = {
         "id": item.get("id"),
         "agent": meta.get("agent", ""),
         "content": item.get("content", ""),
@@ -724,7 +758,7 @@ def serialize_query_memory(item: dict) -> dict:
         "tags": coerce_tag_list(meta.get("tags", "")),
         "source": meta.get("source", ""),
         "metadata": meta,
-        "source_ids": meta.get("source_ids", "[]"),
+        "source_ids": normalize_source_ids(meta.get("source_ids", "[]")),
         "validation_count": int(meta.get("validation_count", 0) or 0),
         "created_at": meta.get("timestamp", ""),
         "expires_at": meta.get("expires_at"),
@@ -734,6 +768,14 @@ def serialize_query_memory(item: dict) -> dict:
         "superseded_by": meta.get("superseded_by"),
         "supersede_reason": meta.get("supersede_reason"),
     }
+    if include_a2m_fields:
+        payload["provenance"] = {
+            "source": meta.get("source", ""),
+            "source_uri": meta.get("source_uri", None),
+            "source_ids": parse_source_ids_list(meta.get("source_ids", "[]")),
+        }
+        payload["deleted_at"] = meta.get("deleted_at")
+    return payload
 
 
 def build_score_components(item: dict) -> dict:
@@ -762,6 +804,8 @@ async def query_memory_data(req: QueryRequest):
         where["type"] = req.type
     if req.layer:
         where["layer"] = req.layer
+    if req.deleted:
+        where["deleted"] = req.deleted
     if req.as_of:
         as_of_dt = parse_iso_datetime(req.as_of)
         if as_of_dt is not None:
@@ -809,7 +853,7 @@ async def query_memory_data(req: QueryRequest):
     return {"results": results, "count": len(results)}
 
 
-async def remember_memory_data(req: RememberRequest):
+async def remember_memory_data(req: RememberRequest, include_a2m_fields: bool = False):
     memory_type = resolve_memory_type(req)
     source_layer = normalize_layer(req.layer)
     agent = sanitize_agent_name(req.agent)
@@ -910,7 +954,7 @@ async def remember_memory_data(req: RememberRequest):
                 "stored": False,
                 "reason": "duplicate",
                 "similar_to": similar_to,
-                "memory": serialize_memory_record(row) if row else None,
+                "memory": serialize_memory_record(row, include_a2m_fields=include_a2m_fields) if row else None,
                 "facts_extracted": facts_extracted,
                 "contradictions_found": contradictions_found,
                 "auto_promoted": auto_promoted,
@@ -921,7 +965,7 @@ async def remember_memory_data(req: RememberRequest):
         return {
             "id": stored_id,
             "stored": True,
-            "memory": serialize_memory_record(row) if row else None,
+            "memory": serialize_memory_record(row, include_a2m_fields=include_a2m_fields) if row else None,
             "facts_extracted": facts_extracted,
             "contradictions_found": contradictions_found,
             "auto_promoted": auto_promoted,
@@ -1005,7 +1049,7 @@ async def remember_memory_data(req: RememberRequest):
             "stored": False,
             "reason": "duplicate",
             "similar_to": duplicate_hits[0] if duplicate_hits else None,
-            "memory": serialize_memory_record(await find_memory_record(duplicate_hits[0])) if duplicate_hits else None,
+            "memory": serialize_memory_record(await find_memory_record(duplicate_hits[0]), include_a2m_fields=include_a2m_fields) if duplicate_hits else None,
             "facts_extracted": facts_extracted,
             "contradictions_found": contradictions_found,
             "auto_promoted": auto_promoted,
@@ -1017,7 +1061,7 @@ async def remember_memory_data(req: RememberRequest):
         "ids": stored_ids,
         "stored": True,
         "facts_stored": len(stored_ids),
-        "memory": serialize_memory_record(row) if row else None,
+        "memory": serialize_memory_record(row, include_a2m_fields=include_a2m_fields) if row else None,
         "facts_extracted": facts_extracted,
         "contradictions_found": contradictions_found,
         "auto_promoted": auto_promoted,
@@ -1025,7 +1069,7 @@ async def remember_memory_data(req: RememberRequest):
     }
 
 
-async def validate_memory_data(req: ValidateRequest):
+async def validate_memory_data(req: ValidateRequest, include_a2m_fields: bool = False):
     row = await find_memory_record(req.memory_id)
     if not row:
         return {"updated": False, "error": "memory not found"}
@@ -1065,7 +1109,7 @@ async def validate_memory_data(req: ValidateRequest):
         "updated": True,
         "memory_id": req.memory_id,
         "metadata": meta,
-        "memory": serialize_memory_record(updated) if updated else None,
+        "memory": serialize_memory_record(updated, include_a2m_fields=include_a2m_fields) if updated else None,
         "validation_count": current_validations,
         "contradiction_count": current_contradictions,
         "irrelevant_count": current_irrelevant,
@@ -1168,11 +1212,28 @@ async def consolidate_memory_data(req: ConsolidateRequest) -> dict:
 
 
 async def delete_memory_data(memory_id: str) -> dict:
-    row = await find_memory_record(memory_id)
-    await ensure_pool().execute("DELETE FROM memories WHERE id = $1", memory_id)
-    if row:
+    row = await find_memory_record(memory_id, include_deleted=True)
+    if row is None:
+        return {"deleted": False, "error": "memory not found"}
+    existing_deleted = row.get("deleted_at")
+    if existing_deleted:
+        return {"deleted": True, "deleted_at": format_timestamp(existing_deleted)}
+    updated = await ensure_pool().fetchrow(
+        """
+        UPDATE memories
+        SET deleted_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING deleted_at
+        """,
+        memory_id,
+    )
+    if updated is None:
+        refreshed = await find_memory_record(memory_id, include_deleted=True)
+        deleted_at = format_timestamp(refreshed["deleted_at"]) if refreshed and refreshed.get("deleted_at") else None
+    else:
+        deleted_at = format_timestamp(updated["deleted_at"]) if updated.get("deleted_at") else None
         schedule_audit_log(row["agent"], "delete", memory_id, row["agent"], row["content"])
-    return {"deleted": memory_id}
+    return {"deleted": True, "deleted_at": deleted_at}
 
 
 async def health_data():
@@ -1218,7 +1279,7 @@ async def reflect_data(req: ReflectRequest):
         """
         SELECT id, content, metadata, created_at, confidence, validation_count, embedding
         FROM memories
-        WHERE agent = ANY($1::text[]) AND layer = 'experience' AND created_at >= $2
+        WHERE agent = ANY($1::text[]) AND layer = 'experience' AND created_at >= $2 AND deleted_at IS NULL
         ORDER BY created_at DESC
         """,
         collections,
@@ -1246,7 +1307,7 @@ async def reflect_data(req: ReflectRequest):
             """
             SELECT id, 1 - (embedding <=> $2::vector) AS similarity
             FROM memories
-            WHERE agent = ANY($1::text[]) AND layer = 'experience'
+            WHERE agent = ANY($1::text[]) AND layer = 'experience' AND deleted_at IS NULL
             ORDER BY embedding <=> $2::vector
             LIMIT $3
             """,
@@ -1485,16 +1546,17 @@ async def fetch_agent_names() -> list[str]:
     return [row["agent"] for row in rows]
 
 
-async def find_memory_record(memory_id: str):
+async def find_memory_record(memory_id: str, include_deleted: bool = False):
     pool = ensure_pool()
+    deleted_clause = "" if include_deleted else " AND deleted_at IS NULL"
     return await pool.fetchrow(
         """
         SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source,
-               metadata, superseded_by, supersede_reason, valid_until, source_ids,
-               validation_count, created_at, expires_at, access_count, last_accessed
+              metadata, superseded_by, supersede_reason, valid_until, source_ids,
+              validation_count, created_at, expires_at, access_count, last_accessed, deleted_at
         FROM memories
         WHERE id = $1
-        """,
+        """ + deleted_clause,
         memory_id,
     )
 
@@ -1504,6 +1566,7 @@ async def list_memories_for_agent(
     limit: int = 100,
     memory_type: Optional[str] = None,
     offset: int = 0,
+    deleted: Literal["exclude", "include", "only"] = "exclude",
 ):
     pool = ensure_pool()
     limit = max(1, int(limit))
@@ -1511,12 +1574,16 @@ async def list_memories_for_agent(
     sql = """
         SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source,
                metadata, superseded_by, supersede_reason, valid_until, source_ids,
-               validation_count, created_at, expires_at, access_count, last_accessed
+               validation_count, created_at, expires_at, access_count, last_accessed, deleted_at
         FROM memories
     """
     conditions = []
     params = []
     idx = 1
+    if deleted == "only":
+        conditions.append("deleted_at IS NOT NULL")
+    elif deleted != "include":
+        conditions.append("deleted_at IS NULL")
     if agent:
         conditions.append(f"agent = ${idx}")
         params.append(sanitize_agent_name(agent))
@@ -1593,6 +1660,13 @@ async def run_hybrid_search(
         where_clauses.append(f"agent = ${idx}")
         params.append(sanitize_agent_name(agent))
         idx += 1
+    deleted_mode = filters.get("deleted") if filters else None
+    if deleted_mode == "only":
+        where_clauses.append("deleted_at IS NOT NULL")
+    elif deleted_mode == "include":
+        pass
+    else:
+        where_clauses.append("deleted_at IS NULL")
     if filters.get("type"):
         where_clauses.append(f"type = ${idx}")
         params.append(filters["type"])
@@ -1606,7 +1680,7 @@ async def run_hybrid_search(
         params.append(filters["as_of"])
         idx += 1
     for key, value in filters.items():
-        if key in {"type", "layer", "as_of"}:
+        if key in {"type", "layer", "as_of", "deleted"}:
             continue
         if value is None:
             continue
@@ -1618,7 +1692,7 @@ async def run_hybrid_search(
     vector_sql = f"""
         SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source, metadata,
                superseded_by, supersede_reason, valid_until, source_ids, validation_count,
-               created_at, expires_at, access_count, last_accessed,
+               created_at, expires_at, access_count, last_accessed, deleted_at,
                1 - (embedding <=> ${idx}::vector) AS vector_score
         FROM memories
         WHERE {where_sql}
@@ -1732,7 +1806,7 @@ async def fetch_similar_for_dedup(agent: str, memory_type: str, embedding_text: 
         """
         SELECT id, metadata, 1 - (embedding <=> $2::vector) AS similarity
         FROM memories
-        WHERE agent = $1 AND type = $3
+        WHERE agent = $1 AND type = $3 AND deleted_at IS NULL
         ORDER BY embedding <=> $2::vector
         LIMIT $4
         """,
@@ -1749,7 +1823,7 @@ async def fetch_similar_for_contradiction(agent: str, embedding_text: str, limit
         """
         SELECT id, content, metadata, 1 - (embedding <=> $2::vector) AS similarity
         FROM memories
-        WHERE agent = $1
+        WHERE agent = $1 AND deleted_at IS NULL
         ORDER BY embedding <=> $2::vector
         LIMIT $3
         """,
@@ -1906,10 +1980,10 @@ async def iter_agent_entries(agent: str):
         """
         SELECT id, agent, content, type, layer, importance, confidence, scope, tags, source,
                metadata, superseded_by, supersede_reason, valid_until, source_ids,
-               validation_count, created_at, expires_at, access_count, last_accessed,
+               validation_count, created_at, expires_at, access_count, last_accessed, deleted_at,
                embedding
         FROM memories
-        WHERE agent = $1
+        WHERE agent = $1 AND deleted_at IS NULL
         ORDER BY created_at DESC
         """,
         sanitize_agent_name(agent),
@@ -2298,7 +2372,7 @@ async def compute_memory_health(agent: str) -> dict:
                metadata, superseded_by, supersede_reason, valid_until, source_ids,
                validation_count, created_at, expires_at, access_count, last_accessed, embedding
         FROM memories
-        WHERE agent = $1
+        WHERE agent = $1 AND deleted_at IS NULL
         ORDER BY created_at DESC
         """,
         agent_name,
@@ -2359,7 +2433,7 @@ async def compute_memory_health(agent: str) -> dict:
                 """
                 SELECT 1 - (embedding <=> $2::vector) AS similarity
                 FROM memories
-                WHERE agent = $1 AND id <> $3
+                WHERE agent = $1 AND id <> $3 AND deleted_at IS NULL
                 ORDER BY embedding <=> $2::vector
                 LIMIT 1
                 """,
@@ -2426,7 +2500,7 @@ async def health():
 async def agent_memory_health(agent_name: str):
     agent = sanitize_agent_name(agent_name)
     pool = ensure_pool()
-    count_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM memories WHERE agent = $1", agent)
+    count_row = await pool.fetchrow("SELECT COUNT(*) AS count FROM memories WHERE agent = $1 AND deleted_at IS NULL", agent)
     total_memories = int(count_row["count"] or 0)
     try:
         health = await asyncio.wait_for(compute_memory_health(agent), timeout=5.0)
@@ -2624,28 +2698,43 @@ async def a2m_dispatch(request: Request):
                 metadata = dict(item.metadata or {})
                 if item.scope is not None:
                     metadata["scope"] = item.scope
-                if item.provenance is not None:
-                    metadata["provenance"] = item.provenance
+                source_val = None
+                source_ids_val = None
+                provenance = item.provenance
+                if provenance is not None:
+                    if isinstance(provenance, dict):
+                        source_val = provenance.get("source")
+                        if source_val is not None:
+                            metadata["source"] = str(source_val)
+                        source_uri_val = provenance.get("source_uri")
+                        if source_uri_val is not None:
+                            metadata["source_uri"] = str(source_uri_val)
+                        source_ids_val = provenance.get("source_ids")
                 tags = []
                 tags.extend(coerce_tag_list(metadata.pop("tags", None)))
                 tags.extend(item.tags or [])
                 tags = coerce_tag_list(tags)
-                remember_req = RememberRequest(
-                    agent=item.agent,
-                    content=item.content,
-                    type=item.type,
-                    shared=item.shared,
-                    metadata=metadata or None,
-                    tags=tags,
-                )
-                result = await remember_memory_data(remember_req)
+                remember_kwargs = {
+                    "agent": item.agent,
+                    "content": item.content,
+                    "type": item.type,
+                    "shared": item.shared,
+                    "metadata": metadata or None,
+                    "tags": tags,
+                }
+                if source_val is not None:
+                    remember_kwargs["source"] = str(source_val)
+                if source_ids_val is not None:
+                    remember_kwargs["source_ids"] = json.dumps(parse_source_ids_list(source_ids_val))
+                remember_req = RememberRequest(**remember_kwargs)
+                result = await remember_memory_data(remember_req, include_a2m_fields=True)
                 memory = result.get("memory")
                 if memory is None and result.get("id"):
                     stored_row = await find_memory_record(result["id"])
-                    memory = serialize_memory_record(stored_row) if stored_row else None
+                    memory = serialize_memory_record(stored_row, include_a2m_fields=True) if stored_row else None
                 if memory is None and result.get("similar_to"):
                     similar_row = await find_memory_record(result["similar_to"])
-                    memory = serialize_memory_record(similar_row) if similar_row else None
+                    memory = serialize_memory_record(similar_row, include_a2m_fields=True) if similar_row else None
                 stored_results.append(
                     {
                         "id": result.get("id") or result.get("similar_to"),
@@ -2672,6 +2761,8 @@ async def a2m_dispatch(request: Request):
                 collections=query_params.collections,
                 importance_weight=query_params.importance_weight,
             )
+            if query_params.filters and query_params.filters.deleted:
+                query_req.deleted = query_params.filters.deleted
             if query_params.filters and query_params.filters.types:
                 types = [str(item).strip() for item in query_params.filters.types if str(item).strip()]
                 if len(types) == 1:
@@ -2682,7 +2773,7 @@ async def a2m_dispatch(request: Request):
             for item in result["results"]:
                 if threshold is not None and float(item.get("similarity", 0.0)) < float(threshold):
                     continue
-                memory = serialize_query_memory(item)
+                memory = serialize_query_memory(item, include_a2m_fields=True)
                 if query_params.filters:
                     meta = item.get("metadata", {}) or {}
                     if query_params.filters.min_importance is not None:
@@ -2715,7 +2806,8 @@ async def a2m_dispatch(request: Request):
             failed = []
             for index, item in enumerate(validate_params.validations):
                 result = await validate_memory_data(
-                    ValidateRequest(memory_id=item.memory_id, outcome=item.outcome, context=item.context)
+                    ValidateRequest(memory_id=item.memory_id, outcome=item.outcome, context=item.context),
+                    include_a2m_fields=True,
                 )
                 if result.get("error"):
                     failed.append(
@@ -2762,12 +2854,21 @@ async def a2m_dispatch(request: Request):
                 if not memory_ids:
                     return jsonrpc_error(-32600, "Invalid Request", request_id)
                 deleted = []
+                failed = []
                 for memory_id in memory_ids:
                     try:
-                        deleted.append(await delete_memory_data(memory_id))
+                        result = await delete_memory_data(memory_id)
+                        if result.get("error"):
+                            failed.append({"memory_id": memory_id, "error": result.get("error", "error")})
+                        else:
+                            deleted_at = result.get("deleted_at")
+                            if not deleted_at:
+                                refreshed = await find_memory_record(memory_id, include_deleted=True)
+                                deleted_at = format_timestamp(refreshed["deleted_at"]) if refreshed and refreshed.get("deleted_at") else None
+                            deleted.append({"memory_id": memory_id, "deleted_at": deleted_at})
                     except HTTPException as exc:
-                        deleted.append({"memory_id": memory_id, "error": exc.detail or "error"})
-                return jsonrpc_result({"deleted": deleted}, request_id)
+                        failed.append({"memory_id": memory_id, "error": exc.detail or "error"})
+                return jsonrpc_result({"action": "delete", "deleted": deleted, "failed": failed}, request_id)
             if action == "expire":
                 if not memory_ids or not lifecycle.expires_at:
                     return jsonrpc_error(-32600, "Invalid Request", request_id)
@@ -2986,7 +3087,7 @@ async def ingest(req: IngestRequest):
         for i, (chunk, embedding_values) in enumerate(zip(chunks, embeddings)):
             doc_id = f"doc-{os.path.basename(filepath)}-{i}"
             metadata = {
-                "agent": "ingest",
+                "agent": "sovereign",
                 "source": filepath,
                 "timestamp": format_timestamp(),
                 "tags": "documentation",
@@ -3013,7 +3114,7 @@ async def ingest(req: IngestRequest):
                     tags = EXCLUDED.tags
                 """,
                 doc_id,
-                sanitize_agent_name("ingest"),
+                sanitize_agent_name("sovereign"),
                 chunk,
                 vector_literal(embedding_values),
                 "general",

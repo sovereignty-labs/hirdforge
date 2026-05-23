@@ -34,6 +34,20 @@ async def _get_json(path: str, timeout: float = 10.0) -> dict[str, Any]:
         return response.json()
 
 
+async def _get_json_params(path: str, params: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.get(_seidr_endpoint(path), params=params)
+        response.raise_for_status()
+        return response.json()
+
+
+async def _delete_json(path: str, timeout: float = 10.0) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.delete(_seidr_endpoint(path))
+        response.raise_for_status()
+        return response.json()
+
+
 def _build_mcp_server() -> FastMCP:
     mcp = FastMCP("seidr")
 
@@ -53,7 +67,7 @@ def _build_mcp_server() -> FastMCP:
                     "query": message,
                     "agent": agent,
                     "limit": 3,
-                    "collections": [agent, "warband_shared"],
+                    "collections": [agent, "sovereign", "warband_shared"],
                 },
             )
             results = [item for item in data.get("results", []) if float(item.get("similarity", 0.0)) > 0.55]
@@ -149,6 +163,49 @@ def _build_mcp_server() -> FastMCP:
                 result["agent_health"] = None
                 result["agent_health_error"] = str(exc)
         return result
+
+    @mcp.tool(
+        name="list_memories",
+        description="List memories for review and audit. Use before deleting to find memory IDs.",
+        structured_output=True,
+    )
+    async def list_memories(
+        agent: str,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        try:
+            data = await _get_json_params(
+                "/memories",
+                {"agent": agent, "limit": limit, "offset": offset},
+            )
+            return {
+                "memories": data.get("memories", []),
+                "count": data.get("count", 0),
+                "agent": agent,
+                "limit": limit,
+                "offset": offset,
+            }
+        except Exception as exc:
+            return {"memories": [], "count": 0, "error": str(exc)}
+
+    @mcp.tool(
+        name="delete_memory",
+        description="Delete a specific memory by ID. Use list_memories first to find the ID.",
+        structured_output=True,
+    )
+    async def delete_memory(
+        memory_id: str,
+    ) -> dict[str, Any]:
+        try:
+            data = await _delete_json(f"/memories/{memory_id}")
+            return {
+                "deleted": bool(data.get("deleted", False)),
+                "memory_id": memory_id,
+                "response": data,
+            }
+        except Exception as exc:
+            return {"deleted": False, "memory_id": memory_id, "error": str(exc)}
 
     return mcp
 
