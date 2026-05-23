@@ -207,6 +207,40 @@ def _build_mcp_server() -> FastMCP:
         except Exception as exc:
             return {"deleted": False, "memory_id": memory_id, "error": str(exc)}
 
+    @mcp.tool(
+        name="learn",
+        description=(
+            "Bulk-store verified knowledge after a discovery session. "
+            "Compile findings into a clean markdown document, get Kit's approval, "
+            "then call this. Bypasses cognitive processing - content stored verbatim. "
+            "Use instead of remember when storing 3+ related facts from a single source."
+        ),
+        structured_output=True,
+    )
+    async def learn(
+        content: str,
+        agent: str,
+        source: str = "discovery",
+    ) -> dict[str, Any]:
+        try:
+            data = await _post_json(
+                "/ingest",
+                {
+                    "content": content,
+                    "agent": agent,
+                    "source": source,
+                },
+            )
+            return {
+                "stored": True,
+                "chunks": data.get("chunks", 0),
+                "agent": agent,
+                "source": source,
+                "response": data,
+            }
+        except Exception as exc:
+            return {"stored": False, "error": str(exc)}
+
     return mcp
 
 
