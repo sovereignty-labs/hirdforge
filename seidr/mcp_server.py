@@ -224,7 +224,7 @@ def _build_mcp_server() -> FastMCP:
     ) -> dict[str, Any]:
         try:
             data = await _post_json(
-                "/ingest",
+                "/learn",
                 {
                     "content": content,
                     "agent": agent,

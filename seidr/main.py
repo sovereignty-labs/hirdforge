@@ -196,6 +196,12 @@ class IngestRequest(BaseModel):
     path: str = "/docs"
 
 
+class LearnRequest(BaseModel):
+    content: str
+    agent: str = "sovereign"
+    source: str = "discovery"
+
+
 class MigrateRequest(BaseModel):
     delete_source: bool = False
 
@@ -3134,6 +3140,63 @@ async def ingest(req: IngestRequest):
             total += 1
     log("info", "ingestion complete", {"files": len(files), "chunks": total})
     return {"status": "ok", "files": len(files), "chunks": total}
+
+
+@app.post("/learn")
+async def learn(req: LearnRequest):
+    chunks = chunk_text(req.content, chunk_size=1200, overlap=200)
+    embeddings = await embed(chunks)
+    total = 0
+    for i, (chunk, embedding_values) in enumerate(zip(chunks, embeddings)):
+        doc_id = f"{req.agent}-learn-{int(time.time())}-{i}"
+        metadata = {
+            "agent": req.agent,
+            "source": req.source,
+            "timestamp": format_timestamp(),
+            "tags": "",
+            "type": "general",
+            "layer": "experience",
+            "confidence": 0.9,
+            "source_ids": "[]",
+            "validation_count": 0,
+        }
+        await ensure_pool().execute(
+            """
+            INSERT INTO memories (
+                id, agent, content, embedding, type, layer, importance, confidence, scope,
+                tags, source, metadata, source_ids, validation_count, expires_at, created_at
+            ) VALUES (
+                $1, $2, $3, $4::vector, $5, $6, $7, $8, $9,
+                $10, $11, $12::jsonb, $13, $14, $15, $16
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                content = EXCLUDED.content,
+                embedding = EXCLUDED.embedding,
+                metadata = EXCLUDED.metadata,
+                source = EXCLUDED.source,
+                tags = EXCLUDED.tags
+            """,
+            doc_id,
+            req.agent,
+            chunk,
+            vector_literal(embedding_values),
+            "general",
+            "experience",
+            0.8,
+            0.9,
+            "project",
+            "",
+            req.source,
+            json.dumps(metadata),
+            "[]",
+            0,
+            None,
+            format_timestamp(),
+        )
+        schedule_audit_log("learn", "store", doc_id, req.agent, chunk)
+        total += 1
+    log("info", "learn complete", {"agent": req.agent, "chunks": total})
+    return {"status": "ok", "chunks": total, "agent": req.agent}
 
 
 @app.post("/migrate-from-chromadb")
