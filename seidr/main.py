@@ -3191,7 +3191,7 @@ async def learn(req: LearnRequest):
             "[]",
             0,
             None,
-            format_timestamp(),
+            utcnow(),
         )
         schedule_audit_log("learn", "store", doc_id, req.agent, chunk)
         total += 1
