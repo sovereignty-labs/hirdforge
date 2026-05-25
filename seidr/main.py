@@ -3148,7 +3148,7 @@ async def learn(req: LearnRequest):
     embeddings = await embed(chunks)
     total = 0
     for i, (chunk, embedding_values) in enumerate(zip(chunks, embeddings)):
-        doc_id = f"{req.agent}-learn-{int(time.time())}-{i}"
+        doc_id = f"{sanitize_agent_name(req.agent)}-learn-{int(time.time())}-{i}"
         metadata = {
             "agent": req.agent,
             "source": req.source,
@@ -3177,7 +3177,7 @@ async def learn(req: LearnRequest):
                 tags = EXCLUDED.tags
             """,
             doc_id,
-            req.agent,
+            sanitize_agent_name(req.agent),
             chunk,
             vector_literal(embedding_values),
             "general",
