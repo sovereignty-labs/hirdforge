@@ -35,7 +35,7 @@ COGNITION_INFERENCE_URL = os.getenv("COGNITION_INFERENCE_URL", "").strip()
 COLLECTION = os.getenv("COLLECTION_NAME", "valhalla_knowledge")
 MEMORY_TTL_HOURS = int(os.getenv("MEMORY_TTL_HOURS", "240"))
 LESSON_TTL_HOURS = 90 * 24
-MEMORY_TYPES = {"general", "failure", "recovery", "lesson", "fact", "observation"}
+MEMORY_TYPES = {"general", "failure", "recovery", "lesson", "fact", "observation", "skill_amendment"}
 COGNITIVE_LAYERS = {"experience", "lesson", "soul_candidate"}
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 EMBEDDING_DEVICE = os.getenv("EMBEDDING_DEVICE", "cpu")
@@ -159,7 +159,7 @@ class QueryRequest(BaseModel):
     deleted: Literal["exclude", "include", "only"] = "exclude"
     similarity_threshold: Optional[float] = None
     cursor: Optional[str] = None
-    type: Optional[Literal["general", "failure", "recovery", "lesson", "fact", "observation"]] = None
+    type: Optional[Literal["general", "failure", "recovery", "lesson", "fact", "observation", "skill_amendment"]] = None
     layer: Optional[Literal["experience", "lesson", "soul_candidate"]] = None
     importance_weight: float = 0.0
     as_of: Optional[str] = None
@@ -173,7 +173,7 @@ class RememberRequest(BaseModel):
     tags: list[str] = Field(default_factory=list)
     source: str = "agent"
     shared: bool = False
-    type: Literal["general", "failure", "recovery", "lesson", "fact", "observation"] = "general"
+    type: Literal["general", "failure", "recovery", "lesson", "fact", "observation", "skill_amendment"] = "general"
     layer: Optional[Literal["experience", "lesson", "soul_candidate"]] = None
     confidence: Optional[float] = None
     source_ids: Optional[str] = None
@@ -235,7 +235,7 @@ class UpdateMemoryRequest(BaseModel):
 class A2MMemoryCreate(BaseModel):
     agent: str
     content: str
-    type: Literal["general", "failure", "recovery", "lesson", "fact", "observation"] = "general"
+    type: Literal["general", "failure", "recovery", "lesson", "fact", "observation", "skill_amendment"] = "general"
     scope: Optional[str] = None
     shared: bool = False
     provenance: Optional[dict] = None
@@ -399,7 +399,7 @@ def schedule_audit_log(agent: str, operation: str, memory_id: str, collection: s
 
 def memory_ttl_days_for_type(memory_type: str) -> Optional[int]:
     normalized = (memory_type or "").strip().lower()
-    if normalized == "soul_candidate":
+    if normalized in {"soul_candidate", "skill_amendment"}:
         return None
     if normalized in {"lesson", "workflow"}:
         return 90
@@ -909,7 +909,12 @@ async def remember_memory_data(req: RememberRequest, include_a2m_fields: bool = 
 
         detected_contradictions = contradictions if contradictions is not None else []
         if check_contradiction and contradictions is None:
-            detected_contradictions = await detect_fact_contradictions(collection_agent, content, embedding_text)
+            detected_contradictions = await detect_fact_contradictions(
+                collection_agent,
+                content,
+                embedding_text,
+                incoming_type=memory_type,
+            )
 
         stored_id = await store_memory_row(
             agent=collection_agent,
@@ -993,7 +998,12 @@ async def remember_memory_data(req: RememberRequest, include_a2m_fields: bool = 
         embedding_values = (await embed([fact]))[0]
         embedding_text = vector_literal(embedding_values)
         importance_task = score_importance(fact)
-        contradictions_task = detect_fact_contradictions(target_collection, fact, embedding_text)
+        contradictions_task = detect_fact_contradictions(
+            target_collection,
+            fact,
+            embedding_text,
+            incoming_type=memory_type,
+        )
         relationships_task = extract_relationships(fact, target_collection)
         importance_scope, contradictions, _ = await asyncio.gather(
             importance_task,
@@ -1845,7 +1855,8 @@ async def apply_contradictions(new_id: str, contradictions: list[tuple[str, str]
     pool = ensure_pool()
     now = utcnow()
     for old_id, explanation in contradictions:
-        old_row = await pool.fetchrow("SELECT agent, content FROM memories WHERE id = $1", old_id)
+        old_row = await pool.fetchrow("SELECT agent, content, metadata FROM memories WHERE id = $1", old_id)
+        old_meta = safe_metadata(old_row["metadata"]) if old_row else {}
         await pool.execute(
             """
             UPDATE memories
@@ -1873,18 +1884,55 @@ async def apply_contradictions(new_id: str, contradictions: list[tuple[str, str]
         )
         if old_row:
             schedule_audit_log(old_row["agent"], "update", old_id, old_row["agent"], old_row["content"])
-        COGNITIVE_STATS["contradictions_detected"] += 1
+        if old_meta.get("status") != "contradicted":
+            COGNITIVE_STATS["contradictions_detected"] += 1
 
 
-async def detect_fact_contradictions(agent: str, fact: str, embedding_text: str):
+async def detect_fact_contradictions(agent: str, fact: str, embedding_text: str, incoming_type: str = ""):
     rows = await fetch_similar_for_contradiction(agent, embedding_text, limit=3)
     contradictions = []
+    now = utcnow()
     for row in rows:
         similarity = float(row["similarity"] or 0.0)
         if similarity <= 0.40:
             continue
         old_id = row["id"]
         old_content = row["content"] or ""
+        old_meta = safe_metadata(row["metadata"])
+        if (
+            old_meta.get("type") == "skill_amendment"
+            and incoming_type in {"failure", "tool_failure"}
+            and similarity > 0.7
+        ):
+            await ensure_pool().execute(
+                """
+                UPDATE memories
+                SET metadata = jsonb_set(
+                    jsonb_set(
+                        jsonb_set(
+                            COALESCE(metadata, '{}'::jsonb),
+                            '{status}',
+                            to_jsonb($2::text),
+                            true
+                        ),
+                        '{contradicted_at}',
+                        to_jsonb($3::text),
+                        true
+                    ),
+                    '{contradicted_by}',
+                    to_jsonb($4::text),
+                    true
+                )
+                WHERE id = $1
+                """,
+                old_id,
+                "contradicted",
+                format_timestamp(now),
+                fact,
+            )
+            contradictions.append((old_id, "Failure pattern recurred after amendment"))
+            COGNITIVE_STATS["contradictions_detected"] += 1
+            continue
         log("info", "contradiction check", {"old_id": old_id, "similarity": similarity})
         contradicts, explanation = await detect_contradiction(old_content, fact)
         log("info", "contradiction result", {"old_id": old_id, "contradicts": contradicts, "explanation": explanation})
@@ -2363,7 +2411,7 @@ async def a2m_capability_card():
         },
         "limits": {"max_batch_size": 100, "max_content_length": 100000, "max_query_results": 100, "default_timeout_ms": 3000},
         "constraints": {
-            "supported_types": ["general", "fact", "lesson", "observation", "failure", "recovery", "workflow", "soul_candidate"],
+            "supported_types": ["general", "fact", "lesson", "observation", "failure", "recovery", "workflow", "soul_candidate", "skill_amendment"],
             "embedding_dimensions": 384,
         },
     }
