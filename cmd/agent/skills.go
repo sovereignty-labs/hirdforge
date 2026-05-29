@@ -384,6 +384,7 @@ func validateSkillAmendmentsAsync(memoryURL, agentName string) {
 		if pattern == "" {
 			continue
 		}
+		amendmentTool := strings.TrimSpace(metadataString(amendment.Metadata, "tool"))
 		amendmentDate := metadataTime(amendment.Metadata, "amendment_date", "created_at", "timestamp")
 		if amendmentDate.IsZero() {
 			amendmentDate = amendment.CreatedAt
@@ -406,33 +407,58 @@ func validateSkillAmendmentsAsync(memoryURL, agentName string) {
 		var matchingFailure recalledMemory
 		for _, failure := range failures {
 			if recalledMemoryTime(failure).After(amendmentDate) {
+				if amendmentTool == "" {
+					continue
+				}
+				failureTool := strings.TrimSpace(metadataString(failure.Metadata, "tool"))
+				if failureTool != amendmentTool {
+					continue
+				}
 				matchingFailure = failure
 				break
 			}
 		}
 
 		if strings.TrimSpace(matchingFailure.ID) != "" {
-			_ = patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
+			if err := patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
 				"status":          "contradicted",
 				"contradicted_by": matchingFailure.ID,
 				"contradicted_at": now.Format(time.RFC3339),
-			})
+			}); err != nil {
+				logJSON("warn", "skill amendment status update failed", map[string]interface{}{
+					"amendment_id": amendment.ID,
+					"status":       "contradicted",
+					"error":        err.Error(),
+				})
+			}
 			continue
 		}
 
 		if validationChecks >= 3 {
-			_ = patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
+			if err := patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
 				"status":       "validated",
 				"validated_at": now.Format(time.RFC3339),
 				"last_checked": now.Format(time.RFC3339),
-			})
+			}); err != nil {
+				logJSON("warn", "skill amendment status update failed", map[string]interface{}{
+					"amendment_id": amendment.ID,
+					"status":       "validated",
+					"error":        err.Error(),
+				})
+			}
 			continue
 		}
 
-		_ = patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
+		if err := patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
 			"validation_checks": validationChecks + 1,
 			"last_checked":      now.Format(time.RFC3339),
-		})
+		}); err != nil {
+			logJSON("warn", "skill amendment status update failed", map[string]interface{}{
+				"amendment_id": amendment.ID,
+				"status":       "unvalidated",
+				"error":        err.Error(),
+			})
+		}
 	}
 }
 

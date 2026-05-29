@@ -95,6 +95,7 @@ func TestValidateSkillAmendmentsAsyncTransitions(t *testing.T) {
 			amendment: map[string]interface{}{
 				"id":                "amend-2",
 				"type":              "skill_amendment",
+				"tool":              "git-clone",
 				"status":            "unvalidated",
 				"failure_pattern":   "git-clone already exists",
 				"amendment_date":    "2026-06-01T14:00:00Z",
@@ -132,6 +133,55 @@ func TestValidateSkillAmendmentsAsyncTransitions(t *testing.T) {
 		}
 		if got := metadataString(state.amendment, "status"); got != "contradicted" {
 			t.Fatalf("amendment status = %q, want contradicted", got)
+		}
+	})
+
+	t.Run("ignores tool-mismatched failure", func(t *testing.T) {
+		state := &skillAmendmentTestState{
+			amendment: map[string]interface{}{
+				"id":                "amend-3",
+				"type":              "skill_amendment",
+				"tool":              "git-clone",
+				"status":            "unvalidated",
+				"failure_pattern":   "git-clone already exists",
+				"amendment_date":    "2026-06-01T14:00:00Z",
+				"validation_checks": 1,
+				"created_at":        "2026-06-01T14:00:00Z",
+			},
+			failure: map[string]interface{}{
+				"id":         "fail-2",
+				"type":       "tool_failure",
+				"tool":       "git-fetch",
+				"failure":    "retry_exhausted",
+				"timestamp":  "2026-06-02T10:00:00Z",
+				"created_at": "2026-06-02T10:00:00Z",
+			},
+		}
+		server := newSkillAmendmentTestServer(t, state)
+		defer server.Close()
+
+		validateSkillAmendmentsAsync(server.URL, "ragnar")
+
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if len(state.patches) != 1 {
+			t.Fatalf("patch count = %d, want 1", len(state.patches))
+		}
+		meta, _ := state.patches[0]["metadata"].(map[string]interface{})
+		if meta == nil {
+			t.Fatalf("patch metadata missing: %#v", state.patches[0])
+		}
+		if got := metadataInt(meta, "validation_checks"); got != 2 {
+			t.Fatalf("patch validation_checks = %d, want 2", got)
+		}
+		if got := metadataString(meta, "status"); got != "" {
+			t.Fatalf("patch status = %q, want empty", got)
+		}
+		if got := metadataString(state.amendment, "status"); got != "unvalidated" {
+			t.Fatalf("amendment status = %q, want unvalidated", got)
+		}
+		if got := metadataInt(state.amendment, "validation_checks"); got != 2 {
+			t.Fatalf("amendment validation_checks = %d, want 2", got)
 		}
 	})
 
