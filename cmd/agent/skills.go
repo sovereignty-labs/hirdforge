@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -340,31 +341,124 @@ func validateContextMemoriesAsync(memoryURL, sessionID, outcome string) {
 	}
 }
 
+func validateSkillAmendmentsAsync(memoryURL, agentName string) {
+	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(agentName) == "" {
+		return
+	}
+
+	amendments, err := querySeidrMemories(memoryURL, map[string]interface{}{
+		"agent":  agentName,
+		"query":  "skill_amendment",
+		"limit":  10,
+		"filter": map[string]interface{}{"type": "skill_amendment"},
+	}, 3*time.Second)
+	if err != nil || len(amendments) == 0 {
+		return
+	}
+
+	filtered := make([]recalledMemory, 0, len(amendments))
+	for _, memory := range amendments {
+		if metadataString(memory.Metadata, "type") != "skill_amendment" {
+			continue
+		}
+		filtered = append(filtered, memory)
+	}
+	if len(filtered) == 0 {
+		return
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		return recalledMemoryTime(filtered[i]).After(recalledMemoryTime(filtered[j]))
+	})
+	if len(filtered) > 10 {
+		filtered = filtered[:10]
+	}
+
+	for _, amendment := range filtered {
+		status := strings.ToLower(strings.TrimSpace(metadataString(amendment.Metadata, "status")))
+		if status == "contradicted" {
+			continue
+		}
+		validationChecks := metadataInt(amendment.Metadata, "validation_count")
+		if validationChecks >= 3 {
+			continue
+		}
+
+		reqBody, err := json.Marshal(map[string]interface{}{
+			"memory_id": amendment.ID,
+			"outcome":   "confirmed",
+		})
+		if err != nil {
+			logJSON("warn", "skill amendment validation request marshal failed", map[string]interface{}{
+				"amendment_id": amendment.ID,
+				"error":        err.Error(),
+			})
+			continue
+		}
+
+		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/validate", bytes.NewReader(reqBody))
+		if err != nil {
+			logJSON("warn", "skill amendment validation request build failed", map[string]interface{}{
+				"amendment_id": amendment.ID,
+				"error":        err.Error(),
+			})
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			logJSON("warn", "skill amendment validation request failed", map[string]interface{}{
+				"amendment_id": amendment.ID,
+				"error":        err.Error(),
+			})
+			continue
+		}
+		func() {
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+				logJSON("warn", "skill amendment validation returned non-2xx", map[string]interface{}{
+					"amendment_id": amendment.ID,
+					"status":       resp.StatusCode,
+					"body":         strings.TrimSpace(string(b)),
+				})
+			}
+		}()
+	}
+}
+
 type recalledMemory struct {
 	ID         string
 	Text       string
 	Similarity float64
 	Metadata   map[string]interface{}
+	CreatedAt  time.Time
 }
 
-func recallMemories(memoryURL string, payload map[string]interface{}, timeout time.Duration) []recalledMemory {
+func querySeidrMemories(memoryURL string, payload map[string]interface{}, timeout time.Duration) ([]recalledMemory, error) {
 	if strings.TrimSpace(memoryURL) == "" {
-		return nil
+		return nil, nil
 	}
 	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/query", bytes.NewReader(body))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if strings.TrimSpace(string(b)) == "" {
+			return nil, fmt.Errorf("query returned status %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("query returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 
 	type recallItem struct {
@@ -373,13 +467,15 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 		Text       string                 `json:"text"`
 		Similarity float64                `json:"similarity"`
 		Metadata   map[string]interface{} `json:"metadata"`
+		CreatedAt  string                 `json:"created_at"`
+		Timestamp  string                 `json:"timestamp"`
 	}
 	var out struct {
 		Results  []recallItem `json:"results"`
 		Memories []recallItem `json:"memories"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil
+		return nil, err
 	}
 
 	items := out.Results
@@ -400,9 +496,107 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 			Text:       text,
 			Similarity: item.Similarity,
 			Metadata:   item.Metadata,
+			CreatedAt:  memoryRecordTime(item.CreatedAt, item.Timestamp, item.Metadata),
 		})
 	}
+	return memories, nil
+}
+
+func recallMemories(memoryURL string, payload map[string]interface{}, timeout time.Duration) []recalledMemory {
+	memories, err := querySeidrMemories(memoryURL, payload, timeout)
+	if err != nil {
+		return nil
+	}
 	return memories
+}
+
+func metadataString(meta map[string]interface{}, key string) string {
+	if meta == nil {
+		return ""
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return ""
+	}
+	if s, ok := raw.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return strings.TrimSpace(fmt.Sprint(raw))
+}
+
+func metadataInt(meta map[string]interface{}, key string) int {
+	if meta == nil {
+		return 0
+	}
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return 0
+	}
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int8:
+		return int(v)
+	case int16:
+		return int(v)
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float32:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, err := v.Int64()
+		if err == nil {
+			return int(n)
+		}
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+func metadataTime(meta map[string]interface{}, keys ...string) time.Time {
+	for _, key := range keys {
+		if ts := parseRFC3339Time(metadataString(meta, key)); !ts.IsZero() {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func parseRFC3339Time(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts.UTC()
+}
+
+func memoryRecordTime(createdAt, timestamp string, meta map[string]interface{}) time.Time {
+	if ts := parseRFC3339Time(createdAt); !ts.IsZero() {
+		return ts
+	}
+	if ts := parseRFC3339Time(timestamp); !ts.IsZero() {
+		return ts
+	}
+	return metadataTime(meta, "created_at", "amendment_date", "timestamp")
+}
+
+func recalledMemoryTime(memory recalledMemory) time.Time {
+	if !memory.CreatedAt.IsZero() {
+		return memory.CreatedAt
+	}
+	return metadataTime(memory.Metadata, "created_at", "amendment_date", "timestamp")
 }
 
 func appendCloneMemoryContext(memoryURL, agentName, repoName string, result toolpkg.ToolResult) toolpkg.ToolResult {

@@ -552,6 +552,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				if len(ids) > 0 {
 					addSessionContextMemoryIDs(sessionID, ids)
 				}
+				go validateSkillAmendmentsAsync(deps.memoryURL, deps.agentName)
 				reflectionContext = fetchReflectionContext(deps.memoryURL, deps.agentName)
 			}
 		}
