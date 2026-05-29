@@ -8,7 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -347,12 +346,11 @@ func validateSkillAmendmentsAsync(memoryURL, agentName string) {
 		return
 	}
 
-	now := time.Now().UTC()
 	amendments, err := querySeidrMemories(memoryURL, map[string]interface{}{
 		"agent":  agentName,
 		"query":  "skill_amendment",
-		"limit":  20,
-		"filter": map[string]interface{}{"type": "skill_amendment", "status": "unvalidated"},
+		"limit":  10,
+		"filter": map[string]interface{}{"type": "skill_amendment"},
 	}, 3*time.Second)
 	if err != nil || len(amendments) == 0 {
 		return
@@ -361,9 +359,6 @@ func validateSkillAmendmentsAsync(memoryURL, agentName string) {
 	filtered := make([]recalledMemory, 0, len(amendments))
 	for _, memory := range amendments {
 		if metadataString(memory.Metadata, "type") != "skill_amendment" {
-			continue
-		}
-		if metadataString(memory.Metadata, "status") != "unvalidated" {
 			continue
 		}
 		filtered = append(filtered, memory)
@@ -380,85 +375,57 @@ func validateSkillAmendmentsAsync(memoryURL, agentName string) {
 	}
 
 	for _, amendment := range filtered {
-		pattern := strings.TrimSpace(metadataString(amendment.Metadata, "failure_pattern"))
-		if pattern == "" {
+		status := strings.ToLower(strings.TrimSpace(metadataString(amendment.Metadata, "status")))
+		if status == "contradicted" {
 			continue
 		}
-		amendmentTool := strings.TrimSpace(metadataString(amendment.Metadata, "tool"))
-		amendmentDate := metadataTime(amendment.Metadata, "amendment_date", "created_at", "timestamp")
-		if amendmentDate.IsZero() {
-			amendmentDate = amendment.CreatedAt
-		}
-		if amendmentDate.IsZero() {
-			amendmentDate = now
-		}
-		validationChecks := metadataInt(amendment.Metadata, "validation_checks")
-
-		failures, err := querySeidrMemories(memoryURL, map[string]interface{}{
-			"agent":  agentName,
-			"query":  pattern,
-			"limit":  10,
-			"filter": map[string]interface{}{"type": "tool_failure"},
-		}, 3*time.Second)
-		if err != nil {
-			return
-		}
-
-		var matchingFailure recalledMemory
-		for _, failure := range failures {
-			if recalledMemoryTime(failure).After(amendmentDate) {
-				if amendmentTool == "" {
-					continue
-				}
-				failureTool := strings.TrimSpace(metadataString(failure.Metadata, "tool"))
-				if failureTool != amendmentTool {
-					continue
-				}
-				matchingFailure = failure
-				break
-			}
-		}
-
-		if strings.TrimSpace(matchingFailure.ID) != "" {
-			if err := patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
-				"status":          "contradicted",
-				"contradicted_by": matchingFailure.ID,
-				"contradicted_at": now.Format(time.RFC3339),
-			}); err != nil {
-				logJSON("warn", "skill amendment status update failed", map[string]interface{}{
-					"amendment_id": amendment.ID,
-					"status":       "contradicted",
-					"error":        err.Error(),
-				})
-			}
-			continue
-		}
-
+		validationChecks := metadataInt(amendment.Metadata, "validation_count")
 		if validationChecks >= 3 {
-			if err := patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
-				"status":       "validated",
-				"validated_at": now.Format(time.RFC3339),
-				"last_checked": now.Format(time.RFC3339),
-			}); err != nil {
-				logJSON("warn", "skill amendment status update failed", map[string]interface{}{
-					"amendment_id": amendment.ID,
-					"status":       "validated",
-					"error":        err.Error(),
-				})
-			}
 			continue
 		}
 
-		if err := patchSeidrMemoryMetadata(memoryURL, amendment.ID, map[string]interface{}{
-			"validation_checks": validationChecks + 1,
-			"last_checked":      now.Format(time.RFC3339),
-		}); err != nil {
-			logJSON("warn", "skill amendment status update failed", map[string]interface{}{
+		reqBody, err := json.Marshal(map[string]interface{}{
+			"memory_id": amendment.ID,
+			"outcome":   "confirmed",
+		})
+		if err != nil {
+			logJSON("warn", "skill amendment validation request marshal failed", map[string]interface{}{
 				"amendment_id": amendment.ID,
-				"status":       "unvalidated",
 				"error":        err.Error(),
 			})
+			continue
 		}
+
+		req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/validate", bytes.NewReader(reqBody))
+		if err != nil {
+			logJSON("warn", "skill amendment validation request build failed", map[string]interface{}{
+				"amendment_id": amendment.ID,
+				"error":        err.Error(),
+			})
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			logJSON("warn", "skill amendment validation request failed", map[string]interface{}{
+				"amendment_id": amendment.ID,
+				"error":        err.Error(),
+			})
+			continue
+		}
+		func() {
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+				logJSON("warn", "skill amendment validation returned non-2xx", map[string]interface{}{
+					"amendment_id": amendment.ID,
+					"status":       resp.StatusCode,
+					"body":         strings.TrimSpace(string(b)),
+				})
+			}
+		}()
 	}
 }
 
@@ -541,35 +508,6 @@ func recallMemories(memoryURL string, payload map[string]interface{}, timeout ti
 		return nil
 	}
 	return memories
-}
-
-func patchSeidrMemoryMetadata(memoryURL, memoryID string, metadata map[string]interface{}) error {
-	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(memoryID) == "" {
-		return nil
-	}
-	body, err := json.Marshal(map[string]interface{}{"metadata": metadata})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequest(http.MethodPatch, strings.TrimRight(memoryURL, "/")+"/memories/"+url.PathEscape(memoryID), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if strings.TrimSpace(string(b)) == "" {
-			return fmt.Errorf("patch returned status %d", resp.StatusCode)
-		}
-		return fmt.Errorf("patch returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-	return nil
 }
 
 func metadataString(meta map[string]interface{}, key string) string {
