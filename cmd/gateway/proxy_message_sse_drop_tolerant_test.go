@@ -48,60 +48,50 @@ func (w *failingSSEWriter) Write(p []byte) (int, error) {
 func (w *failingSSEWriter) Flush() {}
 
 type scriptedSSETransport struct {
-	proceed  chan struct{}
-	finished chan error
-	canceled chan error
+	allowSecond   chan struct{}
+	releaseEOF    chan struct{}
+	firstWrite    chan struct{}
+	secondWritten chan struct{}
+	finished      chan error
 }
 
 func newScriptedSSETransport() *scriptedSSETransport {
 	return &scriptedSSETransport{
-		proceed:  make(chan struct{}),
-		finished: make(chan error, 1),
-		canceled: make(chan error, 1),
+		allowSecond:   make(chan struct{}),
+		releaseEOF:    make(chan struct{}),
+		firstWrite:    make(chan struct{}),
+		secondWritten: make(chan struct{}),
+		finished:      make(chan error, 1),
 	}
 }
 
 func (t *scriptedSSETransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	pr, pw := io.Pipe()
 	go func() {
-		defer req.Body.Close()
-
 		write := func(s string) error {
 			_, err := io.WriteString(pw, s)
 			return err
 		}
 
 		if err := write("data: {\"type\":\"content\",\"content\":\"hello\"}\n\n"); err != nil {
-			if req.Context().Err() != nil {
-				t.canceled <- req.Context().Err()
-			}
 			_ = pw.Close()
 			return
 		}
+		close(t.firstWrite)
 
-		select {
-		case <-t.proceed:
-		case <-req.Context().Done():
-			t.canceled <- req.Context().Err()
-			_ = pw.CloseWithError(req.Context().Err())
-			return
-		}
+		<-t.allowSecond
 
 		if err := write("data: {\"type\":\"content\",\"content\":\" world\"}\n\n"); err != nil {
-			if req.Context().Err() != nil {
-				t.canceled <- req.Context().Err()
-			}
 			_ = pw.Close()
 			return
 		}
 		if err := write("data: {\"type\":\"done\",\"done\":true}\n\n"); err != nil {
-			if req.Context().Err() != nil {
-				t.canceled <- req.Context().Err()
-			}
 			_ = pw.Close()
 			return
 		}
+		close(t.secondWritten)
 
+		<-t.releaseEOF
 		_ = pw.Close()
 		t.finished <- nil
 	}()
@@ -154,15 +144,20 @@ func TestMessageEndpointDrainsUpstreamAfterClientWriteFailure(t *testing.T) {
 		t.Fatal("timed out waiting for the first SSE write")
 	}
 
-	close(upstream.proceed)
+	close(upstream.allowSecond)
+
+	select {
+	case <-upstream.secondWritten:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the upstream stream to reach EOF")
+	}
+	close(upstream.releaseEOF)
 
 	select {
 	case err := <-upstream.finished:
 		if err != nil {
 			t.Fatalf("upstream stream finished with error: %v", err)
 		}
-	case err := <-upstream.canceled:
-		t.Fatalf("upstream stream was canceled before EOF: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for upstream stream to drain")
 	}
@@ -203,4 +198,86 @@ func TestMessageEndpointDrainsUpstreamAfterClientWriteFailure(t *testing.T) {
 	if w.writeCnt < 2 {
 		t.Fatalf("expected at least two write attempts, got %d", w.writeCnt)
 	}
+}
+
+func TestMessageEndpointDropDrainDoesNotClearNewerRequestSlot(t *testing.T) {
+	upstream := newScriptedSSETransport()
+	streamClient := &http.Client{Transport: upstream}
+
+	gw := &gateway{
+		agents: map[string]*Agent{
+			"val": {Name: "val", URL: "http://agent.example", Healthy: true},
+		},
+		order:               []string{"val"},
+		events:              make([]Event, 0, 16),
+		eventCap:            16,
+		sessionStore:        newSessionStore(),
+		lastSession:         map[string]string{},
+		activeRequests:      map[string]*ActiveRequest{},
+		pausedAgents:        map[string]bool{},
+		injections:          map[string][]InjectionMessage{},
+		delegationTimelines: map[string][]delegationTimelineEvent{},
+	}
+
+	mux := http.NewServeMux()
+	registerDelegationRoutes(mux, gw, http.DefaultClient, streamClient)
+
+	session1 := "sess-drop-1"
+	body := fmt.Sprintf(`{"agent":"val","content":"hello","session_id":"%s"}`, session1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/message", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := newFailingSSEWriter(1)
+	handlerDone := make(chan struct{})
+	go func() {
+		mux.ServeHTTP(w, req)
+		close(handlerDone)
+	}()
+
+	select {
+	case <-w.firstWriteDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the first SSE write")
+	}
+
+	close(upstream.allowSecond)
+
+	select {
+	case <-upstream.secondWritten:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the upstream stream to block at EOF")
+	}
+
+	epoch2 := gw.setActiveRequest("val", "sess-2", nil)
+	if epoch2 == 0 {
+		t.Fatal("expected non-zero epoch for second request")
+	}
+	close(upstream.releaseEOF)
+
+	select {
+	case err := <-upstream.finished:
+		if err != nil {
+			t.Fatalf("upstream stream finished with error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for upstream stream to drain")
+	}
+
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the gateway handler to return")
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := gw.activeSessionID("val"); got == "sess-2" {
+			if current, ok := gw.sessionStore.get(session1); ok && len(current.Messages) == 2 {
+				return
+			}
+		}
+		runtime.Gosched()
+	}
+
+	t.Fatalf("stale drain clear removed newer slot; active session=%q", gw.activeSessionID("val"))
 }
