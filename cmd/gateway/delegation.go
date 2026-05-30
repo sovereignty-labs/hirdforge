@@ -544,9 +544,11 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 					sess.Source = explicitSource
 				}
 				agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
-				defer agentCancel()
-				gw.setActiveRequest(agentName, sessionID, agentCancel)
-				defer gw.clearActiveRequest(agentName, agentCancel)
+				epoch := gw.setActiveRequest(agentName, sessionID, agentCancel)
+				defer func() {
+					agentCancel()
+					gw.clearActiveRequestIfCurrent(agentName, epoch)
+				}()
 
 				body, _ := json.Marshal(agentMessageRequest{Content: content, SessionID: sessionID})
 				uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
@@ -726,9 +728,18 @@ func registerDelegationRoutes(mux *http.ServeMux, gw *gateway, proxyClient, stre
 
 func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Client, agent *Agent, agentName, content, sessionID string) {
 	agentCtx, agentCancel := context.WithTimeout(context.Background(), streamTimeout)
-	defer agentCancel()
-	gw.setActiveRequest(agentName, sessionID, agentCancel)
-	defer gw.clearActiveRequest(agentName, agentCancel)
+	epoch := gw.setActiveRequest(agentName, sessionID, agentCancel)
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			agentCancel()
+		}
+	}()
+	defer func() {
+		if !handedOff {
+			gw.clearActiveRequestIfCurrent(agentName, epoch)
+		}
+	}()
 
 	body, _ := json.Marshal(agentMessageRequest{Content: content, SessionID: sessionID})
 	uReq, err := http.NewRequestWithContext(agentCtx, http.MethodPost, strings.TrimRight(agent.URL, "/")+"/message", bytes.NewReader(body))
@@ -860,6 +871,7 @@ func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Cli
 				_ = line
 			}
 			saveConversation()
+			gw.clearActiveRequestIfCurrent(agentName, epoch)
 		}()
 	}
 	forward := func(evt map[string]interface{}) bool {
@@ -905,6 +917,7 @@ func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Cli
 							contentBuf.WriteString(cleaned)
 						}
 						if !forward(evt) {
+							handedOff = true
 							drainAgentResponse()
 							return
 						}
@@ -1013,12 +1026,14 @@ func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Cli
 							doneEvt["session_id"] = sessionID
 						}
 						if !forwardReplaceIfNeeded() {
+							handedOff = true
 							drainAgentResponse()
 							return
 						}
 						saveConversation()
 						processInjectionQueue(sessionID)
 						if !forward(doneEvt) {
+							handedOff = true
 							drainAgentResponse()
 							return
 						}
@@ -1026,6 +1041,7 @@ func (gw *gateway) proxyMessageSSE(w http.ResponseWriter, streamClient *http.Cli
 						return
 					}
 					if !forward(evt) {
+						handedOff = true
 						drainAgentResponse()
 						return
 					}

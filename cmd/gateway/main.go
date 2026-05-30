@@ -325,6 +325,7 @@ type gateway struct {
 	lastSession       map[string]string
 	arMu              sync.RWMutex
 	activeRequests    map[string]*ActiveRequest
+	arEpoch           uint64
 	webhookDedup      sync.Map
 	delegateResults   sync.Map
 	injectionMu       sync.Mutex

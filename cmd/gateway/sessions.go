@@ -283,6 +283,7 @@ type ActiveRequest struct {
 	SessionID string
 	Cancel    context.CancelFunc
 	StartedAt time.Time
+	Epoch     uint64
 }
 
 type AgentState struct {
@@ -337,24 +338,36 @@ type InjectionMessage struct {
 	QueuedAt  int64  `json:"queued_at"`
 }
 
-func (g *gateway) setActiveRequest(agent, sessionID string, cancel context.CancelFunc) {
+func (g *gateway) setActiveRequest(agent, sessionID string, cancel context.CancelFunc) uint64 {
 	g.arMu.Lock()
 	defer g.arMu.Unlock()
 	if existing, ok := g.activeRequests[agent]; ok && existing.Cancel != nil {
 		existing.Cancel()
 	}
+	g.arEpoch++
+	epoch := g.arEpoch
 	g.activeRequests[agent] = &ActiveRequest{
 		Agent:     agent,
 		SessionID: sessionID,
 		Cancel:    cancel,
 		StartedAt: time.Now(),
+		Epoch:     epoch,
 	}
+	return epoch
 }
 
 func (g *gateway) clearActiveRequest(agent string, cancel context.CancelFunc) {
 	g.arMu.Lock()
 	defer g.arMu.Unlock()
 	delete(g.activeRequests, agent)
+}
+
+func (g *gateway) clearActiveRequestIfCurrent(agent string, epoch uint64) {
+	g.arMu.Lock()
+	defer g.arMu.Unlock()
+	if ar, ok := g.activeRequests[agent]; ok && ar != nil && ar.Epoch == epoch {
+		delete(g.activeRequests, agent)
+	}
 }
 
 func (g *gateway) activeSessionID(agent string) string {
