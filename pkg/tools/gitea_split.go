@@ -105,6 +105,15 @@ func (t *createPRTool) Execute(args map[string]interface{}) ToolResult {
 	if status == 404 {
 		return ToolResult{Error: fmt.Sprintf("HTTP 404: branch %q may not exist on remote, or token lacks permission. Push the branch first, then retry. Raw: %s", head, string(resp))}
 	}
+	if status == http.StatusConflict || strings.Contains(strings.ToLower(string(resp)), "pull request already exists for these targets") {
+		if existing, _ := t.api.FindOpenPullRequest(owner, name, head, base); existing != nil {
+			num, _ := existing["number"].(float64)
+			htmlURL, _ := existing["html_url"].(string)
+			if int(num) > 0 && htmlURL != "" {
+				return ToolResult{Output: fmt.Sprintf("PR #%d already exists for %s->%s: %s. No action needed.", int(num), head, base, htmlURL)}
+			}
+		}
+	}
 	if status >= 400 {
 		return ToolResult{Error: fmt.Sprintf("HTTP %d: %s", status, string(resp))}
 	}

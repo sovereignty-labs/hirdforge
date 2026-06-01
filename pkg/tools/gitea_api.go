@@ -15,10 +15,10 @@ import (
 // GiteaAPITool is retained for internal use (DLQ, auto-close, etc.) and as
 // the backend for the individual gitea action tools in gitea_split.go.
 type GiteaAPITool struct {
-	GiteaURL        string
-	Token           string
-	ReviewersToken  string
-	Client          *http.Client
+	GiteaURL       string
+	Token          string
+	ReviewersToken string
+	Client         *http.Client
 }
 
 func NewGiteaAPITool(giteaURL, token string) *GiteaAPITool {
@@ -219,6 +219,60 @@ func (t *GiteaAPITool) GetComments(owner, repo string, issueNum int) ([]map[stri
 		return nil, err
 	}
 	return comments, nil
+}
+
+// FindOpenPullRequest returns the matching open PR for the given head/base pair,
+// or nil when no matching PR is found.
+func (t *GiteaAPITool) FindOpenPullRequest(owner, repo, head, base string) (map[string]interface{}, error) {
+	q := url.Values{}
+	q.Set("state", "open")
+	q.Set("head", fmt.Sprintf("%s:%s", owner, strings.TrimSpace(head)))
+	if base = strings.TrimSpace(base); base != "" {
+		q.Set("base", base)
+	}
+	q.Set("limit", "50")
+
+	resp, status, err := t.apiRequest("GET", fmt.Sprintf("/repos/%s/%s/pulls?%s", owner, repo, q.Encode()), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", status, string(resp))
+	}
+
+	var pulls []map[string]interface{}
+	if err := json.Unmarshal(resp, &pulls); err != nil {
+		return nil, err
+	}
+
+	head = strings.TrimSpace(head)
+	base = strings.TrimSpace(base)
+	for _, pr := range pulls {
+		if pr == nil {
+			continue
+		}
+		if head != "" {
+			headRef, _ := pr["head"].(map[string]interface{})
+			if headRef == nil {
+				continue
+			}
+			if gotHead, _ := headRef["ref"].(string); strings.TrimSpace(gotHead) != head {
+				continue
+			}
+		}
+		if base != "" {
+			baseRef, _ := pr["base"].(map[string]interface{})
+			if baseRef == nil {
+				continue
+			}
+			if gotBase, _ := baseRef["ref"].(string); strings.TrimSpace(gotBase) != base {
+				continue
+			}
+		}
+		return pr, nil
+	}
+
+	return nil, nil
 }
 
 // Verify performs post-execution verification for create-pr actions.
