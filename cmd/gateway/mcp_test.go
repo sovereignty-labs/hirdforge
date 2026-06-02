@@ -19,6 +19,9 @@ func TestMCPProtectedResourceMetadata(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"scopes_supported":[]`) {
+		t.Fatalf("raw body missing explicit empty scopes_supported: %s", rec.Body.String())
+	}
 
 	var payload struct {
 		Resource             string   `json:"resource"`
@@ -34,7 +37,7 @@ func TestMCPProtectedResourceMetadata(t *testing.T) {
 	if len(payload.AuthorizationServers) != 1 || payload.AuthorizationServers[0] != mcpProtectedResourceAuthorizationServerURL {
 		t.Fatalf("authorization_servers = %#v", payload.AuthorizationServers)
 	}
-	if len(payload.ScopesSupported) != 0 {
+	if payload.ScopesSupported == nil || len(payload.ScopesSupported) != 0 {
 		t.Fatalf("scopes_supported = %#v", payload.ScopesSupported)
 	}
 }
