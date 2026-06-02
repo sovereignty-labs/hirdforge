@@ -20,7 +20,11 @@ import (
 )
 
 const (
-	gatewayMCPGiteaBaseURL = "http://gitea-http.gitea.svc.cluster.local:3000"
+	gatewayMCPGiteaBaseURL                     = "http://gitea-http.gitea.svc.cluster.local:3000"
+	mcpProtectedResourcePath                   = "/.well-known/oauth-protected-resource/mcp"
+	mcpProtectedResourceURL                    = "https://mcp.hirdforge.com/mcp"
+	mcpProtectedResourceAuthorizationServerURL = "https://porathindustries.cloudflareaccess.com"
+	mcpProtectedResourceWWWAuthenticate        = `Bearer resource_metadata="https://mcp.hirdforge.com/.well-known/oauth-protected-resource/mcp"`
 )
 
 type jsonRPCRequest struct {
@@ -117,6 +121,18 @@ func registerGatewayMCP(mux *http.ServeMux, gw *gateway) {
 	server.registerTools()
 	registerGatewayMCPOAuth(mux)
 	mux.HandleFunc("/mcp", server.handle)
+}
+
+func handleMCPProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"resource":              mcpProtectedResourceURL,
+		"authorization_servers": []string{mcpProtectedResourceAuthorizationServerURL},
+		"scopes_supported":      []string{},
+	})
 }
 
 func (s *gatewayMCPServer) registerTools() {
@@ -702,16 +718,12 @@ func (s *gatewayMCPServer) registerTools() {
 }
 
 func (s *gatewayMCPServer) handle(w http.ResponseWriter, r *http.Request) {
-	if strings.TrimSpace(s.token) == "" {
-		http.NotFound(w, r)
-		return
-	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !validBearerToken(r.Header.Get("Authorization"), s.token) {
-		w.Header().Set("WWW-Authenticate", "Bearer")
+	if !s.authenticateRequest(r) {
+		w.Header().Set("WWW-Authenticate", mcpProtectedResourceWWWAuthenticate)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -827,6 +839,30 @@ func (s *gatewayMCPServer) handle(w http.ResponseWriter, r *http.Request) {
 		resp.Error = &jsonRPCError{Code: -32601, Message: "method not found: " + req.Method}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *gatewayMCPServer) authenticateRequest(r *http.Request) bool {
+	if validBearerToken(r.Header.Get("Authorization"), s.token) {
+		logJSON("info", "mcp auth accepted", map[string]interface{}{
+			"auth_method": "static_bearer",
+		})
+		return true
+	}
+	if cloudflareAccessHeadersPresent(r) {
+		logJSON("info", "mcp auth accepted", map[string]interface{}{
+			"auth_method": "cloudflare_access",
+		})
+		return true
+	}
+	logJSON("warn", "mcp auth rejected", map[string]interface{}{
+		"reason": "missing valid authorization",
+	})
+	return false
+}
+
+func cloudflareAccessHeadersPresent(r *http.Request) bool {
+	return strings.TrimSpace(r.Header.Get("Cf-Access-Authenticated-User-Email")) != "" &&
+		strings.TrimSpace(r.Header.Get("Cf-Access-Jwt-Assertion")) != ""
 }
 
 func (s *gatewayMCPServer) invokeLocalJSON(ctx context.Context, method, path string, payload interface{}) (interface{}, error) {

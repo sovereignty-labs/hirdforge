@@ -6,8 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -208,6 +208,7 @@ func registerGatewayMCPOAuthRoutes(mux *http.ServeMux, server *gatewayMCPOAuthSe
 	mux.HandleFunc(mcpOAuthTokenPath, server.handleToken)
 	mux.HandleFunc("/authorize", server.handleAuthorize)
 	mux.HandleFunc("/token", server.handleToken)
+	mux.HandleFunc(mcpProtectedResourcePath, handleMCPProtectedResourceMetadata)
 }
 
 func newGatewayMCPOAuthServerFromEnv() *gatewayMCPOAuthServer {
