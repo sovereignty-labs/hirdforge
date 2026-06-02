@@ -27,6 +27,12 @@ const (
 	mcpProtectedResourceWWWAuthenticate        = `Bearer resource_metadata="https://mcp.hirdforge.com/.well-known/oauth-protected-resource/mcp"`
 )
 
+type mcpProtectedResourceMetadata struct {
+	Resource             string   `json:"resource"`
+	AuthorizationServers []string `json:"authorization_servers"`
+	ScopesSupported      []string `json:"scopes_supported"`
+}
+
 type jsonRPCRequest struct {
 	JSONRPC string                 `json:"jsonrpc"`
 	ID      interface{}            `json:"id,omitempty"`
@@ -128,10 +134,10 @@ func handleMCPProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"resource":              mcpProtectedResourceURL,
-		"authorization_servers": []string{mcpProtectedResourceAuthorizationServerURL},
-		"scopes_supported":      []string{},
+	writeJSON(w, http.StatusOK, mcpProtectedResourceMetadata{
+		Resource:             mcpProtectedResourceURL,
+		AuthorizationServers: []string{mcpProtectedResourceAuthorizationServerURL},
+		ScopesSupported:      []string{},
 	})
 }
 
