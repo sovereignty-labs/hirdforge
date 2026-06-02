@@ -146,10 +146,37 @@ jobs:
             docker push $REGISTRY/valhalla-hirdforge:latest
           fi
           docker push $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
+  build-openai-mcp-tunnel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install Docker CLI
+        run: apk add --no-cache docker-cli
+      - name: Registry login
+        run: echo $REGISTRY_PASSWORD | docker login gitea-http.gitea.svc.cluster.local:3000 -u $REGISTRY_USER --password-stdin
+      - name: Clone repository
+        run: rm -rf /src-openai-mcp-tunnel && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-openai-mcp-tunnel
+      - name: Build and push openai mcp tunnel
+        run: |
+          cd /src-openai-mcp-tunnel
+          SHA_SHORT=$(git rev-parse --short HEAD)
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
+          if ! echo "$CHANGED" | grep -Eq '^(Dockerfile\.openai-mcp-tunnel$)'; then
+            if docker pull $REGISTRY/openai-mcp-tunnel:latest 2>/dev/null; then
+              docker tag $REGISTRY/openai-mcp-tunnel:latest $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT
+            else
+              docker build -f Dockerfile.openai-mcp-tunnel -t $REGISTRY/openai-mcp-tunnel:latest -t $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT .
+              docker push $REGISTRY/openai-mcp-tunnel:latest
+            fi
+          else
+            docker build -f Dockerfile.openai-mcp-tunnel -t $REGISTRY/openai-mcp-tunnel:latest -t $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT .
+            docker push $REGISTRY/openai-mcp-tunnel:latest
+          fi
+          docker push $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT
   update-infra:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    needs: [build-agent, build-gateway, build-seidr, build-lockbox, build-hirdforge]
+    needs: [build-agent, build-gateway, build-seidr, build-lockbox, build-hirdforge, build-openai-mcp-tunnel]
     steps:
       - name: Install tools
         run: apk add --no-cache curl jq python3
@@ -164,7 +191,7 @@ jobs:
           SHA_SHORT=$(git rev-parse --short HEAD)
           NEW_TAG="sha-$SHA_SHORT"
           cd /src-infra
-          # Update first-party valhalla image tags in YAML manifests (non-JSON) using Python.
+          # Update first-party valhalla image tags and the OpenAI tunnel image in YAML manifests (non-JSON) using Python.
           python3 - "$NEW_TAG" <<'PY'
           import pathlib
           import re
@@ -173,7 +200,7 @@ jobs:
           new_tag = sys.argv[1].strip()
           root = pathlib.Path("infrastructure")
           image_re = re.compile(
-              r'^(\s*image:\s*)"?[^\s"\']*/(valhalla-[^:"\'\s]+):[^\s"\']*"?(\s*(?:#.*)?)$',
+              r'^(\s*image:\s*)"?(.*/)([^:"\'\s]+):[^\s"\']*"?(\s*(?:#.*)?)$',
               re.MULTILINE,
           )
 
@@ -187,7 +214,14 @@ jobs:
                   continue
 
               def replace(m):
-                  return f'{m.group(1)}"git.hirdforge.com/kit/hirdforge/{m.group(2)}:{new_tag}"{m.group(3)}'
+                  image_name = m.group(3)
+                  if image_name.startswith("valhalla-"):
+                      repo = "kit/hirdforge"
+                  elif image_name == "openai-mcp-tunnel":
+                      repo = "kit/hirdforge"
+                  else:
+                      return m.group(0)
+                  return f'{m.group(1)}"git.hirdforge.com/{repo}/{image_name}:{new_tag}"{m.group(4)}'
 
               new_text = image_re.sub(replace, text)
               if new_text != text:
