@@ -1,0 +1,39 @@
+FROM debian:bookworm-slim AS fetch
+
+ARG TUNNEL_CLIENT_VERSION=v0.0.9--context-conduit-topaz
+ARG TUNNEL_CLIENT_ARCH=linux-amd64
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl unzip coreutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    cd /tmp; \
+    curl -fsSLO "https://github.com/openai/tunnel-client/releases/download/${TUNNEL_CLIENT_VERSION}/SHA256SUMS.txt"; \
+    curl -fsSLO "https://github.com/openai/tunnel-client/releases/download/${TUNNEL_CLIENT_VERSION}/tunnel-client-${TUNNEL_CLIENT_VERSION}-${TUNNEL_CLIENT_ARCH}.zip"; \
+    expected="$(awk '$2 == "tunnel-client-'${TUNNEL_CLIENT_VERSION}'-'${TUNNEL_CLIENT_ARCH}'.zip" { print $1 }' SHA256SUMS.txt)"; \
+    printf '%s  %s\n' "$expected" "tunnel-client-${TUNNEL_CLIENT_VERSION}-${TUNNEL_CLIENT_ARCH}.zip" | sha256sum -c -; \
+    unzip -q "tunnel-client-${TUNNEL_CLIENT_VERSION}-${TUNNEL_CLIENT_ARCH}.zip"; \
+    install -m 0755 tunnel-client /usr/local/bin/tunnel-client
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --create-home --home-dir /var/lib/tunnel-client --shell /usr/sbin/nologin tunnel-client \
+    && mkdir -p /var/lib/tunnel-client \
+    && chown -R tunnel-client:tunnel-client /var/lib/tunnel-client
+
+COPY --from=fetch /usr/local/bin/tunnel-client /usr/local/bin/tunnel-client
+
+ENV HEALTH_LISTEN_ADDR=:8080 \
+    LOG_LEVEL=info \
+    LOG_FORMAT=json
+
+WORKDIR /var/lib/tunnel-client
+
+USER tunnel-client
+
+ENTRYPOINT ["/usr/local/bin/tunnel-client"]
+CMD ["run"]
