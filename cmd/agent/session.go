@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -683,11 +682,24 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 						trackedTasks[sessionID].ToolRetries++
 					}
 					sessionsMu.Unlock()
-					log.Printf("[RETRY] tool=%s attempt=%d err=%s", tc.Function.Name, attempt, result.Error)
+					logJSON("warn", "tool_retry", map[string]interface{}{
+						"agent":      deps.agentName,
+						"session_id": sessionID,
+						"task_id":    taskID,
+						"tool":       tc.Function.Name,
+						"attempt":    attempt,
+						"error":      result.Error,
+					})
 					time.Sleep(2 * time.Second)
 					result = runToolAttempt()
 					if result.Error == "" {
-						log.Printf("[RECOVERY] tool=%s recovered on attempt=%d", tc.Function.Name, attempt+1)
+						logJSON("info", "tool_recovery", map[string]interface{}{
+							"agent":      deps.agentName,
+							"session_id": sessionID,
+							"task_id":    taskID,
+							"tool":       tc.Function.Name,
+							"attempt":    attempt + 1,
+						})
 						rememberToolRecovery(deps.memoryURL, deps.agentName, sessionID, tc.Function.Name, args, attempt+1)
 						break
 					}
@@ -919,7 +931,11 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			}
 		}
 
+		var toolLoopExitReason string
+		var lastNoToolAssistantContent string
+		var toolLoopRounds int
 		for i := 0; i < deps.maxToolRounds; i++ {
+			toolLoopRounds = i + 1
 			if deps.maxContext > 0 && len(messages)-1 > int(float64(deps.maxContext)*0.8) {
 				trimmed := progressiveTrim(messages[1:], deps.maxContext)
 				messages = append([]message{messages[0]}, trimmed...)
@@ -928,9 +944,26 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, deps.toolDefs, deps.inferenceURL, deps.model, deps.apiKey)
 			cancel()
 			if err != nil {
+				if ctx.Err() == context.Canceled {
+					toolLoopExitReason = "context_canceled"
+				} else {
+					toolLoopExitReason = "inference_error"
+				}
+				logJSON("warn", "tool_loop_exit", map[string]interface{}{
+					"agent":                      deps.agentName,
+					"model":                      deps.model,
+					"session_id":                 sessionID,
+					"task_id":                    taskID,
+					"reason":                     toolLoopExitReason,
+					"round":                      toolLoopRounds,
+					"max_rounds":                 deps.maxToolRounds,
+					"had_tool_calls":             hadToolCalls,
+					"last_no_tool_content_chars": len(lastNoToolAssistantContent),
+				})
 				return "", err
 			}
 			if len(resp.Choices) == 0 {
+				toolLoopExitReason = "choices_empty"
 				break
 			}
 			assistant := resp.Choices[0].Message
@@ -942,6 +975,8 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				}
 			}
 			if len(assistant.ToolCalls) == 0 {
+				toolLoopExitReason = "no_tool_calls"
+				lastNoToolAssistantContent = strings.TrimSpace(stripThinkTags(assistant.Content))
 				break
 			}
 			if strings.TrimSpace(assistant.Content) != "" {
@@ -952,9 +987,33 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			}
 			executeToolCalls(assistant.ToolCalls)
 			if i == deps.maxToolRounds-1 {
-				log.Printf("[TOOL_LIMIT] agent=%s model=%s session=%s — reached %d tool rounds", deps.agentName, deps.model, sessionID, deps.maxToolRounds)
+				toolLoopExitReason = "max_tool_rounds"
+				logJSON("warn", "tool_loop_exit", map[string]interface{}{
+					"agent":                      deps.agentName,
+					"model":                      deps.model,
+					"session_id":                 sessionID,
+					"task_id":                    taskID,
+					"reason":                     toolLoopExitReason,
+					"round":                      toolLoopRounds,
+					"max_rounds":                 deps.maxToolRounds,
+					"had_tool_calls":             hadToolCalls,
+					"last_no_tool_content_chars": len(lastNoToolAssistantContent),
+				})
 				_ = emit(sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
 			}
+		}
+		if toolLoopExitReason != "" && toolLoopExitReason != "max_tool_rounds" {
+			logJSON("info", "tool_loop_exit", map[string]interface{}{
+				"agent":                      deps.agentName,
+				"model":                      deps.model,
+				"session_id":                 sessionID,
+				"task_id":                    taskID,
+				"reason":                     toolLoopExitReason,
+				"round":                      toolLoopRounds,
+				"max_rounds":                 deps.maxToolRounds,
+				"had_tool_calls":             hadToolCalls,
+				"last_no_tool_content_chars": len(lastNoToolAssistantContent),
+			})
 		}
 
 		var full strings.Builder
@@ -1044,8 +1103,28 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		}
 		cancelStream()
 		finalContent := full.String()
+		if strings.TrimSpace(finalContent) == "" && strings.TrimSpace(lastNoToolAssistantContent) != "" {
+			logJSON("info", "tool_loop_content_fallback", map[string]interface{}{
+				"agent":      deps.agentName,
+				"model":      deps.model,
+				"session_id": sessionID,
+				"task_id":    taskID,
+				"chars":      len(lastNoToolAssistantContent),
+			})
+			full.Reset()
+			full.WriteString(lastNoToolAssistantContent)
+			if !emit(sseChunk{Type: "content", Content: lastNoToolAssistantContent, Done: false}) {
+				return lastNoToolAssistantContent, context.Canceled
+			}
+			finalContent = lastNoToolAssistantContent
+		}
 		if strings.TrimSpace(finalContent) == "" && !streamIterationHadToolCalls {
-			log.Printf("[STALL] agent=%s model=%s session=%s — no output produced", deps.agentName, deps.model, sessionID)
+			logJSON("warn", "stall", map[string]interface{}{
+				"agent":      deps.agentName,
+				"model":      deps.model,
+				"session_id": sessionID,
+				"task_id":    taskID,
+			})
 			atomic.AddInt64(&metricsStallsTotal, 1)
 			rememberToolFailure(deps.memoryURL, deps.agentName, sessionID, "inference", map[string]interface{}{}, toolpkg.ToolResult{Error: "no output produced"}, "stall")
 
@@ -1054,7 +1133,13 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			trimmed := progressiveTrim(messages[1:], deps.maxContext/2)
 			messages = append([]message{messages[0]}, trimmed...)
 			newMsgCount := len(messages) - 1
-			log.Printf("[STALL-RETRY] agent=%s trimmed context from %d to %d messages, retrying", deps.agentName, originalMsgCount, newMsgCount)
+			logJSON("info", "stall_retry", map[string]interface{}{
+				"agent":         deps.agentName,
+				"session_id":    sessionID,
+				"task_id":       taskID,
+				"original_msgs": originalMsgCount,
+				"trimmed_msgs":  newMsgCount,
+			})
 
 			// Retry streaming with trimmed context
 			full.Reset()
@@ -1072,7 +1157,12 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 						break
 					}
 					if event.Err != nil {
-						log.Printf("[STALL-RETRY] stream error: %v", event.Err)
+						logJSON("warn", "stall_retry_error", map[string]interface{}{
+							"agent":      deps.agentName,
+							"session_id": sessionID,
+							"task_id":    taskID,
+							"error":      event.Err.Error(),
+						})
 						resp2 = nil
 						break
 					}
@@ -1157,8 +1247,28 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			}
 			cancelStream2()
 			finalContent = full.String()
+			if strings.TrimSpace(finalContent) == "" && strings.TrimSpace(lastNoToolAssistantContent) != "" {
+				logJSON("info", "tool_loop_content_fallback", map[string]interface{}{
+					"agent":      deps.agentName,
+					"model":      deps.model,
+					"session_id": sessionID,
+					"task_id":    taskID,
+					"chars":      len(lastNoToolAssistantContent),
+				})
+				full.Reset()
+				full.WriteString(lastNoToolAssistantContent)
+				if !emit(sseChunk{Type: "content", Content: lastNoToolAssistantContent, Done: false}) {
+					return lastNoToolAssistantContent, context.Canceled
+				}
+				finalContent = lastNoToolAssistantContent
+			}
 			if strings.TrimSpace(finalContent) == "" && !hadXMLToolCalls {
-				log.Printf("[STALL-FATAL] agent=%s model=%s session=%s — retry produced no output", deps.agentName, deps.model, sessionID)
+				logJSON("error", "stall_fatal", map[string]interface{}{
+					"agent":      deps.agentName,
+					"model":      deps.model,
+					"session_id": sessionID,
+					"task_id":    taskID,
+				})
 				atomic.AddInt64(&metricsStallsTotal, 1)
 			}
 		}
