@@ -683,23 +683,23 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					}
 					sessionsMu.Unlock()
 					logJSON("warn", "tool_retry", map[string]interface{}{
-								"agent":    deps.agentName,
-								"session_id": sessionID,
-								"task_id":    taskID,
-								"tool":       tc.Function.Name,
-								"attempt":    attempt,
-								"error":      result.Error,
-							})
+						"agent":      deps.agentName,
+						"session_id": sessionID,
+						"task_id":    taskID,
+						"tool":       tc.Function.Name,
+						"attempt":    attempt,
+						"error":      result.Error,
+					})
 					time.Sleep(2 * time.Second)
 					result = runToolAttempt()
 					if result.Error == "" {
 						logJSON("info", "tool_recovery", map[string]interface{}{
-								"agent":    deps.agentName,
-								"session_id": sessionID,
-								"task_id":    taskID,
-								"tool":       tc.Function.Name,
-								"attempt":    attempt + 1,
-							})
+							"agent":      deps.agentName,
+							"session_id": sessionID,
+							"task_id":    taskID,
+							"tool":       tc.Function.Name,
+							"attempt":    attempt + 1,
+						})
 						rememberToolRecovery(deps.memoryURL, deps.agentName, sessionID, tc.Function.Name, args, attempt+1)
 						break
 					}
@@ -950,14 +950,14 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					toolLoopExitReason = "inference_error"
 				}
 				logJSON("warn", "tool_loop_exit", map[string]interface{}{
-					"agent":                   deps.agentName,
-					"model":                   deps.model,
-					"session_id":              sessionID,
-					"task_id":                 taskID,
-					"reason":                  toolLoopExitReason,
-					"round":                   toolLoopRounds,
-					"max_rounds":              deps.maxToolRounds,
-					"had_tool_calls":          hadToolCalls,
+					"agent":                      deps.agentName,
+					"model":                      deps.model,
+					"session_id":                 sessionID,
+					"task_id":                    taskID,
+					"reason":                     toolLoopExitReason,
+					"round":                      toolLoopRounds,
+					"max_rounds":                 deps.maxToolRounds,
+					"had_tool_calls":             hadToolCalls,
 					"last_no_tool_content_chars": len(lastNoToolAssistantContent),
 				})
 				return "", err
@@ -989,14 +989,14 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			if i == deps.maxToolRounds-1 {
 				toolLoopExitReason = "max_tool_rounds"
 				logJSON("warn", "tool_loop_exit", map[string]interface{}{
-					"agent":                   deps.agentName,
-					"model":                   deps.model,
-					"session_id":              sessionID,
-					"task_id":                 taskID,
-					"reason":                  toolLoopExitReason,
-					"round":                   toolLoopRounds,
-					"max_rounds":              deps.maxToolRounds,
-					"had_tool_calls":          hadToolCalls,
+					"agent":                      deps.agentName,
+					"model":                      deps.model,
+					"session_id":                 sessionID,
+					"task_id":                    taskID,
+					"reason":                     toolLoopExitReason,
+					"round":                      toolLoopRounds,
+					"max_rounds":                 deps.maxToolRounds,
+					"had_tool_calls":             hadToolCalls,
 					"last_no_tool_content_chars": len(lastNoToolAssistantContent),
 				})
 				_ = emit(sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
@@ -1004,14 +1004,14 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		}
 		if toolLoopExitReason != "" && toolLoopExitReason != "max_tool_rounds" {
 			logJSON("info", "tool_loop_exit", map[string]interface{}{
-				"agent":                   deps.agentName,
-				"model":                   deps.model,
-				"session_id":              sessionID,
-				"task_id":                 taskID,
-				"reason":                  toolLoopExitReason,
-				"round":                   toolLoopRounds,
-				"max_rounds":              deps.maxToolRounds,
-				"had_tool_calls":          hadToolCalls,
+				"agent":                      deps.agentName,
+				"model":                      deps.model,
+				"session_id":                 sessionID,
+				"task_id":                    taskID,
+				"reason":                     toolLoopExitReason,
+				"round":                      toolLoopRounds,
+				"max_rounds":                 deps.maxToolRounds,
+				"had_tool_calls":             hadToolCalls,
 				"last_no_tool_content_chars": len(lastNoToolAssistantContent),
 			})
 		}
@@ -1105,11 +1105,11 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		finalContent := full.String()
 		if strings.TrimSpace(finalContent) == "" && strings.TrimSpace(lastNoToolAssistantContent) != "" {
 			logJSON("info", "tool_loop_content_fallback", map[string]interface{}{
-				"agent":     deps.agentName,
-				"model":     deps.model,
+				"agent":      deps.agentName,
+				"model":      deps.model,
 				"session_id": sessionID,
-				"task_id":   taskID,
-				"chars":     len(lastNoToolAssistantContent),
+				"task_id":    taskID,
+				"chars":      len(lastNoToolAssistantContent),
 			})
 			full.Reset()
 			full.WriteString(lastNoToolAssistantContent)
@@ -1134,11 +1134,11 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			messages = append([]message{messages[0]}, trimmed...)
 			newMsgCount := len(messages) - 1
 			logJSON("info", "stall_retry", map[string]interface{}{
-				"agent":          deps.agentName,
-				"session_id":     sessionID,
-				"task_id":        taskID,
-				"original_msgs":  originalMsgCount,
-				"trimmed_msgs":   newMsgCount,
+				"agent":         deps.agentName,
+				"session_id":    sessionID,
+				"task_id":       taskID,
+				"original_msgs": originalMsgCount,
+				"trimmed_msgs":  newMsgCount,
 			})
 
 			// Retry streaming with trimmed context
@@ -1158,11 +1158,11 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					}
 					if event.Err != nil {
 						logJSON("warn", "stall_retry_error", map[string]interface{}{
-								"agent":      deps.agentName,
-								"session_id": sessionID,
-								"task_id":    taskID,
-								"error":      event.Err.Error(),
-							})
+							"agent":      deps.agentName,
+							"session_id": sessionID,
+							"task_id":    taskID,
+							"error":      event.Err.Error(),
+						})
 						resp2 = nil
 						break
 					}
@@ -1249,11 +1249,11 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			finalContent = full.String()
 			if strings.TrimSpace(finalContent) == "" && strings.TrimSpace(lastNoToolAssistantContent) != "" {
 				logJSON("info", "tool_loop_content_fallback", map[string]interface{}{
-					"agent":     deps.agentName,
-					"model":     deps.model,
+					"agent":      deps.agentName,
+					"model":      deps.model,
 					"session_id": sessionID,
-					"task_id":   taskID,
-					"chars":     len(lastNoToolAssistantContent),
+					"task_id":    taskID,
+					"chars":      len(lastNoToolAssistantContent),
 				})
 				full.Reset()
 				full.WriteString(lastNoToolAssistantContent)
