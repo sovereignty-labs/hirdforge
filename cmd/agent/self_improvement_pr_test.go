@@ -9,14 +9,14 @@ import (
 // fakePRTool records the args it was Execute'd with so the test can assert
 // which tool the self-improvement helper actually called.
 type fakePRTool struct {
-	name     string
-	gotArgs  map[string]interface{}
-	gotName  string
+	name    string
+	gotArgs map[string]interface{}
+	gotName string
 }
 
-func (f *fakePRTool) Name() string                            { return f.name }
-func (f *fakePRTool) Description() string                     { return "fake" }
-func (f *fakePRTool) Parameters() map[string]string           { return map[string]string{} }
+func (f *fakePRTool) Name() string                  { return f.name }
+func (f *fakePRTool) Description() string           { return "fake" }
+func (f *fakePRTool) Parameters() map[string]string { return map[string]string{} }
 func (f *fakePRTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	f.gotArgs = args
 	f.gotName = f.name

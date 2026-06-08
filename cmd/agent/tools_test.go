@@ -14,14 +14,14 @@ import (
 func TestConfigureToolRegistryWarriorProfile(t *testing.T) {
 	reg := toolpkg.NewRegistry()
 	enabled := map[string]bool{
-		"read":       true,
-		"write":      true,
-		"edit":       true,
-		"exec":       true,
-		"git-clone":  true,
-		"git-commit": true,
-		"git-diff":   true,
-		"create-pr":  true,
+		"read":        true,
+		"write":       true,
+		"edit":        true,
+		"exec":        true,
+		"git-clone":   true,
+		"git-commit":  true,
+		"git-diff":    true,
+		"create-pr":   true,
 		"task_result": true,
 	}
 	configureToolRegistry(reg, toolSetupDeps{
