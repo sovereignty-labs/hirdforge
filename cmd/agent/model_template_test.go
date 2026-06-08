@@ -41,9 +41,9 @@ func TestLoadModelTemplateEmbedded(t *testing.T) {
 	// embedded template for its tier. The embedded content is shipped in
 	// templates/*.txt and verified by the substring expected for each tier.
 	cases := []struct {
-		model        string
-		wantName     string
-		wantSubstr   string
+		model      string
+		wantName   string
+		wantSubstr string
 	}{
 		{"Qwen-Agent", "qwen", "DO THE TASK IN THE MESSAGE."},
 		{"claude-sonnet-4", "claude", "Use tools proactively"},

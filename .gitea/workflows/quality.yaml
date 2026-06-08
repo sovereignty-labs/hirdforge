@@ -29,6 +29,16 @@ jobs:
           GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@latest
           GOBIN=/usr/local/bin go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
 
+      - name: Check gofmt formatting
+        run: |
+          cd /src
+          UNFORMATTED=$(gofmt -l .)
+          if [ -n "$UNFORMATTED" ]; then
+            echo "Files need reformatting with gofmt -w:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
       - name: Run staticcheck
         run: |
           cd /src

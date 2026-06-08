@@ -34,15 +34,15 @@ type prsHealthResponse struct {
 }
 
 type tasksHealthResponse struct {
-	Total    int               `json:"total"`
-	ByStatus map[string]int    `json:"by_status"`
-	ByAgent  map[string]int    `json:"by_agent"`
+	Total    int            `json:"total"`
+	ByStatus map[string]int `json:"by_status"`
+	ByAgent  map[string]int `json:"by_agent"`
 }
 
 type branchesHealthRepo struct {
-	Repo           string `json:"repo"`
-	Branches       int    `json:"branches"`
-	StaleBranches  int    `json:"stale_branches"`
+	Repo          string `json:"repo"`
+	Branches      int    `json:"branches"`
+	StaleBranches int    `json:"stale_branches"`
 }
 
 type branchesHealthResponse struct {

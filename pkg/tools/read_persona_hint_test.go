@@ -48,8 +48,8 @@ func TestReadToolNotFoundDoesNotHintForOrdinaryPaths(t *testing.T) {
 		"main.go",
 		"cmd/agent/main.go",
 		"README.md",
-		"warrior/main.go",       // 2 segments but not a known persona filename
-		"shared/main.go",        // shared/ but not the persona convention root — still hints (intentional, that's the heuristic)
+		"warrior/main.go", // 2 segments but not a known persona filename
+		"shared/main.go",  // shared/ but not the persona convention root — still hints (intentional, that's the heuristic)
 	} {
 		if path == "shared/main.go" {
 			// Documented exception: anything under shared/ matches the heuristic.
