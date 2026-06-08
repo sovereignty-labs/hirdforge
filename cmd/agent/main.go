@@ -997,7 +997,7 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 				content := chunk.Choices[0].Delta.Content
 				if detector.observe(content) {
-					log.Printf("repetition loop detected, truncating response")
+					logJSON("warn", "repetition loop detected", map[string]interface{}{"event": "repetition_detected", "action": "truncating_response"})
 					return
 				}
 				if !send(inferenceStreamEvent{Content: content}) {
