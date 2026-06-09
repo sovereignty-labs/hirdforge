@@ -298,6 +298,13 @@ func intuitiveContentPrefix(content string) string {
 	return content
 }
 
+func mapOutcomeToSeidr(outcome string) string {
+	if outcome == "contradiction" {
+		return "contradicted"
+	}
+	return "confirmed"
+}
+
 func validateContextMemoriesAsync(memoryURL, sessionID, outcome string) {
 	if strings.TrimSpace(memoryURL) == "" || strings.TrimSpace(sessionID) == "" {
 		return
@@ -306,6 +313,7 @@ func validateContextMemoriesAsync(memoryURL, sessionID, outcome string) {
 	if outcome != "success" && outcome != "contradiction" {
 		return
 	}
+	seidrOutcome := mapOutcomeToSeidr(outcome)
 	ids := snapshotSessionContextMemoryIDs(sessionID)
 	if len(ids) == 0 {
 		return
@@ -317,7 +325,7 @@ func validateContextMemoriesAsync(memoryURL, sessionID, outcome string) {
 		go func(mid string) {
 			payload, _ := json.Marshal(map[string]string{
 				"memory_id": mid,
-				"outcome":   outcome,
+				"outcome":   seidrOutcome,
 			})
 			req, err := http.NewRequest(http.MethodPost, strings.TrimRight(memoryURL, "/")+"/validate", bytes.NewReader(payload))
 			if err != nil {
