@@ -209,6 +209,7 @@ func registerGatewayMCPOAuthRoutes(mux *http.ServeMux, server *gatewayMCPOAuthSe
 	mux.HandleFunc("/authorize", server.handleAuthorize)
 	mux.HandleFunc("/token", server.handleToken)
 	mux.HandleFunc(mcpProtectedResourcePath, handleMCPProtectedResourceMetadata)
+	mux.HandleFunc(mcpProtectedResourceRootPath, handleMCPProtectedResourceMetadata)
 }
 
 func newGatewayMCPOAuthServerFromEnv() *gatewayMCPOAuthServer {
