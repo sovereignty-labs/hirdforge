@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1147,9 +1146,11 @@ func agentNameFromSoulPath(path string) string {
 }
 
 type personaRepo struct {
-	URL       string
-	Root      string
-	AgentName string
+	URL           string
+	Root          string
+	AgentName     string
+	SharedSkills  []string
+	LoadedFiles   []string
 }
 
 func syncPersonaRepo(repoURL, dst string) error {
@@ -1196,121 +1197,115 @@ func initPersonaRepo(repoURL, agentName string) (*personaRepo, error) {
 	return &personaRepo{URL: repoURL, Root: dst, AgentName: agentName}, nil
 }
 
+func parseFrontmatterSharedSkills(content string) []string {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "---\n") && !strings.HasPrefix(trimmed, "---\r\n") && trimmed != "---" {
+		return nil
+	}
+	end := -1
+	start := 3
+	if len(trimmed) > start && trimmed[start] == '\r' {
+		start++
+	}
+	for i := start; i < len(trimmed)-2; i++ {
+		if trimmed[i] == '-' && trimmed[i+1] == '-' && trimmed[i+2] == '-' {
+			end = i
+			break
+		}
+	}
+	if end < 0 {
+		return nil
+	}
+	fm := strings.TrimSpace(trimmed[start:end])
+	var skills []string
+	for _, line := range strings.Split(fm, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "shared_skills:") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(line, "shared_skills:"))
+		val = strings.TrimPrefix(val, "[")
+		val = strings.TrimSuffix(val, "]")
+		for _, item := range strings.Split(val, ",") {
+			item = strings.TrimSpace(item)
+			item = strings.Trim(item, "\"'")
+			if item != "" {
+				skills = append(skills, item)
+			}
+		}
+	}
+	return skills
+}
+
 func loadPersonaSoul(repo *personaRepo) (string, error) {
 	if repo == nil {
 		return "", fmt.Errorf("persona repo not configured")
 	}
-	path := filepath.Join(repo.Root, repo.AgentName, "soul.md")
-	data, err := os.ReadFile(path)
+	p := filepath.Join(repo.Root, repo.AgentName, "soul.md")
+	data, err := os.ReadFile(p)
 	if err != nil {
 		return "", err
 	}
 	content := strings.TrimSpace(string(data))
 	if content == "" {
-		return "", fmt.Errorf("empty soul at %s", path)
+		return "", fmt.Errorf("empty soul at %s", p)
 	}
+	repo.SharedSkills = parseFrontmatterSharedSkills(content)
 	return content, nil
 }
 
-func collectSharedPersonaFiles(repo *personaRepo) []string {
+func discoverPersonaFiles(repo *personaRepo) []string {
 	if repo == nil {
 		return nil
 	}
-	candidates := []string{
-		filepath.Join(repo.Root, "shared"),
-		filepath.Join(repo.Root, repo.AgentName, "shared"),
-	}
-	includes := loadSharedIncludePatterns(repo)
+	agentDir := filepath.Join(repo.Root, repo.AgentName)
 	var files []string
-	seen := map[string]bool{}
-	for _, root := range candidates {
-		_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
-			if err != nil || d == nil || d.IsDir() {
-				return nil
+
+	agentSkillsDir := filepath.Join(agentDir, "skills")
+	if entries, err := os.ReadDir(agentSkillsDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
+				files = append(files, filepath.Join(agentSkillsDir, e.Name()))
 			}
-			ext := strings.ToLower(filepath.Ext(d.Name()))
-			if ext != ".md" && ext != ".txt" {
-				return nil
-			}
-			if seen[p] {
-				return nil
-			}
-			rel := p
-			if r, relErr := filepath.Rel(repo.Root, p); relErr == nil {
-				rel = filepath.ToSlash(r)
-			}
-			if !sharedFileAllowed(rel, includes) {
-				return nil
-			}
-			seen[p] = true
-			files = append(files, p)
-			return nil
-		})
+		}
 	}
 	sort.Strings(files)
-	return files
-}
 
-// loadSharedIncludePatterns reads optional per-agent include globs from
-// <persona-repo>/<agent>/shared-skills.txt. Each non-blank, non-`#` line is a
-// glob pattern matched against shared files' slash-paths relative to the
-// persona repo root (e.g. `shared/skills/delegation.md`). When the file is
-// absent or empty, every shared file is included — preserving prior behavior
-// for agents that haven't opted into filtering. Coordinator-tier agents use
-// this to drop builder-skill files they shouldn't be tempted to imitate.
-func loadSharedIncludePatterns(repo *personaRepo) []string {
-	if repo == nil {
-		return nil
-	}
-	path := filepath.Join(repo.Root, repo.AgentName, "shared-skills.txt")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	var patterns []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+	for _, skill := range repo.SharedSkills {
+		skill = strings.TrimSpace(skill)
+		if skill == "" {
 			continue
 		}
-		patterns = append(patterns, line)
-	}
-	return patterns
-}
-
-// sharedFileAllowed reports whether a shared file's repo-relative slash-path
-// matches any of the include patterns. An empty pattern list opts every file
-// in (current behavior). Patterns use path.Match semantics, which is enough
-// for the two-level shared/ tree; if deeper trees ever appear, switch to a
-// proper glob library.
-func sharedFileAllowed(rel string, patterns []string) bool {
-	if len(patterns) == 0 {
-		return true
-	}
-	for _, pattern := range patterns {
-		if ok, err := path.Match(pattern, rel); err == nil && ok {
-			return true
+		p := filepath.Join(repo.Root, "shared", "skills", skill+".md")
+		if _, err := os.Stat(p); err == nil {
+			files = append(files, p)
 		}
 	}
-	return false
+
+	return files
 }
 
 func loadPersonaSessionContext(repo *personaRepo) string {
 	if repo == nil {
 		return ""
 	}
-	var blocks []string
 	agentDir := filepath.Join(repo.Root, repo.AgentName)
+	var loadedFiles []string
+	var blocks []string
+
 	if b := readContextFileBlock("## Tools Reference", filepath.Join(agentDir, "tools.md")); b != "" {
 		blocks = append(blocks, b)
+		loadedFiles = append(loadedFiles, filepath.ToSlash(filepath.Join(repo.AgentName, "tools.md")))
 	}
 	if b := readContextFileBlock("## Playbook Reference", filepath.Join(agentDir, "playbook.md")); b != "" {
 		blocks = append(blocks, b)
+		loadedFiles = append(loadedFiles, filepath.ToSlash(filepath.Join(repo.AgentName, "playbook.md")))
 	}
-	sharedFiles := collectSharedPersonaFiles(repo)
-	if len(sharedFiles) > 0 {
-		var sharedBlocks []string
-		for _, p := range sharedFiles {
+
+	personaFiles := discoverPersonaFiles(repo)
+	if len(personaFiles) > 0 {
+		var fileBlocks []string
+		for _, p := range personaFiles {
 			data, err := os.ReadFile(p)
 			if err != nil {
 				continue
@@ -1322,13 +1317,25 @@ func loadPersonaSessionContext(repo *personaRepo) string {
 			rel := p
 			if r, err := filepath.Rel(repo.Root, p); err == nil {
 				rel = filepath.ToSlash(r)
+			} else {
+				rel = filepath.ToSlash(p)
 			}
-			sharedBlocks = append(sharedBlocks, "### "+rel+"\n"+content)
+			fileBlocks = append(fileBlocks, "### "+rel+"\n"+content)
+			loadedFiles = append(loadedFiles, rel)
 		}
-		if len(sharedBlocks) > 0 {
-			blocks = append(blocks, "## Shared Context\n"+strings.Join(sharedBlocks, "\n\n"))
+		if len(fileBlocks) > 0 {
+			blocks = append(blocks, "## Shared Context\n"+strings.Join(fileBlocks, "\n\n"))
 		}
 	}
+
+	repo.LoadedFiles = loadedFiles
+	logJSON("info", "persona_loaded", map[string]interface{}{
+		"event":   "persona_loaded",
+		"agent":   repo.AgentName,
+		"files":   loadedFiles,
+		"count":   len(loadedFiles),
+	})
+
 	if len(blocks) == 0 {
 		return ""
 	}
