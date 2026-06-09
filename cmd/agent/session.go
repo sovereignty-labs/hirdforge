@@ -347,6 +347,79 @@ func buildPeerSystemBlock(peers, roles map[string]string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+const maxCompletionNudges = 2
+
+var prRequestPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)create\s+(a\s+)?PR`),
+	regexp.MustCompile(`(?i)PR\s+URL`),
+	regexp.MustCompile(`(?i)include\s+(the\s+)?PR\s+URL`),
+	regexp.MustCompile(`(?i)Done\s+only\s+when\s+(the\s+)?PR`),
+	regexp.MustCompile(`(?i)branch:.*(?:pr|pull\s*request)`),
+	regexp.MustCompile(`(?i)title:.*(?:pr|pull\s*request)`),
+}
+
+var completionSignals = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)https?://[^\s]+/[^/]+/[^/]+/pulls/\d+`),
+	regexp.MustCompile(`(?i)\bPR\s+#\d+\b`),
+	regexp.MustCompile(`(?i)\bFAILED:`),
+	regexp.MustCompile(`(?i)\bNOOP:`),
+}
+
+type completionNudgeState struct {
+	mu           sync.Mutex
+	nudgeCounts  map[string]int
+	recentErrors map[string]bool
+}
+
+var completionNudges = &completionNudgeState{
+	nudgeCounts:  make(map[string]int),
+	recentErrors: make(map[string]bool),
+}
+
+func (s *completionNudgeState) increment(sessionID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nudgeCounts[sessionID]++
+	return s.nudgeCounts[sessionID]
+}
+
+func (s *completionNudgeState) hasExhausted(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.nudgeCounts[sessionID] >= maxCompletionNudges
+}
+
+func (s *completionNudgeState) recordError(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recentErrors[sessionID] = true
+}
+
+func (s *completionNudgeState) hasRecentError(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.recentErrors[sessionID]
+}
+
+func requestRequiresCompletionSignal(userContent string) bool {
+	lower := strings.ToLower(userContent)
+	for _, pat := range prRequestPatterns {
+		if pat.MatchString(lower) {
+			return true
+		}
+	}
+	return false
+}
+
+func contentHasCompletionSignal(content string) bool {
+	for _, pat := range completionSignals {
+		if pat.MatchString(content) {
+			return true
+		}
+	}
+	return false
+}
+
 type conversationProcessor func(ctx context.Context, sessionID, taskID, content string, emit func(interface{}) bool, logTool func(taskspkg.ToolLog)) (string, error)
 
 type conversationDeps struct {
@@ -977,6 +1050,45 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			if len(assistant.ToolCalls) == 0 {
 				toolLoopExitReason = "no_tool_calls"
 				lastNoToolAssistantContent = strings.TrimSpace(stripThinkTags(assistant.Content))
+
+				if strings.TrimSpace(taskID) == "" && hadToolCalls {
+					logJSON("info", "completion_gate_check", map[string]interface{}{
+						"agent":       deps.agentName,
+						"session_id":  sessionID,
+						"task_id":     taskID,
+						"content_len": len(lastNoToolAssistantContent),
+					})
+					if requestRequiresCompletionSignal(content) && !contentHasCompletionSignal(lastNoToolAssistantContent) {
+						if completionNudges.hasExhausted(sessionID) {
+							lastNoToolAssistantContent = "FAILED: completion gate exhausted"
+							logJSON("warn", "completion_gate_failed", map[string]interface{}{
+								"agent":      deps.agentName,
+								"session_id": sessionID,
+								"task_id":    taskID,
+								"nudges":     maxCompletionNudges,
+							})
+							break
+						}
+						completionNudges.recordError(sessionID)
+						nudgeCount := completionNudges.increment(sessionID)
+						nudgeMsg := "You are not done. Continue from the current workspace. Do not reclone. You must either create/report the PR, or report FAILED: <reason>, or NOOP: <evidence>. Do not switch scope."
+						logJSON("info", "completion_nudge_sent", map[string]interface{}{
+							"agent":       deps.agentName,
+							"session_id":  sessionID,
+							"task_id":     taskID,
+							"nudge_count": nudgeCount,
+						})
+						messages = append(messages, message{Role: "assistant", Content: lastNoToolAssistantContent})
+						messages = append(messages, message{Role: "user", Content: nudgeMsg})
+						toolLoopExitReason = ""
+						continue
+					}
+					logJSON("info", "completion_gate_passed", map[string]interface{}{
+						"agent":      deps.agentName,
+						"session_id": sessionID,
+						"task_id":    taskID,
+					})
+				}
 				break
 			}
 			if strings.TrimSpace(assistant.Content) != "" {
