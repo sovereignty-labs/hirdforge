@@ -1146,11 +1146,11 @@ func agentNameFromSoulPath(path string) string {
 }
 
 type personaRepo struct {
-	URL           string
-	Root          string
-	AgentName     string
-	SharedSkills  []string
-	LoadedFiles   []string
+	URL          string
+	Root         string
+	AgentName    string
+	SharedSkills []string
+	LoadedFiles  []string
 }
 
 func syncPersonaRepo(repoURL, dst string) error {
@@ -1330,10 +1330,10 @@ func loadPersonaSessionContext(repo *personaRepo) string {
 
 	repo.LoadedFiles = loadedFiles
 	logJSON("info", "persona_loaded", map[string]interface{}{
-		"event":   "persona_loaded",
-		"agent":   repo.AgentName,
-		"files":   loadedFiles,
-		"count":   len(loadedFiles),
+		"event": "persona_loaded",
+		"agent": repo.AgentName,
+		"files": loadedFiles,
+		"count": len(loadedFiles),
 	})
 
 	if len(blocks) == 0 {
