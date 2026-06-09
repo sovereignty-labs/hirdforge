@@ -9,36 +9,36 @@ import (
 
 func TestWriteJSON(t *testing.T) {
 	tests := []struct {
-		name           string
-		status         int
-		payload        interface{}
-		wantStatus     int
+		name            string
+		status          int
+		payload         interface{}
+		wantStatus      int
 		wantContentType string
-		wantBody       interface{}
+		wantBody        interface{}
 	}{
 		{
-			name:       "valid struct with 200 status",
-			status:     http.StatusOK,
-			payload:    struct{ Message string }{Message: "success"},
-			wantStatus: http.StatusOK,
+			name:            "valid struct with 200 status",
+			status:          http.StatusOK,
+			payload:         struct{ Message string }{Message: "success"},
+			wantStatus:      http.StatusOK,
 			wantContentType: "application/json",
-			wantBody:   map[string]string{"Message": "success"},
+			wantBody:        map[string]string{"Message": "success"},
 		},
 		{
-			name:       "empty struct",
-			status:     http.StatusOK,
-			payload:    struct{}{},
-			wantStatus: http.StatusOK,
+			name:            "empty struct",
+			status:          http.StatusOK,
+			payload:         struct{}{},
+			wantStatus:      http.StatusOK,
 			wantContentType: "application/json",
-			wantBody:   map[string]interface{}{},
+			wantBody:        map[string]interface{}{},
 		},
 		{
-			name:       "custom status code 404",
-			status:     http.StatusNotFound,
-			payload:    map[string]string{"error": "not found"},
-			wantStatus: http.StatusNotFound,
+			name:            "custom status code 404",
+			status:          http.StatusNotFound,
+			payload:         map[string]string{"error": "not found"},
+			wantStatus:      http.StatusNotFound,
 			wantContentType: "application/json",
-			wantBody:   map[string]string{"error": "not found"},
+			wantBody:        map[string]string{"error": "not found"},
 		},
 	}
 
