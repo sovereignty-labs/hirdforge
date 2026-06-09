@@ -32,6 +32,7 @@ except ImportError:
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://seidr:seidr@seidr-postgres:5432/seidr")
 EMBED_URL = os.getenv("EMBED_URL", "").strip()
 COGNITION_INFERENCE_URL = os.getenv("COGNITION_INFERENCE_URL", "").strip()
+COGNITION_MODEL = os.getenv("COGNITION_MODEL", "qwen").strip() or "qwen"
 COLLECTION = os.getenv("COLLECTION_NAME", "valhalla_knowledge")
 MEMORY_TTL_HOURS = int(os.getenv("MEMORY_TTL_HOURS", "240"))
 LESSON_TTL_HOURS = 90 * 24
@@ -1408,7 +1409,7 @@ async def cognition_chat(system_prompt: str, user_prompt: str) -> Optional[str]:
     if not cognition_enabled():
         return None
     payload = {
-        "model": "qwen",
+        "model": COGNITION_MODEL,
         "temperature": 0.1,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -2177,7 +2178,7 @@ def compress_one_sync(content: str) -> Optional[str]:
     if not cognition_enabled():
         return None
     payload = {
-        "model": "qwen",
+        "model": COGNITION_MODEL,
         "temperature": 0.1,
         "messages": [
             {
