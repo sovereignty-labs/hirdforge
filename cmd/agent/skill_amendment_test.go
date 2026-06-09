@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type skillAmendmentTestState struct {
@@ -130,6 +131,126 @@ func TestValidateSkillAmendmentsAsyncTransitions(t *testing.T) {
 		}
 		if got := metadataString(call, "outcome"); got != "confirmed" {
 			t.Fatalf("validate outcome = %q, want confirmed", got)
+		}
+	})
+}
+
+func TestMapOutcomeToSeidr(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"success -> confirmed", "success", "confirmed"},
+		{"contradiction -> contradicted", "contradiction", "contradicted"},
+		{"unknown -> confirmed (default)", "bogus", "confirmed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mapOutcomeToSeidr(tt.in)
+			if got != tt.want {
+				t.Fatalf("mapOutcomeToSeidr(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateContextMemoriesAsyncOutcomeMapping(t *testing.T) {
+	t.Run("maps success to confirmed", func(t *testing.T) {
+		var mu sync.Mutex
+		var calls []map[string]interface{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/validate", func(w http.ResponseWriter, r *http.Request) {
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode validate payload: %v", err)
+			}
+			mu.Lock()
+			calls = append(calls, payload)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"updated": true})
+		})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		addSessionContextMemoryIDs("sess-1", []string{"mem-1"})
+		validateContextMemoriesAsync(server.URL, "sess-1", "success")
+
+		time.Sleep(500 * time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		if len(calls) != 1 {
+			t.Fatalf("validate call count = %d, want 1", len(calls))
+		}
+		if got := metadataString(calls[0], "outcome"); got != "confirmed" {
+			t.Fatalf("outcome = %q, want confirmed", got)
+		}
+	})
+
+	t.Run("maps contradiction to contradicted", func(t *testing.T) {
+		var mu sync.Mutex
+		var calls []map[string]interface{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/validate", func(w http.ResponseWriter, r *http.Request) {
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode validate payload: %v", err)
+			}
+			mu.Lock()
+			calls = append(calls, payload)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"updated": true})
+		})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		addSessionContextMemoryIDs("sess-2", []string{"mem-2"})
+		validateContextMemoriesAsync(server.URL, "sess-2", "contradiction")
+
+		time.Sleep(500 * time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		if len(calls) != 1 {
+			t.Fatalf("validate call count = %d, want 1", len(calls))
+		}
+		if got := metadataString(calls[0], "outcome"); got != "contradicted" {
+			t.Fatalf("outcome = %q, want contradicted", got)
+		}
+	})
+
+	t.Run("rejects unknown outcome", func(t *testing.T) {
+		mux := http.NewServeMux()
+		var callCount int
+		mux.HandleFunc("/validate", func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+		})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		addSessionContextMemoryIDs("sess-3", []string{"mem-3"})
+		validateContextMemoriesAsync(server.URL, "sess-3", "bogus")
+
+		if callCount != 0 {
+			t.Fatalf("validate call count = %d, want 0", callCount)
+		}
+	})
+
+	t.Run("rejects unknown outcome", func(t *testing.T) {
+		mux := http.NewServeMux()
+		var callCount int
+		mux.HandleFunc("/validate", func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+		})
+		server := httptest.NewServer(mux)
+		defer server.Close()
+
+		addSessionContextMemoryIDs("sess-3", []string{"mem-3"})
+		validateContextMemoriesAsync(server.URL, "sess-3", "bogus")
+
+		if callCount != 0 {
+			t.Fatalf("validate call count = %d, want 0", callCount)
 		}
 	})
 }
