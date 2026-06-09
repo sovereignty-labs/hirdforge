@@ -22,6 +22,7 @@ import (
 const (
 	gatewayMCPGiteaBaseURL                     = "http://gitea-http.gitea.svc.cluster.local:3000"
 	mcpProtectedResourcePath                   = "/.well-known/oauth-protected-resource/mcp"
+	mcpProtectedResourceRootPath               = "/.well-known/oauth-protected-resource"
 	mcpProtectedResourceURL                    = "https://mcp.hirdforge.com/mcp"
 	mcpProtectedResourceAuthorizationServerURL = "https://porathindustries.cloudflareaccess.com"
 	mcpProtectedResourceWWWAuthenticate        = `Bearer resource_metadata="https://mcp.hirdforge.com/.well-known/oauth-protected-resource/mcp"`

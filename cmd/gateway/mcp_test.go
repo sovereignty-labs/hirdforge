@@ -42,6 +42,42 @@ func TestMCPProtectedResourceMetadata(t *testing.T) {
 	}
 }
 
+func TestMCPProtectedResourceMetadataRoot(t *testing.T) {
+	mux := http.NewServeMux()
+	registerGatewayMCPOAuthRoutes(mux, newTestMCPOAuthServer())
+
+	req := httptest.NewRequest(http.MethodGet, mcpProtectedResourceRootPath, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	ct := rec.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", ct)
+	}
+	if !strings.Contains(rec.Body.String(), `"resource":"https://mcp.hirdforge.com/mcp"`) {
+		t.Fatalf("body missing expected resource field: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "authorization_servers") {
+		t.Fatalf("body missing authorization_servers field: %s", rec.Body.String())
+	}
+	var payload struct {
+		Resource             string   `json:"resource"`
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if payload.Resource != mcpProtectedResourceURL {
+		t.Fatalf("resource = %q, want %q", payload.Resource, mcpProtectedResourceURL)
+	}
+	if len(payload.AuthorizationServers) != 1 || payload.AuthorizationServers[0] != mcpProtectedResourceAuthorizationServerURL {
+		t.Fatalf("authorization_servers = %#v", payload.AuthorizationServers)
+	}
+}
+
 func TestMCPAcceptsStaticBearer(t *testing.T) {
 	server := newTestMCPServer()
 
