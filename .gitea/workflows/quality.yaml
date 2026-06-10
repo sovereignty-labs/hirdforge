@@ -61,6 +61,11 @@ jobs:
           cd /src
           go test ./... -count=1
 
+      - name: Coverage non-regression ratchet
+        run: |
+          cd /src
+          ./scripts/coverage-ratchet.sh check
+
       - name: Enforce oversized Go file check
         run: |
           cd /src
