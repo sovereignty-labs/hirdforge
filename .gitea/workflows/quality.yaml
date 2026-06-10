@@ -8,6 +8,7 @@ on:
 
 jobs:
   quality:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     container: golang:1.25-alpine
 
@@ -54,6 +55,11 @@ jobs:
         run: |
           cd /src
           go vet ./...
+
+      - name: Run go tests
+        run: |
+          cd /src
+          go test ./... -count=1
 
       - name: Warn on oversized Go files
         run: |
