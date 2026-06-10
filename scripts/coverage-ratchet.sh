@@ -63,7 +63,7 @@ generate)
     {
         echo "# Go per-package coverage baseline — Phase 0 closeout."
         echo "# Regenerate with: scripts/coverage-ratchet.sh generate"
-        echo "# Ratchet enforces current >= floor(baseline) per package (see script header)."
+        echo "# Ratchet enforces current >= baseline - 0.5pp by default (see script header)."
         echo "# format: <import-path|total> <coverage-percent>"
         measure
     } > "$BASELINE_FILE"
