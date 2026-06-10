@@ -1,0 +1,12 @@
+# Go per-package coverage baseline — Phase 0 closeout.
+# Regenerate with: scripts/coverage-ratchet.sh generate
+# Ratchet enforces current >= floor(baseline) per package (see script header).
+# format: <import-path|total> <coverage-percent>
+github.com/kitporath/project_valhalla/cmd/agent 20.0
+github.com/kitporath/project_valhalla/cmd/gateway 16.1
+github.com/kitporath/project_valhalla/cmd/lockbox 3.2
+github.com/kitporath/project_valhalla/pkg/tasklife 89.4
+github.com/kitporath/project_valhalla/pkg/tasks 70.3
+github.com/kitporath/project_valhalla/pkg/tools 19.1
+github.com/kitporath/project_valhalla/pkg/workspace 79.4
+total 19.1
