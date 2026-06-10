@@ -247,7 +247,3 @@ jobs:
             exit 1
           fi
           echo "$PR_RESPONSE"
-          MERGE_RESPONSE=$(curl -s -X POST -H "Authorization: token $REGISTRY_PASSWORD" -H "Content-Type: application/json" \
-            -d '{"Do":"merge","merge_message_field":"ci: auto-merged image update"}' \
-            http://gitea-http.gitea.svc.cluster.local:3000/api/v1/repos/kit/asgard-infra/pulls/$PR_NUMBER/merge)
-          echo "$MERGE_RESPONSE"
