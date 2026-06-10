@@ -27,8 +27,8 @@ jobs:
       - name: Install static analysis tools
         run: |
           cd /src
-          GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@latest
-          GOBIN=/usr/local/bin go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
+          GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          GOBIN=/usr/local/bin go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
 
       - name: Check gofmt formatting
         run: |
