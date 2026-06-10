@@ -1,0 +1,3 @@
+./cmd/agent/main.go
+./cmd/gateway/main.go
+./cmd/agent/session.go

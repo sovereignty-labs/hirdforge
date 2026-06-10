@@ -61,18 +61,37 @@ jobs:
           cd /src
           go test ./... -count=1
 
-      - name: Warn on oversized Go files
+      - name: Enforce oversized Go file check
         run: |
           cd /src
-          found=0
+          THRESHOLD=1500
+          ALLOWLIST=".quality/oversized-go-allowlist.txt"
+          exit_code=0
+          found_violations=0
+          found_grandfathered=0
+          if [ ! -f "$ALLOWLIST" ]; then
+            echo "ERROR: $ALLOWLIST not found"
+            exit 1
+          fi
           find . -name '*.go' -type f | sort > /tmp/go-files.txt
           while IFS= read -r file; do
             lines=$(wc -l < "$file")
-            if [ "$lines" -gt 1500 ]; then
-              echo "WARNING: $file has $lines lines (threshold 1500)"
-              found=1
+            if [ "$lines" -gt "$THRESHOLD" ]; then
+              if grep -qxF "$file" "$ALLOWLIST"; then
+                echo "GRANDFATHERED: $file has $lines lines (threshold $THRESHOLD) — allowlisted"
+                found_grandfathered=1
+              else
+                echo "VIOLATION: $file has $lines lines (threshold $THRESHOLD) — NOT allowlisted"
+                found_violations=1
+                exit_code=1
+              fi
             fi
           done < /tmp/go-files.txt
-          if [ "$found" -eq 0 ]; then
-            echo "No Go files exceed 1500 lines."
+          if [ "$found_grandfathered" -eq 1 ] && [ "$found_violations" -eq 0 ]; then
+            echo "All oversized Go files are grandfathered in the allowlist."
+          elif [ "$found_violations" -eq 1 ]; then
+            echo "ERROR: New oversized Go files detected. Add them to $ALLOWLIST to grandfather."
+          else
+            echo "No Go files exceed $THRESHOLD lines."
           fi
+          exit $exit_code
