@@ -1,0 +1,14 @@
+# Seidr dev/test tooling — pinned. Used by the Python quality lane (ruff + pytest).
+#
+# Lint/test tools:
+ruff==0.9.10
+pytest==8.3.5
+#
+# Runtime deps required only to import seidr/main.py for the tests. Kept in sync
+# with requirements.txt. The heavy optional deps (sentence-transformers, numpy,
+# uvicorn, mcp) are intentionally omitted: they load lazily / are optional and are
+# not needed for the network-free smoke tests, keeping the lane fast.
+fastapi==0.135.0
+pydantic==2.12.5
+asyncpg==0.30.0
+httpx==0.28.1

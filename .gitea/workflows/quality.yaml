@@ -100,3 +100,41 @@ jobs:
             echo "No Go files exceed $THRESHOLD lines."
           fi
           exit $exit_code
+
+  seidr-python:
+    # Seidr Python quality lane: ruff lint + pytest smoke tests. Always runs —
+    # the tests are network/DB/GPU/inference-free and complete in well under a
+    # second. Tooling and import deps are pinned in seidr/requirements-dev.txt.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    container: python:3.12-slim
+
+    steps:
+      - name: Install base packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends git ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Clone repository at workflow SHA
+        run: |
+          rm -rf /src
+          git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src
+          cd /src
+          git fetch origin ${{ github.sha }}
+          git checkout ${{ github.sha }}
+
+      - name: Install Seidr dev tooling (pinned)
+        run: |
+          cd /src/seidr
+          pip install --no-cache-dir -r requirements-dev.txt
+
+      - name: Ruff lint (Seidr)
+        run: |
+          cd /src/seidr
+          ruff check .
+
+      - name: Pytest smoke tests (Seidr)
+        run: |
+          cd /src/seidr
+          pytest
