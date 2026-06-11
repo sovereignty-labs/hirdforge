@@ -998,13 +998,30 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			return result
 		}
 
+		var toolCallSignatures []string
+		repeatedToolCallDetected := false
+		toolErrorsExhausted := false
 		executeToolCalls := func(calls []toolCall) {
 			for _, tc := range calls {
-				_ = executeOneToolCall(tc)
+				toolCallSignatures = append(toolCallSignatures, toolCallSignature(tc.Function.Name, tc.Function.Arguments))
+				if !repeatedToolCallDetected && hasRepeatedToolCallLoop(toolCallSignatures, repeatedToolCallThreshold) {
+					repeatedToolCallDetected = true
+					logJSON("warn", "repeated_tool_call_loop", map[string]interface{}{
+						"agent":       deps.agentName,
+						"session_id":  sessionID,
+						"task_id":     taskID,
+						"tool":        tc.Function.Name,
+						"repetitions": repeatedToolCallThreshold,
+					})
+				}
+				result := executeOneToolCall(tc)
+				if result.Error != "" && shouldRetryTool(tc.Function.Name) {
+					toolErrorsExhausted = true
+				}
 			}
 		}
 
-		var toolLoopExitReason string
+		var toolLoopExitReason terminationReason
 		var lastNoToolAssistantContent string
 		var toolLoopRounds int
 		for i := 0; i < deps.maxToolRounds; i++ {
@@ -1017,26 +1034,24 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, deps.toolDefs, deps.inferenceURL, deps.model, deps.apiKey)
 			cancel()
 			if err != nil {
-				if ctx.Err() == context.Canceled {
-					toolLoopExitReason = "context_canceled"
-				} else {
-					toolLoopExitReason = "inference_error"
-				}
-				logJSON("warn", "tool_loop_exit", map[string]interface{}{
+				toolLoopExitReason = classifyInferenceError(ctx.Err(), err)
+				logSessionTermination(toolLoopExitReason, map[string]interface{}{
 					"agent":                      deps.agentName,
 					"model":                      deps.model,
 					"session_id":                 sessionID,
 					"task_id":                    taskID,
-					"reason":                     toolLoopExitReason,
 					"round":                      toolLoopRounds,
 					"max_rounds":                 deps.maxToolRounds,
 					"had_tool_calls":             hadToolCalls,
 					"last_no_tool_content_chars": len(lastNoToolAssistantContent),
+					"repeated_tool_call":         repeatedToolCallDetected,
+					"tool_errors_exhausted":      toolErrorsExhausted,
+					"error":                      err.Error(),
 				})
 				return "", err
 			}
 			if len(resp.Choices) == 0 {
-				toolLoopExitReason = "choices_empty"
+				toolLoopExitReason = terminationNoActionableOutput
 				break
 			}
 			assistant := resp.Choices[0].Message
@@ -1048,8 +1063,8 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				}
 			}
 			if len(assistant.ToolCalls) == 0 {
-				toolLoopExitReason = "no_tool_calls"
 				lastNoToolAssistantContent = strings.TrimSpace(stripThinkTags(assistant.Content))
+				toolLoopExitReason = classifyModelTurn(lastNoToolAssistantContent)
 
 				if strings.TrimSpace(taskID) == "" && hadToolCalls {
 					logJSON("info", "completion_gate_check", map[string]interface{}{
@@ -1061,6 +1076,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					if requestRequiresCompletionSignal(content) && !contentHasCompletionSignal(lastNoToolAssistantContent) {
 						if completionNudges.hasExhausted(sessionID) {
 							lastNoToolAssistantContent = "FAILED: completion gate exhausted"
+							toolLoopExitReason = terminationNoActionableOutput
 							logJSON("warn", "completion_gate_failed", map[string]interface{}{
 								"agent":      deps.agentName,
 								"session_id": sessionID,
@@ -1099,32 +1115,34 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			}
 			executeToolCalls(assistant.ToolCalls)
 			if i == deps.maxToolRounds-1 {
-				toolLoopExitReason = "max_tool_rounds"
-				logJSON("warn", "tool_loop_exit", map[string]interface{}{
+				toolLoopExitReason = terminationMaxTurns
+				logSessionTermination(terminationMaxTurns, map[string]interface{}{
 					"agent":                      deps.agentName,
 					"model":                      deps.model,
 					"session_id":                 sessionID,
 					"task_id":                    taskID,
-					"reason":                     toolLoopExitReason,
 					"round":                      toolLoopRounds,
 					"max_rounds":                 deps.maxToolRounds,
 					"had_tool_calls":             hadToolCalls,
 					"last_no_tool_content_chars": len(lastNoToolAssistantContent),
+					"repeated_tool_call":         repeatedToolCallDetected,
+					"tool_errors_exhausted":      toolErrorsExhausted,
 				})
 				_ = emit(sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
 			}
 		}
-		if toolLoopExitReason != "" && toolLoopExitReason != "max_tool_rounds" {
-			logJSON("info", "tool_loop_exit", map[string]interface{}{
+		if toolLoopExitReason != "" && toolLoopExitReason != terminationMaxTurns {
+			logSessionTermination(toolLoopExitReason, map[string]interface{}{
 				"agent":                      deps.agentName,
 				"model":                      deps.model,
 				"session_id":                 sessionID,
 				"task_id":                    taskID,
-				"reason":                     toolLoopExitReason,
 				"round":                      toolLoopRounds,
 				"max_rounds":                 deps.maxToolRounds,
 				"had_tool_calls":             hadToolCalls,
 				"last_no_tool_content_chars": len(lastNoToolAssistantContent),
+				"repeated_tool_call":         repeatedToolCallDetected,
+				"tool_errors_exhausted":      toolErrorsExhausted,
 			})
 		}
 
@@ -1375,7 +1393,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				finalContent = lastNoToolAssistantContent
 			}
 			if strings.TrimSpace(finalContent) == "" && !hadXMLToolCalls {
-				logJSON("error", "stall_fatal", map[string]interface{}{
+				logSessionTermination(terminationStallFatal, map[string]interface{}{
 					"agent":      deps.agentName,
 					"model":      deps.model,
 					"session_id": sessionID,
