@@ -1162,6 +1162,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				full.WriteString(errText)
 				if !emit(sseChunk{Type: "content", Content: errText, Done: false}) {
 					cancelStream()
+					logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "stream_error", map[string]interface{}{"stream_error": errText}))
 					return full.String(), context.Canceled
 				}
 				break
@@ -1228,6 +1229,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			full.WriteString(cleanedChunk)
 			if !emit(sseChunk{Type: "content", Content: cleanedChunk, Done: false}) {
 				cancelStream()
+				logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "emit_content", nil))
 				return full.String(), context.Canceled
 			}
 		}
@@ -1244,6 +1246,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			full.Reset()
 			full.WriteString(lastNoToolAssistantContent)
 			if !emit(sseChunk{Type: "content", Content: lastNoToolAssistantContent, Done: false}) {
+				logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "emit_fallback", nil))
 				return lastNoToolAssistantContent, context.Canceled
 			}
 			finalContent = lastNoToolAssistantContent
@@ -1388,6 +1391,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				full.Reset()
 				full.WriteString(lastNoToolAssistantContent)
 				if !emit(sseChunk{Type: "content", Content: lastNoToolAssistantContent, Done: false}) {
+					logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "emit_fallback_recovery", nil))
 					return lastNoToolAssistantContent, context.Canceled
 				}
 				finalContent = lastNoToolAssistantContent
@@ -1420,6 +1424,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				full.Reset()
 				full.WriteString(cleanedFinal)
 				if !emit(sseChunk{Type: "replace", Content: cleanedFinal, Done: false}) {
+					logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "emit_replace", nil))
 					return cleanedFinal, context.Canceled
 				}
 			}
@@ -1440,6 +1445,8 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, deps.toolDefs, deps.inferenceURL, deps.model, deps.apiKey)
 				cancel()
 				if err != nil {
+					reason := classifyInferenceError(ctx.Err(), err)
+					logSessionTermination(reason, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "xml_followup_inference", map[string]interface{}{"error": err.Error()}))
 					return cleaned, err
 				}
 				if len(resp.Choices) == 0 {
@@ -1474,6 +1481,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				if chunkContent != "" {
 					full.WriteString(chunkContent)
 					if !emit(sseChunk{Type: "content", Content: chunkContent, Done: false}) {
+						logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "emit_xml_followup", nil))
 						return full.String(), context.Canceled
 					}
 					messages = append(messages, message{Role: "assistant", Content: chunkContent})

@@ -184,6 +184,26 @@ func terminationLogLevel(reason terminationReason) string {
 // session termination event. Log consumers filter on this.
 const sessionTerminationMsg = "session_termination"
 
+// streamTerminationFields builds the canonical structured-log field set for a
+// termination that happens in the streaming phase (client disconnect, stream
+// error, or a mid-stream error return). It stamps phase="streaming" and a
+// `stage` label so the specific streaming exit point can be told apart in logs.
+// extra is merged last for any path-specific detail (e.g. the backend error).
+func streamTerminationFields(agentName, model, sessionID, taskID, stage string, extra map[string]interface{}) map[string]interface{} {
+	fields := map[string]interface{}{
+		"agent":      agentName,
+		"model":      model,
+		"session_id": sessionID,
+		"task_id":    taskID,
+		"phase":      "streaming",
+		"stage":      stage,
+	}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	return fields
+}
+
 // logSessionTermination emits the canonical structured termination event. The
 // reason is always present as "reason"; callers supply session context and any
 // signal fields (e.g. repeated_tool_call, tool_errors_exhausted). Level is

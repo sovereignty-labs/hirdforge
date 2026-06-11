@@ -130,6 +130,30 @@ func TestHasRepeatedToolCallLoop(t *testing.T) {
 	}
 }
 
+func TestStreamTerminationFields(t *testing.T) {
+	fields := streamTerminationFields("inference-host", "qwen", "sess-1", "task-9", "emit_content", nil)
+	if fields["phase"] != "streaming" {
+		t.Errorf("phase = %v, want streaming", fields["phase"])
+	}
+	if fields["stage"] != "emit_content" {
+		t.Errorf("stage = %v, want emit_content", fields["stage"])
+	}
+	for k, want := range map[string]string{"agent": "inference-host", "model": "qwen", "session_id": "sess-1", "task_id": "task-9"} {
+		if fields[k] != want {
+			t.Errorf("field %q = %v, want %q", k, fields[k], want)
+		}
+	}
+
+	// extra is merged in (e.g. backend error detail).
+	withErr := streamTerminationFields("inference-host", "qwen", "s", "t", "stream_error", map[string]interface{}{"stream_error": "boom"})
+	if withErr["stream_error"] != "boom" {
+		t.Errorf("extra field not merged: %v", withErr["stream_error"])
+	}
+	if withErr["phase"] != "streaming" {
+		t.Error("extra must not clobber phase")
+	}
+}
+
 func TestTerminationLogLevel(t *testing.T) {
 	errorLevel := []terminationReason{terminationInferenceError, terminationContextExhaustion, terminationStallFatal}
 	for _, r := range errorLevel {
