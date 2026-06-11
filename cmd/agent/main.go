@@ -452,6 +452,10 @@ var (
 	memoryURLValue  string
 )
 
+// logWriter is the sink for structured logs. It defaults to stdout; tests swap
+// it to capture and assert on emitted log events (see captureLogs in the tests).
+var logWriter io.Writer = os.Stdout
+
 func logJSON(level, msg string, fields map[string]interface{}) {
 	entry := map[string]interface{}{
 		"ts":    time.Now().UTC().Format(time.RFC3339),
@@ -466,7 +470,7 @@ func logJSON(level, msg string, fields map[string]interface{}) {
 		return
 	}
 	b = append(b, '\n')
-	_, _ = os.Stdout.Write(b)
+	_, _ = logWriter.Write(b)
 }
 
 func incError(msg string, err error, fields map[string]interface{}) {
