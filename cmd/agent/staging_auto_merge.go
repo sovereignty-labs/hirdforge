@@ -59,6 +59,17 @@ type stagingMerger interface {
 	MergePR(ref prRef) error
 }
 
+// mergeCandidate bundles a finished run's outcome with its CI/check status. The
+// check status is supplied by the caller (the future controller) rather than
+// queried here — A1 does not query Gitea checks yet. ChecksGreen is a bool whose
+// zero value is false, so a missing/unknown status fails closed (never merges).
+// ChecksSummary is optional human/audit detail (e.g. "3/3 passed", "pending").
+type mergeCandidate struct {
+	Outcome       runOutcome
+	ChecksGreen   bool
+	ChecksSummary string
+}
+
 // prURLRefPattern extracts owner, repo and index from a Gitea PR URL of the form
 // scheme://host/<owner>/<repo>/pulls/<n>.
 var prURLRefPattern = regexp.MustCompile(`(?i)^https?://[^/]+/([^/]+)/([^/]+)/pulls/(\d+)`)
@@ -80,20 +91,26 @@ func prRefFromOutcome(o runOutcome) (prRef, bool) {
 
 // maybeAutoMergeStaging is the controller. It merges the PR ONLY when the
 // auto-merge flag is enabled AND the outcome is eligible per evaluateStagingGate
-// AND a concrete PR reference can be derived. It never merges by default, never
-// panics, and logs a structured staging_auto_merge decision for every flag-on
-// evaluation. Merge errors are returned and logged, never swallowed.
-func maybeAutoMergeStaging(o runOutcome, merger stagingMerger) (merged bool, err error) {
+// AND the candidate's CI checks are green AND a concrete PR reference can be
+// derived. It never merges by default, never panics, and logs a structured
+// staging_auto_merge decision for every flag-on evaluation. Merge errors are
+// returned and logged, never swallowed.
+func maybeAutoMergeStaging(c mergeCandidate, merger stagingMerger) (merged bool, err error) {
 	if !stagingAutoMergeEnabled() {
 		return false, nil // default: non-merging and silent
 	}
 
+	o := c.Outcome
 	d := evaluateStagingGate(o)
 	fields := map[string]interface{}{
 		"eligible":           d.Eligible,
 		"reason":             d.Reason,
 		"outcome_kind":       string(d.Kind),
 		"termination_reason": d.TerminationReason.String(),
+		"checks_green":       c.ChecksGreen,
+	}
+	if c.ChecksSummary != "" {
+		fields["checks_summary"] = c.ChecksSummary
 	}
 	if d.PRURL != "" {
 		fields["pr_url"] = d.PRURL
@@ -104,6 +121,15 @@ func maybeAutoMergeStaging(o runOutcome, merger stagingMerger) (merged bool, err
 
 	if !d.Eligible {
 		fields["merged"] = false
+		logJSON("info", stagingAutoMergeMsg, fields)
+		return false, nil
+	}
+
+	// A1 hard precondition: never merge unless CI checks are explicitly green.
+	// A missing/unknown status is false, so this fails closed.
+	if !c.ChecksGreen {
+		fields["merged"] = false
+		fields["reason"] = "ineligible: CI checks not green"
 		logJSON("info", stagingAutoMergeMsg, fields)
 		return false, nil
 	}

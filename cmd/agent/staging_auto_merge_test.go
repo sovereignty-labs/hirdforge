@@ -32,17 +32,23 @@ func eligiblePROutcome() runOutcome {
 	}
 }
 
+// eligibleCandidate is a fully-eligible merge candidate: an eligible PR outcome
+// with CI checks green.
+func eligibleCandidate() mergeCandidate {
+	return mergeCandidate{Outcome: eligiblePROutcome(), ChecksGreen: true, ChecksSummary: "3/3 passed"}
+}
+
 func TestAutoMergeMergesWhenEnabledAndEligible(t *testing.T) {
 	t.Setenv(stagingAutoMergeEnvVar, "1")
 	logs := captureLogs(t)
 	merger := &fakeMerger{}
 
-	merged, err := maybeAutoMergeStaging(eligiblePROutcome(), merger)
+	merged, err := maybeAutoMergeStaging(eligibleCandidate(), merger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !merged {
-		t.Error("expected merged=true for an eligible outcome with the flag on")
+		t.Error("expected merged=true for an eligible candidate (checks green) with the flag on")
 	}
 	if merger.calls != 1 {
 		t.Errorf("merger called %d times, want 1", merger.calls)
@@ -67,7 +73,7 @@ func TestAutoMergeDoesNotMergeWhenFlagDisabled(t *testing.T) {
 	logs := captureLogs(t)
 	merger := &fakeMerger{}
 
-	merged, err := maybeAutoMergeStaging(eligiblePROutcome(), merger)
+	merged, err := maybeAutoMergeStaging(eligibleCandidate(), merger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,6 +85,55 @@ func TestAutoMergeDoesNotMergeWhenFlagDisabled(t *testing.T) {
 	}
 	if findLogEntry(logs, stagingAutoMergeMsg) != nil {
 		t.Error("no staging_auto_merge event should be logged while the flag is off")
+	}
+}
+
+func TestAutoMergeRequiresChecksGreen(t *testing.T) {
+	t.Setenv(stagingAutoMergeEnvVar, "1")
+	logs := captureLogs(t)
+	merger := &fakeMerger{}
+
+	// Eligible PR + completed + ref, but checks are red.
+	cand := mergeCandidate{Outcome: eligiblePROutcome(), ChecksGreen: false, ChecksSummary: "1/3 failing"}
+	merged, err := maybeAutoMergeStaging(cand, merger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged {
+		t.Error("must not merge when checks are not green")
+	}
+	if merger.calls != 0 {
+		t.Errorf("merger must not be called when checks are not green; calls=%d", merger.calls)
+	}
+	entry := findLogEntry(logs, stagingAutoMergeMsg)
+	if entry == nil {
+		t.Fatal("expected a staging_auto_merge log entry")
+	}
+	if cg, _ := entry["checks_green"].(bool); cg {
+		t.Errorf("log should record checks_green=false; entry: %v", entry)
+	}
+	if r, _ := entry["reason"].(string); !strings.Contains(r, "checks not green") {
+		t.Errorf("log reason should cite checks; entry: %v", entry)
+	}
+}
+
+func TestAutoMergeMissingChecksFailClosed(t *testing.T) {
+	t.Setenv(stagingAutoMergeEnvVar, "1")
+	captureLogs(t)
+	merger := &fakeMerger{}
+
+	// ChecksGreen left at its zero value (false) models a missing/unknown status:
+	// it must fail closed and never merge.
+	cand := mergeCandidate{Outcome: eligiblePROutcome()}
+	if cand.ChecksGreen {
+		t.Fatal("precondition: zero-value ChecksGreen should be false")
+	}
+	merged, err := maybeAutoMergeStaging(cand, merger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged || merger.calls != 0 {
+		t.Errorf("missing/unknown checks must fail closed (merged=%v calls=%d)", merged, merger.calls)
 	}
 }
 
@@ -97,7 +152,8 @@ func TestAutoMergeNeverMergesIneligibleOutcomes(t *testing.T) {
 	for _, c := range ineligible {
 		t.Run(c.name, func(t *testing.T) {
 			merger := &fakeMerger{}
-			merged, err := maybeAutoMergeStaging(c.outcome, merger)
+			// Checks are green here, to prove the gate ineligibility alone blocks.
+			merged, err := maybeAutoMergeStaging(mergeCandidate{Outcome: c.outcome, ChecksGreen: true}, merger)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -112,11 +168,12 @@ func TestAutoMergeFailsClosedOnMissingRef(t *testing.T) {
 	t.Setenv(stagingAutoMergeEnvVar, "1")
 	captureLogs(t)
 	merger := &fakeMerger{}
-	// Eligible by the gate (PR + completed + a PR number) but no URL, so no
-	// owner/repo can be derived: must fail closed without calling the merger.
+	// Eligible by the gate (PR + completed + a PR number) with checks green, but
+	// no URL, so no owner/repo can be derived: must fail closed without calling
+	// the merger.
 	outcome := runOutcome{Kind: outcomePR, PRNumber: 7, TerminationReason: terminationCompleted}
 
-	merged, err := maybeAutoMergeStaging(outcome, merger)
+	merged, err := maybeAutoMergeStaging(mergeCandidate{Outcome: outcome, ChecksGreen: true}, merger)
 	if merged {
 		t.Error("must not merge when no concrete PR ref can be derived")
 	}
@@ -133,7 +190,7 @@ func TestAutoMergeReportsMergeErrorWithoutPanic(t *testing.T) {
 	logs := captureLogs(t)
 	merger := &fakeMerger{err: errors.New("gitea rejected merge: checks pending")}
 
-	merged, err := maybeAutoMergeStaging(eligiblePROutcome(), merger)
+	merged, err := maybeAutoMergeStaging(eligibleCandidate(), merger)
 	if merged {
 		t.Error("merge reported success despite merger error")
 	}
@@ -155,7 +212,7 @@ func TestAutoMergeReportsMergeErrorWithoutPanic(t *testing.T) {
 func TestAutoMergeNilMergerFailsClosed(t *testing.T) {
 	t.Setenv(stagingAutoMergeEnvVar, "1")
 	captureLogs(t)
-	merged, err := maybeAutoMergeStaging(eligiblePROutcome(), nil)
+	merged, err := maybeAutoMergeStaging(eligibleCandidate(), nil)
 	if merged || !errors.Is(err, errStagingMergeNoMerger) {
 		t.Errorf("nil merger must fail closed; merged=%v err=%v", merged, err)
 	}
@@ -171,7 +228,7 @@ func TestDryRunGateStillWorksSeparately(t *testing.T) {
 	merger := &fakeMerger{}
 
 	logStagingDryRunGate(eligiblePROutcome())
-	merged, err := maybeAutoMergeStaging(eligiblePROutcome(), merger)
+	merged, err := maybeAutoMergeStaging(eligibleCandidate(), merger)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
