@@ -85,6 +85,47 @@ func TestClassifyRunOutcome(t *testing.T) {
 	}
 }
 
+// TestClassifyRunOutcomeAgreesWithCompletionDetection guards against drift
+// between production completion detection (contentHasCompletionSignal) and the
+// typed extraction (classifyRunOutcome). Both now read the same completion*Pattern
+// source of truth; this test pins that agreement for one example of every signal
+// form contentHasCompletionSignal accepts, plus a negative control.
+func TestClassifyRunOutcomeAgreesWithCompletionDetection(t *testing.T) {
+	signalForms := []struct {
+		content  string
+		wantKind outcomeKind
+	}{
+		{"see http://gitea.local/kit/hirdforge/pulls/99", outcomePR}, // PR URL
+		{"merged as PR #99 already", outcomePR},                      // PR #n
+		{"FAILED: could not reproduce", outcomeFailed},               // FAILED:
+		{"NOOP: nothing to change", outcomeNoop},                     // NOOP:
+		{"FAILED:", outcomeFailed},                                   // FAILED with no reason text
+	}
+	for _, f := range signalForms {
+		// Whatever production detection accepts as a signal must classify to a
+		// concrete (non-unknown) outcome of the expected kind.
+		if !contentHasCompletionSignal(f.content) {
+			t.Errorf("contentHasCompletionSignal(%q) = false; pattern source out of sync", f.content)
+		}
+		got := classifyRunOutcome(f.content, terminationCompleted)
+		if got.Kind == outcomeUnknown {
+			t.Errorf("classifyRunOutcome(%q) = unknown but detection accepts it (drift)", f.content)
+		}
+		if got.Kind != f.wantKind {
+			t.Errorf("classifyRunOutcome(%q) kind = %q, want %q", f.content, got.Kind, f.wantKind)
+		}
+	}
+
+	// Negative control: detection rejects it, and extraction returns unknown.
+	const noSignal = "I looked around and am still thinking."
+	if contentHasCompletionSignal(noSignal) {
+		t.Errorf("contentHasCompletionSignal(%q) = true unexpectedly", noSignal)
+	}
+	if got := classifyRunOutcome(noSignal, terminationCompleted); got.Kind != outcomeUnknown {
+		t.Errorf("classifyRunOutcome(%q) kind = %q, want unknown", noSignal, got.Kind)
+	}
+}
+
 // TestE2EFakePRToolOutcomeIsPR drives the fake-PR-tool e2e path and asserts the
 // result-extraction seam maps the finished run to outcome kind=pr, carrying the
 // PR URL the tool produced and the run's actual termination reason.

@@ -358,11 +358,26 @@ var prRequestPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)title:.*(?:pr|pull\s*request)`),
 }
 
+// Completion-signal patterns: the single source of truth for what counts as a
+// terminal agent result. They carry capture groups (the PR number, the FAILED /
+// NOOP reason text) so the result-extraction seam (classifyRunOutcome in
+// result_outcome.go) extracts from the exact same patterns that detection uses —
+// preventing drift between detection and extraction. Capture groups do not
+// affect MatchString, so detection behavior is unchanged.
+var (
+	completionPRURLPattern  = regexp.MustCompile(`(?i)https?://[^\s]+/[^/]+/[^/]+/pulls/(\d+)`)
+	completionPRNumPattern  = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b`)
+	completionFailedPattern = regexp.MustCompile(`(?i)\bFAILED:\s*(.*)`)
+	completionNoopPattern   = regexp.MustCompile(`(?i)\bNOOP:\s*(.*)`)
+)
+
+// completionSignals is the detection view of the patterns above, consumed by
+// contentHasCompletionSignal.
 var completionSignals = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)https?://[^\s]+/[^/]+/[^/]+/pulls/\d+`),
-	regexp.MustCompile(`(?i)\bPR\s+#\d+\b`),
-	regexp.MustCompile(`(?i)\bFAILED:`),
-	regexp.MustCompile(`(?i)\bNOOP:`),
+	completionPRURLPattern,
+	completionPRNumPattern,
+	completionFailedPattern,
+	completionNoopPattern,
 }
 
 type completionNudgeState struct {

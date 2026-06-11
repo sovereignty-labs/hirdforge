@@ -1,7 +1,6 @@
 package main
 
 import (
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -44,18 +43,10 @@ type runOutcome struct {
 	TerminationReason terminationReason
 }
 
-// Completion-signal extraction patterns. These mirror the production
-// completionSignals (session.go) but add capture groups so the PR URL/number and
-// the FAILED/NOOP reason text can be pulled out.
-var (
-	outcomePRURLPattern  = regexp.MustCompile(`(?i)https?://[^\s]+/[^/]+/[^/]+/pulls/(\d+)`)
-	outcomePRNumPattern  = regexp.MustCompile(`(?i)\bPR\s+#(\d+)\b`)
-	outcomeFailedPattern = regexp.MustCompile(`(?i)\bFAILED:\s*(.*)`)
-	outcomeNoopPattern   = regexp.MustCompile(`(?i)\bNOOP:\s*(.*)`)
-)
-
 // classifyRunOutcome maps a finished run's final content and termination reason
-// into a typed runOutcome. Precedence among signals is PR (URL, then number),
+// into a typed runOutcome. It extracts from the SAME completion-signal patterns
+// that production detection uses (completion*Pattern in session.go), so detection
+// and extraction cannot drift. Precedence among signals is PR (URL, then number),
 // then FAILED, then NOOP — a reported PR is treated as the success outcome. The
 // termination reason is always carried through unchanged.
 func classifyRunOutcome(finalContent string, reason terminationReason) runOutcome {
@@ -67,23 +58,23 @@ func classifyRunOutcome(finalContent string, reason terminationReason) runOutcom
 		return out
 	}
 
-	if m := outcomePRURLPattern.FindStringSubmatch(content); m != nil {
+	if m := completionPRURLPattern.FindStringSubmatch(content); m != nil {
 		out.Kind = outcomePR
 		out.PRURL = m[0]
 		out.PRNumber, _ = strconv.Atoi(m[1])
 		return out
 	}
-	if m := outcomePRNumPattern.FindStringSubmatch(content); m != nil {
+	if m := completionPRNumPattern.FindStringSubmatch(content); m != nil {
 		out.Kind = outcomePR
 		out.PRNumber, _ = strconv.Atoi(m[1])
 		return out
 	}
-	if m := outcomeFailedPattern.FindStringSubmatch(content); m != nil {
+	if m := completionFailedPattern.FindStringSubmatch(content); m != nil {
 		out.Kind = outcomeFailed
 		out.FailedReason = strings.TrimSpace(m[1])
 		return out
 	}
-	if m := outcomeNoopPattern.FindStringSubmatch(content); m != nil {
+	if m := completionNoopPattern.FindStringSubmatch(content); m != nil {
 		out.Kind = outcomeNoop
 		out.NoopReason = strings.TrimSpace(m[1])
 		return out
