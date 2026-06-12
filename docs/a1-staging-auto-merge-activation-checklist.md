@@ -20,11 +20,23 @@ It is the activation counterpart to `docs/e2e-staging-harness-contract.md`
   otherwise; never panics; logs a `staging_auto_merge` decision.
 - `stagingMerger` interface + isolated `giteaStagingMerger` adapter (the only
   code that calls the Gitea merge API; base URL + token injected, no secrets).
+- `checksClient` interface + `stagingChecksGreen(...)` + isolated
+  `giteaChecksClient` adapter — the checks-source helper; returns
+  `(checksGreen, summary)` for a PR head SHA, failing closed on
+  pending/failure/error/missing/api-error/malformed.
+- `runStagingDryRun(input, checksClient, scope)` — the **Phase 4 dry-run
+  controller**: assembles a `mergeCandidate` (outcome via `classifyRunOutcome` +
+  checks via `stagingChecksGreen`), applies a `stagingScope` allow-list, and
+  emits a `staging_dry_run_gate` audit log with a `would_merge` verdict. It is
+  **dry-run only** — it never calls `maybeAutoMergeStaging` and never merges, and
+  is a no-op when `STAGING_DRY_RUN_GATE` is off.
 - Flags, both **default off**: `STAGING_DRY_RUN_GATE` (log-only decision),
   `STAGING_AUTO_MERGE` (real merge).
 
-`maybeAutoMergeStaging` is **not called by any production path**, and no code
-constructs a real `giteaStagingMerger`. Enabling the flag alone does nothing.
+`maybeAutoMergeStaging` is **not called by any production path**, no code
+constructs a real `giteaStagingMerger` or `giteaChecksClient`, and
+`runStagingDryRun` is **not wired into the live session flow** yet. Enabling a
+flag alone does nothing.
 
 ## Required preconditions (all mandatory)
 
@@ -68,19 +80,21 @@ constructs a real `giteaStagingMerger`. Enabling the flag alone does nothing.
   The dedicated merge token must have the **minimum** scope to merge PRs in the
   allow-listed repo and nothing more. Any broadening is its own reviewed change.
 
-## Proposed next PR sequence
+## PR sequence
 
-Each PR is independently reviewable; the flag stays off until the final step.
+The flag stays off until the final step.
 
-1. **Checks-source helper** *(near-test-only)* — a small, isolated helper that
-   reads the authoritative check status for a PR head SHA and returns
-   `(checksGreen bool, summary string)`, failing closed on pending/error/missing.
-   Unit-tested against an `httptest` fake; not wired in. Feeds `mergeCandidate`.
-2. **Controller dry-run wiring** *(feature-flagged, dry-run only)* — wire a
-   controller that builds a `mergeCandidate` (outcome from the result-extraction
-   seam + checks from step 1) and calls the gate in **log-only** mode under
-   `STAGING_DRY_RUN_GATE`. Still no real merge. This drives the observation
-   window above.
+1. **Checks-source helper** — **DONE.** `stagingChecksGreen` + `checksClient` /
+   `giteaChecksClient`: reads the authoritative check status for a PR head SHA and
+   returns `(checksGreen, summary)`, failing closed on pending/error/missing.
+   Unit-tested against fakes/`httptest`; not wired in.
+2. **Dry-run controller** — **DONE.** `runStagingDryRun` assembles a
+   `mergeCandidate` (outcome from the result-extraction seam + checks from step 1),
+   applies the `stagingScope` allow-list, and emits the `staging_dry_run_gate`
+   audit log with a `would_merge` verdict in **log-only** mode under
+   `STAGING_DRY_RUN_GATE`. No real merge; never calls `maybeAutoMergeStaging`; not
+   wired into the live session flow. This is the machinery the observation window
+   runs on once it is wired in.
 3. **Restricted-scope activation** *(flagged, real merge, tiny blast radius)* —
    enable real merge for a **single** allow-listed repo + staging branch with a
    fresh least-privilege token, after the dry-run window is reviewed. Validate the
