@@ -56,7 +56,10 @@ func (s *stagingScope) allows(owner, repo, branch string) bool {
 }
 
 // stagingRunInput is the finished-run information the dry-run controller needs.
+// HeadSHA may be a commit SHA or a branch ref (the Gitea combined-status endpoint
+// accepts either). SessionID, when set, is echoed into the audit log.
 type stagingRunInput struct {
+	SessionID         string
 	FinalContent      string
 	TerminationReason terminationReason
 	HeadSHA           string
@@ -105,8 +108,17 @@ func runStagingDryRun(in stagingRunInput, checks checksClient, scope *stagingSco
 		reason = "blocked: " + checksSummary
 	}
 
+	// decision is the dry-run verdict as an enum: would_allow when the run would
+	// be eligible to auto-merge, would_block otherwise. This is observation only —
+	// it never implies a real merge happened.
+	decision := "would_block"
+	if wouldMerge {
+		decision = "would_allow"
+	}
+
 	fields := map[string]interface{}{
 		"dry_run":            true,
+		"decision":           decision,
 		"would_merge":        wouldMerge,
 		"reason":             reason,
 		"eligible":           gate.Eligible,
@@ -115,6 +127,9 @@ func runStagingDryRun(in stagingRunInput, checks checksClient, scope *stagingSco
 		"scope_allowed":      scopeAllowed,
 		"outcome_kind":       string(outcome.Kind),
 		"termination_reason": outcome.TerminationReason.String(),
+	}
+	if in.SessionID != "" {
+		fields["session_id"] = in.SessionID
 	}
 	if in.BaseBranch != "" {
 		fields["base_branch"] = in.BaseBranch

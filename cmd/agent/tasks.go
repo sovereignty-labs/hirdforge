@@ -538,6 +538,15 @@ func registerTaskRoutes(mux *http.ServeMux, deps serverDeps) {
 				"summary":    summary,
 				"session_id": cur.SessionID,
 			})
+			// Live staging dry-run observation (Phase 4): when, and only when,
+			// STAGING_DRY_RUN_GATE is enabled, emit a structured dry-run gate
+			// observation for the completed session. Observation only — never
+			// merges, never calls maybeAutoMergeStaging, fails closed on missing
+			// config/checks/extraction.
+			if stagingDryRunGateEnabled() {
+				obs, _ := newStagingDryRunObserverFromEnv(giteaURLValue, giteaTokenValue)
+				observeCompletedSessionDryRun(obs, cur.SessionID, cur.ID, result)
+			}
 		}(task.ID, req.Content)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": task.ID, "status": task.Status})
