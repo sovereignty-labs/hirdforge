@@ -2,23 +2,23 @@ autonomy: A0
 
 classes:
   docs:
-    level: A0
+    min_level: A2
     description: Generate or update documentation files
   tests:
-    level: A0
+    min_level: A2
     description: Write or update tests and test fixtures
   skills:
-    level: A0
+    min_level: A2
     description: Create or update agent skills
   code:
-    level: A0
+    min_level: A3
     description: Generate or update application source code
   infra-staging:
-    level: A0
+    min_level: A1
     description: Manage staging environment infrastructure manifests
   infra-prod-bump:
-    level: A0
+    min_level: A2
     description: Bump production image tags or versions
   infra-production:
-    level: A0
+    min_level: A3
     description: Manage production infrastructure manifests

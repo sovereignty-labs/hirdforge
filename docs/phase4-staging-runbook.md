@@ -15,9 +15,11 @@ When a push hits the `next` branch:
    - Pushes to the internal Gitea registry
    - **Never** overwrites `:latest`
 
-2. **build.yaml** also triggers the `update-infra` job on `main` pushes only. This job clones
-   `kit/asgard-infra`, updates image tag references in staging YAML manifests, and opens a PR.
-   It does **not** auto-merge.
+2. **build.yaml** includes an `update-infra` job that runs on `main` pushes only. This job clones
+    `kit/asgard-infra`, updates image tag references in staging YAML manifests under
+    `infrastructure/asgard-staging/`, and opens a PR. It does **not** auto-merge.
+    The `update-infra` job does **not** run on `next` pushes — it only triggers when `main` is
+    updated. This means the `next` → staging image tag bump path is not fully automated.
 
 3. Staging image tags are immutable per-commit: each commit on `next` gets a unique `sha-next-`
    tag.
@@ -26,11 +28,25 @@ When a push hits the `next` branch:
 
 Location: `.autonomy.yaml` at the repo root.
 
-- **autonomy level: `A0`** — fully human-gated. No autonomous merge or deployment.
-- Each class (docs, tests, skills, code, infra-staging, infra-prod-bump, infra-production) has
-  `level: A0`.
+- **autonomy level: `A0`** — fully human-gated. No autonomous merge or deployment is active.
+- Each class has a `min_level` threshold that defines the autonomy level required for that class
+  to be activated in the future. These thresholds are policy definitions only — they do not
+  activate any automation while `autonomy` remains A0.
+
+Current class thresholds:
+
+| Class | `min_level` | Notes |
+|-------|-------------|-------|
+| docs | A2 | Documentation requires A2 or higher to activate |
+| tests | A2 | Tests require A2 or higher to activate |
+| skills | A2 | Skills require A2 or higher to activate |
+| infra-staging | A1 | Staging infra is the lowest-threshold class |
+| infra-prod-bump | A2 | Production bumps require A2 or higher |
+| code | A3 | Source code requires A3 (maximum) |
+| infra-production | A3 | Production infra requires A3 (maximum) |
+
 - `.autonomy.yaml` is a kill-switch and control surface only. It does **not** activate A1, A2, or
-  A3.
+  A3 while `autonomy` is `A0`.
 
 ## Dry-Run Observation
 
@@ -79,12 +95,24 @@ kubectl logs -n asgard-staging -l asgard.io/agent=staging-warrior --tail=200 \
 
 Before promoting dry-run observation to real A1 auto-merge:
 
-1. `.autonomy.yaml` must have `code` and `infra-staging` classes at `A1` or higher.
+1. `.autonomy.yaml` must have `code` and `infra-staging` classes with `min_level` at `A1` or
+    higher.
 2. `STAGING_AUTO_MERGE=1` must be set on the staging deployment.
 3. A1 merge must be gated on:
-   - PR against `next` branch
-   - All required checks passing
-   - No `selfHeal` or automated sync in staging
-   - Human-approved PR in asgard-infra
+    - PR against `next` branch
+    - All required checks passing
+    - No `selfHeal` or automated sync in staging
+    - Human-approved PR in asgard-infra
 4. Production `STAGING_AUTO_MERGE` must remain unset.
 5. No production deployment may be auto-merged without a human gate.
+
+## Phase 4 Status
+
+This PR creates a **prepared staging substrate** — the infrastructure skeleton is in place
+(namespace, deployment, service, ArgoCD application, dry-run env). It does **not** implement
+full zero-human-action Phase 4 completion because:
+
+- The `update-infra` job only runs on `main` pushes, not on `next` pushes.
+- Image tag bumps from `next` → staging require a manual PR merge in asgard-infra.
+- `STAGING_DRY_RUN_ENABLED` is not a recognized environment variable — only
+  `STAGING_DRY_RUN_GATE=1` gates the dry-run controller.
