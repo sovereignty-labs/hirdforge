@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -190,7 +191,7 @@ func (r *giteaPRHeadResolver) HeadRef(owner, repo string, index int) (string, er
 	if r.baseURL == "" || r.token == "" {
 		return "", fmt.Errorf("pr head resolver: not configured")
 	}
-	endpoint := fmt.Sprintf("%s/api/v1/repos/%s/%s/pulls/%s", r.baseURL, owner, repo, strconv.Itoa(index))
+	endpoint := fmt.Sprintf("%s/api/v1/repos/%s/%s/pulls/%s", r.baseURL, url.PathEscape(owner), url.PathEscape(repo), strconv.Itoa(index))
 	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("pr head resolver: build request: %w", err)

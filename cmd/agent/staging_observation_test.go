@@ -215,3 +215,21 @@ func TestGiteaPRHeadResolverAdapter(t *testing.T) {
 		t.Error("unconfigured resolver should error")
 	}
 }
+
+func TestGiteaPRHeadResolverEscapesPath(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.RequestURI
+		_, _ = w.Write([]byte(`{"head":{"sha":"abc"}}`))
+	}))
+	defer srv.Close()
+
+	// Owner/repo containing characters that must be path-escaped.
+	if _, err := newGiteaPRHeadResolver(srv.URL, "tok").HeadRef("weird owner", "re/po", 7); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "/api/v1/repos/weird%20owner/re%2Fpo/pulls/7"
+	if gotURI != want {
+		t.Errorf("request URI = %q, want escaped %q", gotURI, want)
+	}
+}
