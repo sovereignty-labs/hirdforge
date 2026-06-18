@@ -53,6 +53,10 @@ const indexHTML = `<!doctype html>
     <li><code>GET /api/workbench/events</code></li>
     <li><code>GET /api/workbench/project</code></li>
     <li><code>GET /api/workbench/provider</code></li>
+    <li><code>GET /api/workbench/build/session</code></li>
+    <li><code>GET /api/workbench/build/sessions</code></li>
+    <li><code>GET /api/workbench/validation</code></li>
+    <li><code>GET /api/workbench/diff</code></li>
   </ul>
 </body>
 </html>
@@ -140,6 +144,7 @@ type workbench struct {
 	store    *eventStore
 	project  *projectState
 	provider *providerState
+	sessions *sessionStore
 	mux      *http.ServeMux
 }
 
@@ -150,6 +155,7 @@ func newWorkbench() *workbench {
 		store:    s,
 		project:  newProjectState(),
 		provider: newProviderState(),
+		sessions: newSessionStore(),
 	}
 	wb.mux = wb.registerRoutes()
 	return wb
@@ -238,6 +244,71 @@ func (p *providerState) Set(cfg providerConfig) {
 	p.cfg = &cfg
 }
 
+// BuilderSession represents a single Builder session. It is created by
+// /api/workbench/build/start and stores a snapshot of the project and
+// provider at the time the goal was submitted.
+type BuilderSession struct {
+	ID            string       `json:"id"`
+	TS            time.Time    `json:"ts"`
+	Goal          string       `json:"goal"`
+	Status        string       `json:"status"`
+	Project       ProjectState `json:"project"`
+	ProviderModel string       `json:"provider_model"`
+	Plan          []string     `json:"plan"`
+}
+
+const (
+	builderStatusPlanned = "planned"
+	builderStatusFailed  = "failed"
+
+	builderPlanPlaceholder = "Await execution wiring"
+)
+
+// sessionStore is the in-memory record of Builder sessions.
+type sessionStore struct {
+	mu       sync.Mutex
+	nextID   int64
+	sessions []BuilderSession
+}
+
+func newSessionStore() *sessionStore {
+	return &sessionStore{}
+}
+
+// Append assigns an id and timestamp to in, stores it, and returns the
+// stored value.
+func (s *sessionStore) Append(in BuilderSession) BuilderSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	in.ID = strconv.FormatInt(s.nextID, 10)
+	in.TS = time.Now().UTC()
+	s.sessions = append(s.sessions, in)
+	return in
+}
+
+// List returns a snapshot copy of all sessions in insertion order (oldest
+// first, newest last).
+func (s *sessionStore) List() []BuilderSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]BuilderSession, len(s.sessions))
+	copy(out, s.sessions)
+	return out
+}
+
+// Current returns a copy of the most recent session, or nil if there are
+// none.
+func (s *sessionStore) Current() *BuilderSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sessions) == 0 {
+		return nil
+	}
+	last := s.sessions[len(s.sessions)-1]
+	return &last
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -293,6 +364,12 @@ func (wb *workbench) registerRoutes() *http.ServeMux {
 
 	mux.HandleFunc("/api/workbench/provider/test", wb.handleProviderTest)
 	mux.HandleFunc("/api/workbench/provider", wb.handleProviderRoot)
+
+	mux.HandleFunc("/api/workbench/build/start", wb.handleBuildStart)
+	mux.HandleFunc("/api/workbench/build/session", wb.handleBuildSession)
+	mux.HandleFunc("/api/workbench/build/sessions", wb.handleBuildSessions)
+	mux.HandleFunc("/api/workbench/validation", wb.handleValidation)
+	mux.HandleFunc("/api/workbench/diff", wb.handleDiff)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -538,6 +615,154 @@ func (wb *workbench) handleProviderTest(w http.ResponseWriter, r *http.Request) 
 		"status": resp.StatusCode,
 		"error":  errMsg,
 	})
+}
+
+func (wb *workbench) handleBuildStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var in struct {
+		Goal string `json:"goal"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if in.Goal == "" {
+		http.Error(w, "goal is required", http.StatusBadRequest)
+		return
+	}
+
+	project := wb.project.Get()
+	if project == nil {
+		http.Error(w, "project must be open", http.StatusConflict)
+		return
+	}
+
+	provider := wb.provider.Get()
+	if provider == nil {
+		http.Error(w, "provider must be configured", http.StatusConflict)
+		return
+	}
+
+	session := BuilderSession{
+		Goal:          in.Goal,
+		Status:        builderStatusPlanned,
+		Project:       *project,
+		ProviderModel: provider.Model,
+		Plan: []string{
+			"Inspect project context",
+			"Prepare Builder prompt",
+			builderPlanPlaceholder,
+		},
+	}
+	session = wb.sessions.Append(session)
+
+	data, err := json.Marshal(session)
+	if err != nil {
+		http.Error(w, "marshal session: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	wb.store.Append("goal.created", "Created goal: "+in.Goal, data)
+	wb.store.Append("builder.plan.created", "Created Builder plan", data)
+
+	writeJSON(w, http.StatusCreated, session)
+}
+
+func (wb *workbench) handleBuildSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	session := wb.sessions.Current()
+	if session == nil {
+		http.Error(w, "no session", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, *session)
+}
+
+func (wb *workbench) handleBuildSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, wb.sessions.List())
+}
+
+func (wb *workbench) handleValidation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	projectOpen := wb.project.Get() != nil
+	providerConfigured := wb.provider.Get() != nil
+	currentSession := wb.sessions.Current() != nil
+
+	status := "blocked"
+	if projectOpen && providerConfigured {
+		status = "ready"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"project_open":        projectOpen,
+		"provider_configured": providerConfigured,
+		"current_session":     currentSession,
+		"status":              status,
+	})
+}
+
+func (wb *workbench) handleDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	project := wb.project.Get()
+	if project == nil {
+		http.Error(w, "no project open", http.StatusConflict)
+		return
+	}
+	if !project.Git {
+		http.Error(w, "project is not a git repo", http.StatusConflict)
+		return
+	}
+
+	wb.store.Append("diff.requested", "Requested project diff", nil)
+
+	statOut, statErr := exec.Command("git", "-C", project.Path, "diff", "--stat").Output()
+	if statErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":    false,
+			"error": truncateString("git diff --stat failed: "+statErr.Error(), 1000),
+		})
+		return
+	}
+	diffOut, diffErr := exec.Command("git", "-C", project.Path, "diff", "--no-ext-diff").Output()
+	if diffErr != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":    false,
+			"error": truncateString("git diff --no-ext-diff failed: "+diffErr.Error(), 1000),
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"stat": string(statOut),
+		"diff": string(diffOut),
+	})
+}
+
+func truncateString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
 }
 
 func resolveAddr() string {

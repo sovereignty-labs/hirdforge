@@ -182,7 +182,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState()}
+	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -817,6 +817,382 @@ func TestWorkbenchProviderTestFailure(t *testing.T) {
 		t.Fatal("provider.test_failed event not found")
 	}
 	if found.Message != "Provider test failed" {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+}
+
+func openGitProjectForBuilder(t *testing.T, wb *workbench) string {
+	t.Helper()
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"k","model":"m"}`)
+	return dir
+}
+
+func TestWorkbenchBuildStartRejectsMissingGoal(t *testing.T) {
+	wb := newWorkbench()
+	openGitProjectForBuilder(t, wb)
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildStart409WithoutProject(t *testing.T) {
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"k","model":"m"}`)
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildStart409WithoutProvider(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := newWorkbench()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildStartSuccess(t *testing.T) {
+	wb := newWorkbench()
+	dir := openGitProjectForBuilder(t, wb)
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var session BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if session.ID == "" {
+		t.Error("expected id to be set")
+	}
+	if session.TS.IsZero() {
+		t.Error("expected ts to be set")
+	}
+	if session.Goal != "ship it" {
+		t.Errorf("expected goal=ship it, got %q", session.Goal)
+	}
+	if session.Status != "planned" {
+		t.Errorf("expected status=planned, got %q", session.Status)
+	}
+	if session.Project.Path != dir {
+		t.Errorf("expected project.path=%q, got %q", dir, session.Project.Path)
+	}
+	if session.Project.Name != filepath.Base(dir) {
+		t.Errorf("expected project.name=%q, got %q", filepath.Base(dir), session.Project.Name)
+	}
+	if !session.Project.Git {
+		t.Error("expected project.git=true")
+	}
+	if session.Project.CurrentBranch == "" {
+		t.Error("expected project.current_branch to be set")
+	}
+	if session.ProviderModel != "m" {
+		t.Errorf("expected provider_model=m, got %q", session.ProviderModel)
+	}
+	if len(session.Plan) != 3 {
+		t.Errorf("expected 3 plan items, got %d", len(session.Plan))
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, hasKey := raw["api_key"]; hasKey {
+		t.Error("session response must not contain api_key field")
+	}
+	if _, hasKey := raw["provider"]; hasKey {
+		t.Error("session response must not contain provider object")
+	}
+}
+
+func TestWorkbenchBuildStartAppendsEvents(t *testing.T) {
+	wb := newWorkbench()
+	openGitProjectForBuilder(t, wb)
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	events := wb.store.List()
+	var goalCreated, planCreated *WorkbenchEvent
+	for i := range events {
+		switch events[i].Type {
+		case "goal.created":
+			goalCreated = &events[i]
+		case "builder.plan.created":
+			planCreated = &events[i]
+		}
+	}
+	if goalCreated == nil {
+		t.Fatal("goal.created event not found")
+	}
+	if planCreated == nil {
+		t.Fatal("builder.plan.created event not found")
+	}
+	if goalCreated.Message != "Created goal: ship it" {
+		t.Errorf("unexpected goal.created message: %q", goalCreated.Message)
+	}
+	if planCreated.Message != "Created Builder plan" {
+		t.Errorf("unexpected builder.plan.created message: %q", planCreated.Message)
+	}
+	if len(goalCreated.Data) == 0 || len(planCreated.Data) == 0 {
+		t.Error("expected both events to carry session data")
+	}
+}
+
+func TestWorkbenchBuildSessionGET404(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/session", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestWorkbenchBuildSessionGETAfterStart(t *testing.T) {
+	wb := newWorkbench()
+	openGitProjectForBuilder(t, wb)
+	postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/session", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var session BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if session.Goal != "ship it" {
+		t.Errorf("expected goal=ship it, got %q", session.Goal)
+	}
+	if session.Status != "planned" {
+		t.Errorf("expected status=planned, got %q", session.Status)
+	}
+}
+
+func TestWorkbenchBuildSessionsGETEmpty(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/sessions", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := strings.TrimSpace(w.Body.String())
+	if body != "[]" {
+		t.Errorf("expected body to be [] for empty sessions, got %q", body)
+	}
+}
+
+func TestWorkbenchBuildSessionsGETIncludes(t *testing.T) {
+	wb := newWorkbench()
+	openGitProjectForBuilder(t, wb)
+	postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	postJSON(t, wb, "/api/workbench/build/start", `{"goal":"polish it"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/sessions", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var sessions []BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &sessions); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+	if sessions[0].Goal != "ship it" {
+		t.Errorf("expected oldest goal=ship it, got %q", sessions[0].Goal)
+	}
+	if sessions[1].Goal != "polish it" {
+		t.Errorf("expected newest goal=polish it, got %q", sessions[1].Goal)
+	}
+}
+
+func TestWorkbenchValidationBlocked(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/validation", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result struct {
+		ProjectOpen        bool   `json:"project_open"`
+		ProviderConfigured bool   `json:"provider_configured"`
+		CurrentSession     bool   `json:"current_session"`
+		Status             string `json:"status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.ProjectOpen {
+		t.Error("expected project_open=false")
+	}
+	if result.ProviderConfigured {
+		t.Error("expected provider_configured=false")
+	}
+	if result.CurrentSession {
+		t.Error("expected current_session=false")
+	}
+	if result.Status != "blocked" {
+		t.Errorf("expected status=blocked, got %q", result.Status)
+	}
+
+	if got := len(wb.store.List()); got != 1 {
+		t.Errorf("expected validation GET to append no events, store has %d", got)
+	}
+}
+
+func TestWorkbenchValidationReady(t *testing.T) {
+	wb := newWorkbench()
+	openGitProjectForBuilder(t, wb)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/validation", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result struct {
+		ProjectOpen        bool   `json:"project_open"`
+		ProviderConfigured bool   `json:"provider_configured"`
+		CurrentSession     bool   `json:"current_session"`
+		Status             string `json:"status"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !result.ProjectOpen {
+		t.Error("expected project_open=true")
+	}
+	if !result.ProviderConfigured {
+		t.Error("expected provider_configured=true")
+	}
+	if result.Status != "ready" {
+		t.Errorf("expected status=ready, got %q", result.Status)
+	}
+}
+
+func TestWorkbenchDiff409WithoutProject(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/diff", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d", w.Code)
+	}
+}
+
+func TestWorkbenchDiff409NonGit(t *testing.T) {
+	dir := t.TempDir()
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/diff", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchDiffSuccess(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".gitkeep"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/diff", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", got)
+	}
+
+	var result struct {
+		Stat string `json:"stat"`
+		Diff string `json:"diff"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Stat == "" {
+		t.Error("expected stat to be non-empty")
+	}
+	if result.Diff == "" {
+		t.Error("expected diff to be non-empty")
+	}
+	if !strings.Contains(result.Diff, "modified") {
+		t.Errorf("expected diff to contain modified content, got %q", result.Diff)
+	}
+}
+
+func TestWorkbenchDiffEventAppended(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/diff", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "diff.requested" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("diff.requested event not found")
+	}
+	if found.Message != "Requested project diff" {
 		t.Errorf("unexpected message: %q", found.Message)
 	}
 }
