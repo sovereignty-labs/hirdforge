@@ -6,11 +6,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -19,6 +22,8 @@ const (
 	defaultHost = "127.0.0.1"
 	defaultPort = "7777"
 	modeName    = "workbench"
+	startupType = "workbench.started"
+	startupMsg  = "Hirdforge Workbench started"
 )
 
 const indexHTML = `<!doctype html>
@@ -41,13 +46,73 @@ const indexHTML = `<!doctype html>
 </html>
 `
 
+// WorkbenchEvent is a single entry in the in-memory Cortex-lite event log.
+type WorkbenchEvent struct {
+	ID      string          `json:"id"`
+	TS      time.Time       `json:"ts"`
+	Type    string          `json:"type"`
+	Message string          `json:"message,omitempty"`
+	Data    json.RawMessage `json:"data,omitempty"`
+}
+
+// eventStore is a small thread-safe append-only log used by the workbench.
+type eventStore struct {
+	mu     sync.Mutex
+	nextID int64
+	events []WorkbenchEvent
+}
+
+func newEventStore() *eventStore {
+	return &eventStore{}
+}
+
+// Append records a new event and returns the stored entry, including the
+// assigned id and timestamp.
+func (s *eventStore) Append(evType, message string, data json.RawMessage) WorkbenchEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	ev := WorkbenchEvent{
+		ID:      strconv.FormatInt(s.nextID, 10),
+		TS:      time.Now().UTC(),
+		Type:    evType,
+		Message: message,
+		Data:    data,
+	}
+	s.events = append(s.events, ev)
+	return ev
+}
+
+// List returns a snapshot copy of the current event log.
+func (s *eventStore) List() []WorkbenchEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]WorkbenchEvent, len(s.events))
+	copy(out, s.events)
+	return out
+}
+
+// workbench ties the event store to a small HTTP mux.
+type workbench struct {
+	store *eventStore
+	mux   *http.ServeMux
+}
+
+func newWorkbench() *workbench {
+	s := newEventStore()
+	s.Append(startupType, startupMsg, nil)
+	wb := &workbench{store: s}
+	wb.mux = wb.registerRoutes()
+	return wb
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func newWorkbenchMux() *http.ServeMux {
+func (wb *workbench) registerRoutes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -62,11 +127,33 @@ func newWorkbenchMux() *http.ServeMux {
 	})
 
 	mux.HandleFunc("/api/workbench/events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, http.StatusOK, wb.store.List())
+		case http.MethodPost:
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+			if err != nil {
+				http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			var in struct {
+				Type    string          `json:"type"`
+				Message string          `json:"message"`
+				Data    json.RawMessage `json:"data"`
+			}
+			if err := json.Unmarshal(body, &in); err != nil {
+				http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if in.Type == "" {
+				http.Error(w, "type is required", http.StatusBadRequest)
+				return
+			}
+			ev := wb.store.Append(in.Type, in.Message, in.Data)
+			writeJSON(w, http.StatusCreated, ev)
+		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
 		}
-		writeJSON(w, http.StatusOK, []struct{}{})
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -99,9 +186,10 @@ func resolveAddr() string {
 }
 
 func run(ctx context.Context, addr string) error {
+	wb := newWorkbench()
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           newWorkbenchMux(),
+		Handler:           wb.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
