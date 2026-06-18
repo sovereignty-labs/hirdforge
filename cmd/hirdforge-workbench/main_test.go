@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -179,7 +182,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &workbench{store: newEventStore()}
+	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -274,5 +277,546 @@ func TestWorkbenchEventsMethodNotAllowed(t *testing.T) {
 
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func gitAvailable(t *testing.T) bool {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git not available: %v", err)
+		return false
+	}
+	return true
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q")
+	runGit(t, dir, "config", "user.email", "test@example.com")
+	runGit(t, dir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, ".gitkeep"), []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", ".gitkeep")
+	runGit(t, dir, "commit", "-q", "-m", "init")
+	return dir
+}
+
+func postJSON(t *testing.T, wb *workbench, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	return w
+}
+
+func TestWorkbenchProjectOpenGitRepo(t *testing.T) {
+	if !gitAvailable(t) {
+		return
+	}
+	dir := initGitRepo(t)
+
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", got)
+	}
+
+	var state ProjectState
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if state.Path != dir {
+		t.Errorf("expected path=%q, got %q", dir, state.Path)
+	}
+	if state.Name != filepath.Base(dir) {
+		t.Errorf("expected name=%q, got %q", filepath.Base(dir), state.Name)
+	}
+	if !state.Git {
+		t.Error("expected git=true")
+	}
+	if state.CurrentBranch == "" {
+		t.Error("expected current_branch to be set")
+	}
+}
+
+func TestWorkbenchProjectOpenRelative(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/project/open", `{"path":"relative/path"}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProjectOpenMissing(t *testing.T) {
+	wb := newWorkbench()
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	w := postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+missing+`"}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProjectOpenFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+file+`"}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProjectOpenMissingPathField(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/project/open", `{}`)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProjectOpenMethodNotAllowed(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project/open", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d", w.Code)
+	}
+}
+
+func TestWorkbenchProjectGETNotOpen(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestWorkbenchProjectGETAfterOpen(t *testing.T) {
+	dir := t.TempDir()
+	wb := newWorkbench()
+
+	openResp := postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	if openResp.Code != http.StatusCreated {
+		t.Fatalf("open: expected 201, got %d: %s", openResp.Code, openResp.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", got)
+	}
+
+	var state ProjectState
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if state.Path != dir {
+		t.Errorf("expected path=%q, got %q", dir, state.Path)
+	}
+	if state.Name != filepath.Base(dir) {
+		t.Errorf("expected name=%q, got %q", filepath.Base(dir), state.Name)
+	}
+	if state.Git {
+		t.Error("expected git=false for non-git dir")
+	}
+	if state.CurrentBranch != "" {
+		t.Errorf("expected empty current_branch, got %q", state.CurrentBranch)
+	}
+}
+
+func TestWorkbenchProjectOpenedEvent(t *testing.T) {
+	dir := t.TempDir()
+	wb := newWorkbench()
+
+	openResp := postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	if openResp.Code != http.StatusCreated {
+		t.Fatalf("open: expected 201, got %d: %s", openResp.Code, openResp.Body.String())
+	}
+
+	events := wb.store.List()
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events (startup + project.opened), got %d", len(events))
+	}
+	if events[0].Type != startupType {
+		t.Errorf("expected first event %q, got %q", startupType, events[0].Type)
+	}
+	if events[1].Type != "project.opened" {
+		t.Errorf("expected second event project.opened, got %q", events[1].Type)
+	}
+	expectedMsg := "Opened project " + filepath.Base(dir)
+	if events[1].Message != expectedMsg {
+		t.Errorf("expected message=%q, got %q", expectedMsg, events[1].Message)
+	}
+	if len(events[1].Data) == 0 {
+		t.Fatal("expected data payload on project.opened event")
+	}
+	var data ProjectState
+	if err := json.Unmarshal(events[1].Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if data.Path != dir {
+		t.Errorf("expected data.path=%q, got %q", dir, data.Path)
+	}
+	if data.Name != filepath.Base(dir) {
+		t.Errorf("expected data.name=%q, got %q", filepath.Base(dir), data.Name)
+	}
+	if data.Git {
+		t.Error("expected data.git=false")
+	}
+}
+
+func TestWorkbenchProviderConfigureStores(t *testing.T) {
+	wb := newWorkbench()
+	body := `{"base_url":"https://api.minimax.io/v1","api_key":"super-secret","model":"MiniMax-M3"}`
+	w := postJSON(t, wb, "/api/workbench/provider", body)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", got)
+	}
+
+	var state ProviderState
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if state.BaseURL != "https://api.minimax.io/v1" {
+		t.Errorf("expected base_url=https://api.minimax.io/v1, got %q", state.BaseURL)
+	}
+	if !state.APIKeySet {
+		t.Error("expected api_key_set=true")
+	}
+	if state.Model != "MiniMax-M3" {
+		t.Errorf("expected model=MiniMax-M3, got %q", state.Model)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, hasKey := raw["api_key"]; hasKey {
+		t.Error("POST response must not contain api_key field")
+	}
+	if v, ok := raw["api_key_set"]; !ok || v != true {
+		t.Errorf("expected api_key_set=true in raw response, got %v", v)
+	}
+}
+
+func TestWorkbenchProviderGETNotConfigured(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/provider", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestWorkbenchProviderGETConfigured(t *testing.T) {
+	wb := newWorkbench()
+	body := `{"base_url":"https://api.minimax.io/v1","api_key":"super-secret","model":"MiniMax-M3"}`
+	postJSON(t, wb, "/api/workbench/provider", body)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/provider", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var state ProviderState
+	if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if state.BaseURL != "https://api.minimax.io/v1" {
+		t.Errorf("expected base_url=https://api.minimax.io/v1, got %q", state.BaseURL)
+	}
+	if !state.APIKeySet {
+		t.Error("expected api_key_set=true")
+	}
+	if state.Model != "MiniMax-M3" {
+		t.Errorf("expected model=MiniMax-M3, got %q", state.Model)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, hasKey := raw["api_key"]; hasKey {
+		t.Error("GET response must not contain api_key field")
+	}
+}
+
+func TestWorkbenchProviderRejectsMissingBaseURL(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/provider", `{"api_key":"key","model":"m"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProviderRejectsMissingAPIKey(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","model":"m"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProviderRejectsMissingModel(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"key"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProviderRejectsInvalidBaseURL(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/provider", `{"base_url":"ftp://example.com","api_key":"key","model":"m"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProviderConfiguredEvent(t *testing.T) {
+	wb := newWorkbench()
+	body := `{"base_url":"https://api.minimax.io/v1","api_key":"super-secret","model":"MiniMax-M3"}`
+	postJSON(t, wb, "/api/workbench/provider", body)
+
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "provider.configured" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("provider.configured event not found")
+	}
+	if found.Message != "Configured provider model MiniMax-M3" {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(found.Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if _, hasKey := data["api_key"]; hasKey {
+		t.Error("event data must not contain api_key field")
+	}
+	if data["base_url"] != "https://api.minimax.io/v1" {
+		t.Errorf("expected data.base_url=https://api.minimax.io/v1, got %v", data["base_url"])
+	}
+	if data["model"] != "MiniMax-M3" {
+		t.Errorf("expected data.model=MiniMax-M3, got %v", data["model"])
+	}
+	if data["api_key_set"] != true {
+		t.Errorf("expected data.api_key_set=true, got %v", data["api_key_set"])
+	}
+}
+
+func TestWorkbenchProviderTestNotConfigured(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/provider/test", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProviderTestSuccess(t *testing.T) {
+	var receivedAuth string
+	var receivedBody struct {
+		Model       string             `json:"model"`
+		Messages    []map[string]string `json:"messages"`
+		Temperature float64            `json:"temperature"`
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method: %s", r.Method)
+		}
+		receivedAuth = r.Header.Get("Authorization")
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("unexpected content-type: %s", ct)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&receivedBody); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "test",
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": "hirdforge provider online"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	wb := newWorkbench()
+	configBody := `{"base_url":"` + server.URL + `","api_key":"test-key","model":"test-model"}`
+	postJSON(t, wb, "/api/workbench/provider", configBody)
+
+	w := postJSON(t, wb, "/api/workbench/provider/test", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if receivedAuth != "Bearer test-key" {
+		t.Errorf("expected auth=Bearer test-key, got %q", receivedAuth)
+	}
+	if receivedBody.Model != "test-model" {
+		t.Errorf("expected upstream model=test-model, got %q", receivedBody.Model)
+	}
+	if receivedBody.Temperature != 0 {
+		t.Errorf("expected upstream temperature=0, got %v", receivedBody.Temperature)
+	}
+	if len(receivedBody.Messages) != 1 ||
+		receivedBody.Messages[0]["role"] != "user" ||
+		receivedBody.Messages[0]["content"] != "Reply with exactly: hirdforge provider online" {
+		t.Errorf("unexpected upstream messages: %+v", receivedBody.Messages)
+	}
+
+	var result struct {
+		OK     bool   `json:"ok"`
+		Status int    `json:"status"`
+		Model  string `json:"model"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !result.OK {
+		t.Error("expected ok=true")
+	}
+	if result.Status != http.StatusOK {
+		t.Errorf("expected status=200, got %d", result.Status)
+	}
+	if result.Model != "test-model" {
+		t.Errorf("expected model=test-model, got %q", result.Model)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, hasKey := raw["api_key"]; hasKey {
+		t.Error("test response must not contain api_key field")
+	}
+
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "provider.tested" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("provider.tested event not found")
+	}
+	if found.Message != "Provider test succeeded" {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+}
+
+func TestWorkbenchProviderTestFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream is on fire","type":"server_error"}}`))
+	}))
+	defer server.Close()
+
+	wb := newWorkbench()
+	configBody := `{"base_url":"` + server.URL + `","api_key":"test-key","model":"test-model"}`
+	postJSON(t, wb, "/api/workbench/provider", configBody)
+
+	w := postJSON(t, wb, "/api/workbench/provider/test", "")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var result struct {
+		OK     bool   `json:"ok"`
+		Status int    `json:"status"`
+		Error  string `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.OK {
+		t.Error("expected ok=false")
+	}
+	if result.Status != http.StatusInternalServerError {
+		t.Errorf("expected status=500, got %d", result.Status)
+	}
+	if result.Error == "" {
+		t.Error("expected error message to be populated")
+	}
+	if !strings.Contains(result.Error, "upstream is on fire") {
+		t.Errorf("expected error to include upstream message, got %q", result.Error)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, hasKey := raw["api_key"]; hasKey {
+		t.Error("failure response must not contain api_key field")
+	}
+
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "provider.test_failed" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("provider.test_failed event not found")
+	}
+	if found.Message != "Provider test failed" {
+		t.Errorf("unexpected message: %q", found.Message)
 	}
 }

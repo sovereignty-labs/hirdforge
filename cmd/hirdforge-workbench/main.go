@@ -10,9 +10,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -34,14 +38,22 @@ const indexHTML = `<!doctype html>
 <style>
   body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; color: #222; }
   h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
   p  { color: #555; }
   code { background: #f4f4f4; padding: 0.1rem 0.35rem; border-radius: 3px; }
+  ul { list-style: none; padding: 0; }
+  li { margin: 0.25rem 0; }
 </style>
 </head>
 <body>
   <h1>Hirdforge Workbench</h1>
   <p>Local-first workbench skeleton. The event stream and builder loop are not wired yet.</p>
-  <p>Try <code>GET /health</code> and <code>GET /api/workbench/events</code>.</p>
+  <h2>Endpoints</h2>
+  <ul>
+    <li><code>GET /api/workbench/events</code></li>
+    <li><code>GET /api/workbench/project</code></li>
+    <li><code>GET /api/workbench/provider</code></li>
+  </ul>
 </body>
 </html>
 `
@@ -92,18 +104,138 @@ func (s *eventStore) List() []WorkbenchEvent {
 	return out
 }
 
-// workbench ties the event store to a small HTTP mux.
+// ProjectState describes the project that is currently open in the workbench.
+type ProjectState struct {
+	Path          string `json:"path"`
+	Name          string `json:"name"`
+	Git           bool   `json:"git"`
+	CurrentBranch string `json:"current_branch"`
+}
+
+// projectState holds the currently open project, if any. A nil current value
+// means no project is open.
+type projectState struct {
+	mu      sync.Mutex
+	current *ProjectState
+}
+
+func newProjectState() *projectState {
+	return &projectState{}
+}
+
+func (p *projectState) Get() *ProjectState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.current
+}
+
+func (p *projectState) Set(state ProjectState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.current = &state
+}
+
+// workbench ties the event store and project state to a small HTTP mux.
 type workbench struct {
-	store *eventStore
-	mux   *http.ServeMux
+	store    *eventStore
+	project  *projectState
+	provider *providerState
+	mux      *http.ServeMux
 }
 
 func newWorkbench() *workbench {
 	s := newEventStore()
 	s.Append(startupType, startupMsg, nil)
-	wb := &workbench{store: s}
+	wb := &workbench{
+		store:    s,
+		project:  newProjectState(),
+		provider: newProviderState(),
+	}
 	wb.mux = wb.registerRoutes()
 	return wb
+}
+
+// isGitRepo reports whether path contains a .git directory or file (the
+// latter covers submodules and worktrees).
+func isGitRepo(path string) bool {
+	_, err := os.Stat(filepath.Join(path, ".git"))
+	return err == nil
+}
+
+// detectBranch returns the current branch name for the repo at path, or an
+// error if the branch cannot be determined. Callers should treat any error
+// as "unknown" and leave the branch field empty.
+func detectBranch(path string) (string, error) {
+	cmd := exec.Command("git", "-C", path, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// ProviderState is the sanitized view of the configured model provider. The
+// raw API key is never exposed through this type.
+type ProviderState struct {
+	BaseURL   string `json:"base_url"`
+	APIKeySet bool   `json:"api_key_set"`
+	Model     string `json:"model"`
+}
+
+// providerConfig is the internal record stored for the configured provider.
+// The raw API key lives here and must never be returned in any response.
+type providerConfig struct {
+	baseURL string
+	apiKey  string
+	model   string
+}
+
+// providerState holds the currently configured provider, if any. A nil cfg
+// means no provider is configured.
+type providerState struct {
+	mu  sync.Mutex
+	cfg *providerConfig
+}
+
+func newProviderState() *providerState {
+	return &providerState{}
+}
+
+// Get returns a sanitized snapshot of the provider state, or nil if no
+// provider is configured.
+func (p *providerState) Get() *ProviderState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cfg == nil {
+		return nil
+	}
+	return &ProviderState{
+		BaseURL:   p.cfg.baseURL,
+		APIKeySet: p.cfg.apiKey != "",
+		Model:     p.cfg.model,
+	}
+}
+
+// Config returns a copy of the internal configuration including the raw API
+// key. It is intended for the test endpoint only and the result must not be
+// exposed to API clients.
+func (p *providerState) Config() *providerConfig {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cfg == nil {
+		return nil
+	}
+	return &providerConfig{
+		baseURL: p.cfg.baseURL,
+		apiKey:  p.cfg.apiKey,
+		model:   p.cfg.model,
+	}
+}
+
+func (p *providerState) Set(cfg providerConfig) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg = &cfg
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
@@ -156,6 +288,12 @@ func (wb *workbench) registerRoutes() *http.ServeMux {
 		}
 	})
 
+	mux.HandleFunc("/api/workbench/project/open", wb.handleProjectOpen)
+	mux.HandleFunc("/api/workbench/project", wb.handleProjectGet)
+
+	mux.HandleFunc("/api/workbench/provider/test", wb.handleProviderTest)
+	mux.HandleFunc("/api/workbench/provider", wb.handleProviderRoot)
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -171,6 +309,235 @@ func (wb *workbench) registerRoutes() *http.ServeMux {
 	})
 
 	return mux
+}
+
+func (wb *workbench) handleProjectOpen(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var in struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil {
+		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if in.Path == "" {
+		http.Error(w, "path is required", http.StatusBadRequest)
+		return
+	}
+	if !filepath.IsAbs(in.Path) {
+		http.Error(w, "path must be absolute", http.StatusBadRequest)
+		return
+	}
+	info, err := os.Stat(in.Path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			http.Error(w, "path does not exist", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "stat: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !info.IsDir() {
+		http.Error(w, "path must be a directory", http.StatusBadRequest)
+		return
+	}
+
+	state := ProjectState{
+		Path: in.Path,
+		Name: filepath.Base(in.Path),
+		Git:  isGitRepo(in.Path),
+	}
+	if state.Git {
+		if branch, err := detectBranch(in.Path); err == nil {
+			state.CurrentBranch = branch
+		}
+	}
+
+	wb.project.Set(state)
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		http.Error(w, "marshal state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	wb.store.Append("project.opened", "Opened project "+state.Name, data)
+	writeJSON(w, http.StatusCreated, state)
+}
+
+func (wb *workbench) handleProjectGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	state := wb.project.Get()
+	if state == nil {
+		http.Error(w, "no project open", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, *state)
+}
+
+func (wb *workbench) handleProviderRoot(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		state := wb.provider.Get()
+		if state == nil {
+			http.Error(w, "no provider configured", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, *state)
+	case http.MethodPost:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var in struct {
+			BaseURL string `json:"base_url"`
+			APIKey  string `json:"api_key"`
+			Model   string `json:"model"`
+		}
+		if err := json.Unmarshal(body, &in); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if in.BaseURL == "" {
+			http.Error(w, "base_url is required", http.StatusBadRequest)
+			return
+		}
+		if in.APIKey == "" {
+			http.Error(w, "api_key is required", http.StatusBadRequest)
+			return
+		}
+		if in.Model == "" {
+			http.Error(w, "model is required", http.StatusBadRequest)
+			return
+		}
+		u, err := url.Parse(in.BaseURL)
+		if err != nil {
+			http.Error(w, "invalid base_url: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			http.Error(w, "base_url must be http or https", http.StatusBadRequest)
+			return
+		}
+		if u.Host == "" {
+			http.Error(w, "base_url must have a host", http.StatusBadRequest)
+			return
+		}
+
+		wb.provider.Set(providerConfig{
+			baseURL: in.BaseURL,
+			apiKey:  in.APIKey,
+			model:   in.Model,
+		})
+
+		state := ProviderState{
+			BaseURL:   in.BaseURL,
+			APIKeySet: true,
+			Model:     in.Model,
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			http.Error(w, "marshal state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		wb.store.Append("provider.configured", "Configured provider model "+in.Model, data)
+		writeJSON(w, http.StatusCreated, state)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+const providerTestTimeout = 20 * time.Second
+
+func (wb *workbench) handleProviderTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	cfg := wb.provider.Config()
+	if cfg == nil {
+		http.Error(w, "no provider configured", http.StatusNotFound)
+		return
+	}
+
+	endpoint := strings.TrimRight(cfg.baseURL, "/") + "/chat/completions"
+	reqBody, err := json.Marshal(map[string]any{
+		"model": cfg.model,
+		"messages": []map[string]string{
+			{"role": "user", "content": "Reply with exactly: hirdforge provider online"},
+		},
+		"temperature": 0,
+	})
+	if err != nil {
+		http.Error(w, "marshal request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(string(reqBody)))
+	if err != nil {
+		wb.store.Append("provider.test_failed", "Provider test failed", nil)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":    false,
+			"error": "build request: " + err.Error(),
+		})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+
+	client := &http.Client{Timeout: providerTestTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		wb.store.Append("provider.test_failed", "Provider test failed", nil)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		wb.store.Append("provider.test_failed", "Provider test failed", nil)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"ok":    false,
+			"error": "read response: " + err.Error(),
+		})
+		return
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		wb.store.Append("provider.tested", "Provider test succeeded", nil)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":     true,
+			"status": resp.StatusCode,
+			"model":  cfg.model,
+		})
+		return
+	}
+
+	errMsg := string(respBody)
+	if len(errMsg) > 1000 {
+		errMsg = errMsg[:1000]
+	}
+	wb.store.Append("provider.test_failed", "Provider test failed", nil)
+	writeJSON(w, http.StatusBadGateway, map[string]any{
+		"ok":     false,
+		"status": resp.StatusCode,
+		"error":  errMsg,
+	})
 }
 
 func resolveAddr() string {
