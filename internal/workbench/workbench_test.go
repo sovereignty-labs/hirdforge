@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -4738,5 +4738,521 @@ func TestWorkbenchCortexAggregateLockboxDoesNotApplyFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
 		t.Errorf("aggregate proposed file newfile.go must not be written to disk (err=%v)", err)
+	}
+}
+
+// reviewResponse returns a handler that replies with an OpenAI-style envelope
+// whose message content is a JSON aggregate review.
+func reviewResponse(verdict, summary string, risks, recommendations []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		content, _ := json.Marshal(map[string]any{
+			"verdict":         verdict,
+			"summary":         summary,
+			"risks":           risks,
+			"recommendations": recommendations,
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "test",
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(content)}},
+			},
+		})
+	}
+}
+
+func cortexReviewerLanes(task CortexTask) []CortexLane {
+	out := []CortexLane{}
+	for _, l := range task.Lanes {
+		if l.Role == "reviewer" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func cortexFirstReviewerLane(t *testing.T, task CortexTask) CortexLane {
+	t.Helper()
+	lanes := cortexReviewerLanes(task)
+	if len(lanes) == 0 {
+		t.Fatalf("no reviewer lane in task %s", task.ID)
+	}
+	return lanes[0]
+}
+
+// cortexReviewSetup builds a workbench with a mock provider configured and one
+// aggregated Cortex aggregate, returning the workbench, task, and aggregate.
+func cortexReviewSetup(t *testing.T, handler http.HandlerFunc) (*Server, CortexTask, CortexAggregateProposal) {
+	t.Helper()
+	server := startMockProvider(t, handler)
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"ship it","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	aggResp := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if aggResp.Code != http.StatusCreated {
+		t.Fatalf("aggregate: expected 201, got %d: %s", aggResp.Code, aggResp.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(aggResp.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode aggregate: %v", err)
+	}
+	return wb, task, agg
+}
+
+func TestWorkbenchCortexAggregateReviewRequiresLaneID(t *testing.T) {
+	wb, _, _ := cortexReviewSetup(t, reviewResponse("approve", "ok", nil, nil))
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateReview404NoAggregate(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"4"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateReview404MissingTask(t *testing.T) {
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"k","model":"m"}`)
+	// An aggregate whose task is unknown.
+	wb.cortexAggregates.Append(CortexAggregateProposal{TaskID: "nonexistent", Status: "aggregated", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"4"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateReview404MissingLane(t *testing.T) {
+	wb, _, _ := cortexReviewSetup(t, reviewResponse("approve", "ok", nil, nil))
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"999"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateReview409NonReviewer(t *testing.T) {
+	wb, task, _ := cortexReviewSetup(t, reviewResponse("approve", "ok", nil, nil))
+	b := cortexFirstBuilderLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateReview409NoProvider(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	rv := cortexFirstReviewerLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewPromptContext(t *testing.T) {
+	var capturedUser, capturedSystem string
+	wb, task, agg := cortexReviewSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 2 {
+			capturedSystem = body.Messages[0]["content"]
+			capturedUser = body.Messages[1]["content"]
+		}
+		reviewResponse("approve", "ok", []string{"r1"}, []string{"rec1"})(w, r)
+	})
+	rv := cortexFirstReviewerLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{
+		"ship it",
+		"Aggregate id: " + agg.ID,
+		"Aggregate status: " + agg.Status,
+		agg.Summary,
+		"Reviewer lane id: " + rv.ID,
+		"Reviewer lane index: " + strconv.Itoa(rv.Index),
+		rv.Task,
+		"Source proposal ids: " + strings.Join(agg.SourceProposalIDs, ", "),
+		`"verdict"`,
+	} {
+		if !strings.Contains(capturedUser, want) {
+			t.Errorf("expected review prompt to contain %q:\n%s", want, capturedUser)
+		}
+	}
+	if capturedSystem != cortexReviewSystemPrompt {
+		t.Errorf("unexpected system prompt: %q", capturedSystem)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewConflictsInPrompt(t *testing.T) {
+	var capturedUser string
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 2 {
+			capturedUser = body.Messages[1]["content"]
+		}
+		reviewResponse("revise", "conflicts present", nil, nil)(w, r)
+	})
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "DIFFERENT"}})
+	aggResp := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	var agg CortexAggregateProposal
+	json.Unmarshal(aggResp.Body.Bytes(), &agg)
+	if agg.Status != "conflicted" {
+		t.Fatalf("expected conflicted aggregate, got %q", agg.Status)
+	}
+	rv := cortexFirstReviewerLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(capturedUser, "Conflicts (1)") {
+		t.Errorf("expected conflicts section in prompt:\n%s", capturedUser)
+	}
+	if !strings.Contains(capturedUser, "a.go") {
+		t.Errorf("expected conflicting path a.go in prompt:\n%s", capturedUser)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewApprove(t *testing.T) {
+	wb, task, agg := cortexReviewSetup(t, reviewResponse("approve", "looks good", []string{"low risk"}, []string{"merge it"}))
+	rv := cortexFirstReviewerLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var review CortexAggregateReview
+	if err := json.Unmarshal(w.Body.Bytes(), &review); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if review.ID == "" || review.TS.IsZero() {
+		t.Error("expected id and ts to be set")
+	}
+	if review.AggregateID != agg.ID {
+		t.Errorf("aggregate_id=%q, want %q", review.AggregateID, agg.ID)
+	}
+	if review.TaskID != task.ID {
+		t.Errorf("task_id=%q, want %q", review.TaskID, task.ID)
+	}
+	if review.LaneID != rv.ID {
+		t.Errorf("lane_id=%q, want %q", review.LaneID, rv.ID)
+	}
+	if review.LaneIndex != rv.Index {
+		t.Errorf("lane_index=%d, want %d", review.LaneIndex, rv.Index)
+	}
+	if review.Status != "reviewed" {
+		t.Errorf("status=%q, want reviewed", review.Status)
+	}
+	if review.Verdict != "approve" {
+		t.Errorf("verdict=%q, want approve", review.Verdict)
+	}
+	if review.Summary != "looks good" {
+		t.Errorf("summary=%q", review.Summary)
+	}
+	if len(review.Risks) != 1 || review.Risks[0] != "low risk" {
+		t.Errorf("risks=%v, want [low risk]", review.Risks)
+	}
+	if len(review.Recommendations) != 1 || review.Recommendations[0] != "merge it" {
+		t.Errorf("recommendations=%v, want [merge it]", review.Recommendations)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewRevise(t *testing.T) {
+	wb, task, _ := cortexReviewSetup(t, reviewResponse("revise", "needs work", nil, nil))
+	rv := cortexFirstReviewerLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var review CortexAggregateReview
+	if err := json.Unmarshal(w.Body.Bytes(), &review); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if review.Verdict != "revise" {
+		t.Errorf("verdict=%q, want revise", review.Verdict)
+	}
+	if review.Risks == nil || len(review.Risks) != 0 {
+		t.Errorf("expected empty (non-nil) risks, got %v", review.Risks)
+	}
+	if review.Recommendations == nil || len(review.Recommendations) != 0 {
+		t.Errorf("expected empty (non-nil) recommendations, got %v", review.Recommendations)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewInvalidVerdict(t *testing.T) {
+	wb, task, _ := cortexReviewSetup(t, reviewResponse("maybe", "x", nil, nil))
+	rv := cortexFirstReviewerLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Review CortexAggregateReview `json:"review"`
+		Error  string                `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Review.Status != "failed" {
+		t.Errorf("status=%q, want failed", result.Review.Status)
+	}
+	if result.Error == "" {
+		t.Error("expected error to be populated")
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewFailed(t *testing.T) {
+	wb, task, _ := cortexReviewSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream exploded"}`))
+	})
+	rv := cortexFirstReviewerLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Review CortexAggregateReview `json:"review"`
+		Error  string                `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Review.Status != "failed" {
+		t.Errorf("status=%q, want failed", result.Review.Status)
+	}
+	if result.Review.Error == "" {
+		t.Error("expected review.error to be set")
+	}
+	if !strings.Contains(result.Error, "upstream exploded") {
+		t.Errorf("expected error to include upstream body, got %q", result.Error)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/review", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewGETCurrent(t *testing.T) {
+	wb, task, _ := cortexReviewSetup(t, reviewResponse("approve", "ok", nil, nil))
+	rv := cortexFirstReviewerLane(t, task)
+	created := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("review: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	var createdReview CortexAggregateReview
+	json.Unmarshal(created.Body.Bytes(), &createdReview)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/review", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var review CortexAggregateReview
+	json.Unmarshal(w.Body.Bytes(), &review)
+	if review.ID != createdReview.ID {
+		t.Errorf("current review id=%q, want %q", review.ID, createdReview.ID)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewsEmpty(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/reviews", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty reviews, got %q", body)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewsFilterByAggregate(t *testing.T) {
+	wb, task, agg1 := cortexReviewSetup(t, reviewResponse("approve", "ok", nil, nil))
+	rv := cortexFirstReviewerLane(t, task)
+	// second aggregate for the same task
+	agg2Resp := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	var agg2 CortexAggregateProposal
+	json.Unmarshal(agg2Resp.Body.Bytes(), &agg2)
+
+	postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"aggregate_id":"`+agg1.ID+`","lane_id":"`+rv.ID+`"}`)
+	postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"aggregate_id":"`+agg2.ID+`","lane_id":"`+rv.ID+`"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/reviews?aggregate_id="+agg1.ID, nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	var reviews []CortexAggregateReview
+	json.Unmarshal(w.Body.Bytes(), &reviews)
+	if len(reviews) != 1 || reviews[0].AggregateID != agg1.ID {
+		t.Fatalf("expected 1 review for agg1, got %v", reviews)
+	}
+
+	reqAll := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/reviews", nil)
+	wAll := httptest.NewRecorder()
+	wb.mux.ServeHTTP(wAll, reqAll)
+	var all []CortexAggregateReview
+	json.Unmarshal(wAll.Body.Bytes(), &all)
+	if len(all) != 2 {
+		t.Errorf("expected 2 total reviews, got %d", len(all))
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewsFilterByTask(t *testing.T) {
+	server := startMockProvider(t, reviewResponse("approve", "ok", nil, nil))
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+
+	task1 := createCortexTask(t, wb, `{"goal":"first","mode":"multi"}`)
+	seedLaneProposal(t, wb, task1.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	agg1Resp := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{"task_id":"`+task1.ID+`"}`)
+	var agg1 CortexAggregateProposal
+	json.Unmarshal(agg1Resp.Body.Bytes(), &agg1)
+	rv1 := cortexFirstReviewerLane(t, task1)
+	postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"aggregate_id":"`+agg1.ID+`","lane_id":"`+rv1.ID+`"}`)
+
+	task2 := createCortexTask(t, wb, `{"goal":"second","mode":"multi"}`)
+	seedLaneProposal(t, wb, task2.ID, "2", []BuilderProposedFile{{Path: "b.go", Action: "create", Content: "B"}})
+	agg2Resp := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{"task_id":"`+task2.ID+`"}`)
+	var agg2 CortexAggregateProposal
+	json.Unmarshal(agg2Resp.Body.Bytes(), &agg2)
+	rv2 := cortexFirstReviewerLane(t, task2)
+	postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"aggregate_id":"`+agg2.ID+`","lane_id":"`+rv2.ID+`"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/reviews?task_id="+task1.ID, nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	var reviews []CortexAggregateReview
+	json.Unmarshal(w.Body.Bytes(), &reviews)
+	if len(reviews) != 1 || reviews[0].TaskID != task1.ID {
+		t.Fatalf("expected 1 review for task1, got %v", reviews)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewsFilterByLane(t *testing.T) {
+	server := startMockProvider(t, reviewResponse("approve", "ok", nil, nil))
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","roles":{"builder":1,"reviewer":2}}`)
+	seedLaneProposal(t, wb, task.ID, "1", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+
+	reviewers := cortexReviewerLanes(task)
+	if len(reviewers) < 2 {
+		t.Fatalf("expected >=2 reviewer lanes, got %d", len(reviewers))
+	}
+	for _, rv := range reviewers {
+		postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	}
+	target := reviewers[0]
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/reviews?lane_id="+target.ID, nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	var reviews []CortexAggregateReview
+	json.Unmarshal(w.Body.Bytes(), &reviews)
+	if len(reviews) != 1 || reviews[0].LaneID != target.ID {
+		t.Fatalf("expected 1 review for lane %s, got %v", target.ID, reviews)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewEvents(t *testing.T) {
+	wb, task, _ := cortexReviewSetup(t, reviewResponse("approve", "ok", nil, nil))
+	rv := cortexFirstReviewerLane(t, task)
+	if w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`); w.Code != http.StatusCreated {
+		t.Fatalf("created: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb, "cortex.aggregate.review.created"); ev == nil {
+		t.Error("cortex.aggregate.review.created event not appended")
+	} else if ev.Message != "Created Cortex aggregate review" {
+		t.Errorf("created event message: %q", ev.Message)
+	}
+
+	wb2, task2, _ := cortexReviewSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	rv2 := cortexFirstReviewerLane(t, task2)
+	if w := postJSON(t, wb2, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv2.ID+`"}`); w.Code != http.StatusBadGateway {
+		t.Fatalf("failed: expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb2, "cortex.aggregate.review.failed"); ev == nil {
+		t.Error("cortex.aggregate.review.failed event not appended")
+	} else if ev.Message != "Failed Cortex aggregate review" {
+		t.Errorf("failed event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewNoAPIKey(t *testing.T) {
+	const secret = "review-secret"
+	server := startMockProvider(t, reviewResponse("approve", "ok", []string{"r"}, []string{"rec"}))
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"`+secret+`","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	rv := cortexFirstReviewerLane(t, task)
+
+	post := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`)
+	if post.Code != http.StatusCreated {
+		t.Fatalf("review: expected 201, got %d: %s", post.Code, post.Body.String())
+	}
+	assertNoSecret(t, "review", secret, post.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/cortex/aggregate/review", "/api/workbench/cortex/aggregate/reviews"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+func TestWorkbenchCortexAggregateReviewDoesNotWriteFiles(t *testing.T) {
+	dir := t.TempDir()
+	server := startMockProvider(t, reviewResponse("approve", "ok", nil, nil))
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "newfile.go", Action: "create", Content: "package x\n"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	rv := cortexFirstReviewerLane(t, task)
+
+	before := snapshotDir(t, dir)
+	if w := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"lane_id":"`+rv.ID+`"}`); w.Code != http.StatusCreated {
+		t.Fatalf("review: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	after := snapshotDir(t, dir)
+
+	if len(before) != len(after) {
+		t.Fatalf("file count changed: %d -> %d", len(before), len(after))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
+		t.Errorf("review must not write proposed file newfile.go (err=%v)", err)
 	}
 }

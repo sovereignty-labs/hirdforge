@@ -3,6 +3,7 @@ package workbench
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1209,4 +1210,405 @@ func (wb *Server) handleCortexAggregateLockbox(w http.ResponseWriter, r *http.Re
 	})
 	wb.appendCortexEvent("cortex.aggregate.lockbox_requested", "Created Lockbox request from Cortex aggregate", request)
 	writeJSON(w, http.StatusCreated, request)
+}
+
+// CortexAggregateReview is a Reviewer lane's provider-backed verdict on a Cortex
+// aggregate proposal. It is review material only: nothing here is ever written
+// to disk, and it never carries the provider API key.
+type CortexAggregateReview struct {
+	ID              string    `json:"id"`
+	TS              time.Time `json:"ts"`
+	AggregateID     string    `json:"aggregate_id"`
+	TaskID          string    `json:"task_id"`
+	LaneID          string    `json:"lane_id"`
+	LaneIndex       int       `json:"lane_index"`
+	Status          string    `json:"status"`
+	Verdict         string    `json:"verdict"`
+	Summary         string    `json:"summary"`
+	Risks           []string  `json:"risks"`
+	Recommendations []string  `json:"recommendations"`
+	Error           string    `json:"error"`
+}
+
+const (
+	cortexReviewStatusReviewed = "reviewed"
+	cortexReviewStatusFailed   = "failed"
+
+	cortexReviewVerdictApprove = "approve"
+	cortexReviewVerdictRevise  = "revise"
+	cortexReviewVerdictReject  = "reject"
+
+	cortexReviewSystemPrompt = "You are a Hirdforge Cortex Reviewer lane. Review the aggregated change proposal for correctness, conflicts, and risk. Do not edit any files. Respond with JSON only."
+)
+
+// cloneCortexAggregateReview deep-copies the slices so callers can never mutate
+// the store's internal state through a returned value.
+func cloneCortexAggregateReview(in CortexAggregateReview) CortexAggregateReview {
+	out := in
+	if in.Risks != nil {
+		out.Risks = make([]string, len(in.Risks))
+		copy(out.Risks, in.Risks)
+	}
+	if in.Recommendations != nil {
+		out.Recommendations = make([]string, len(in.Recommendations))
+		copy(out.Recommendations, in.Recommendations)
+	}
+	return out
+}
+
+// cortexReviewStore is the in-memory record of Cortex aggregate reviews. Every
+// accessor returns a deep copy, never a pointer into the stored slice.
+type cortexReviewStore struct {
+	mu      sync.Mutex
+	nextID  int64
+	reviews []CortexAggregateReview
+}
+
+func newCortexReviewStore() *cortexReviewStore {
+	return &cortexReviewStore{}
+}
+
+// Append assigns an id and timestamp to in, stores it, and returns a copy.
+func (s *cortexReviewStore) Append(in CortexAggregateReview) CortexAggregateReview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	in.ID = strconv.FormatInt(s.nextID, 10)
+	in.TS = time.Now().UTC()
+	s.reviews = append(s.reviews, in)
+	return cloneCortexAggregateReview(in)
+}
+
+// Current returns a deep copy of the most recent review, or nil if none.
+func (s *cortexReviewStore) Current() *CortexAggregateReview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.reviews) == 0 {
+		return nil
+	}
+	c := cloneCortexAggregateReview(s.reviews[len(s.reviews)-1])
+	return &c
+}
+
+// Find returns a deep copy of the review with the given id, or nil.
+func (s *cortexReviewStore) Find(id string) *CortexAggregateReview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.reviews {
+		if s.reviews[i].ID == id {
+			c := cloneCortexAggregateReview(s.reviews[i])
+			return &c
+		}
+	}
+	return nil
+}
+
+// List returns deep copies of all reviews in insertion order.
+func (s *cortexReviewStore) List() []CortexAggregateReview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]CortexAggregateReview, len(s.reviews))
+	for i := range s.reviews {
+		out[i] = cloneCortexAggregateReview(s.reviews[i])
+	}
+	return out
+}
+
+// ListByAggregate returns deep copies of reviews for the given aggregate id.
+func (s *cortexReviewStore) ListByAggregate(aggregateID string) []CortexAggregateReview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexAggregateReview{}
+	for i := range s.reviews {
+		if s.reviews[i].AggregateID == aggregateID {
+			out = append(out, cloneCortexAggregateReview(s.reviews[i]))
+		}
+	}
+	return out
+}
+
+// ListByTask returns deep copies of reviews for the given task id.
+func (s *cortexReviewStore) ListByTask(taskID string) []CortexAggregateReview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexAggregateReview{}
+	for i := range s.reviews {
+		if s.reviews[i].TaskID == taskID {
+			out = append(out, cloneCortexAggregateReview(s.reviews[i]))
+		}
+	}
+	return out
+}
+
+// ListByLane returns deep copies of reviews for the given lane id.
+func (s *cortexReviewStore) ListByLane(laneID string) []CortexAggregateReview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexAggregateReview{}
+	for i := range s.reviews {
+		if s.reviews[i].LaneID == laneID {
+			out = append(out, cloneCortexAggregateReview(s.reviews[i]))
+		}
+	}
+	return out
+}
+
+// cortexReviewContent is the provider's parsed review JSON.
+type cortexReviewContent struct {
+	Verdict         string   `json:"verdict"`
+	Summary         string   `json:"summary"`
+	Risks           []string `json:"risks"`
+	Recommendations []string `json:"recommendations"`
+}
+
+// parseCortexReviewContent decodes and validates a provider review response.
+func parseCortexReviewContent(content string) (cortexReviewContent, error) {
+	var parsed cortexReviewContent
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		return cortexReviewContent{}, fmt.Errorf("provider content is not valid review JSON: %w", err)
+	}
+	switch parsed.Verdict {
+	case cortexReviewVerdictApprove, cortexReviewVerdictRevise, cortexReviewVerdictReject:
+	default:
+		return cortexReviewContent{}, fmt.Errorf("verdict must be approve, revise, or reject (got %q)", parsed.Verdict)
+	}
+	if strings.TrimSpace(parsed.Summary) == "" {
+		return cortexReviewContent{}, errors.New("review summary is required")
+	}
+	if parsed.Risks == nil {
+		parsed.Risks = []string{}
+	}
+	if parsed.Recommendations == nil {
+		parsed.Recommendations = []string{}
+	}
+	return parsed, nil
+}
+
+// requestProviderReview calls the configured provider for an aggregate review.
+// It returns the validated review content, or an error covering any failure
+// mode (non-2xx status, transport error, or an invalid/unparseable review).
+func requestProviderReview(cfg *providerConfig, systemPrompt, userPrompt string) (cortexReviewContent, error) {
+	endpoint := strings.TrimRight(cfg.baseURL, "/") + "/chat/completions"
+	reqBody, err := json.Marshal(map[string]any{
+		"model": cfg.model,
+		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": userPrompt},
+		},
+		"temperature": 0,
+	})
+	if err != nil {
+		return cortexReviewContent{}, fmt.Errorf("marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(string(reqBody)))
+	if err != nil {
+		return cortexReviewContent{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+
+	client := &http.Client{Timeout: buildPlanTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return cortexReviewContent{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return cortexReviewContent{}, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(respBody))
+		if msg == "" {
+			msg = resp.Status
+		}
+		return cortexReviewContent{}, fmt.Errorf("provider returned status %d: %s", resp.StatusCode, msg)
+	}
+
+	var envelope struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
+		return cortexReviewContent{}, fmt.Errorf("decode provider response: %w", err)
+	}
+	if len(envelope.Choices) == 0 {
+		return cortexReviewContent{}, errors.New("provider response contained no choices")
+	}
+	return parseCortexReviewContent(envelope.Choices[0].Message.Content)
+}
+
+// cortexAggregateReviewUserPrompt renders the provider user message for a
+// Reviewer lane's review of an aggregate proposal.
+func cortexAggregateReviewUserPrompt(agg CortexAggregateProposal, task CortexTask, lane CortexLane) string {
+	var b strings.Builder
+	b.WriteString("Cortex Reviewer lane review of an aggregate change proposal.\n")
+	b.WriteString("Task goal: " + task.Goal + "\n")
+	b.WriteString("Reviewer lane id: " + lane.ID + "\n")
+	b.WriteString("Reviewer lane index: " + strconv.Itoa(lane.Index) + "\n")
+	b.WriteString("Reviewer lane task: " + lane.Task + "\n\n")
+
+	b.WriteString("Aggregate id: " + agg.ID + "\n")
+	b.WriteString("Aggregate status: " + agg.Status + "\n")
+	b.WriteString("Aggregate summary: " + agg.Summary + "\n")
+	b.WriteString("Source proposal ids: " + strings.Join(agg.SourceProposalIDs, ", ") + "\n")
+	if agg.Notes != "" {
+		b.WriteString("Notes: " + agg.Notes + "\n")
+	}
+	b.WriteString("\n")
+
+	b.WriteString("Aggregate files (" + strconv.Itoa(len(agg.Files)) + "):\n")
+	for _, f := range agg.Files {
+		b.WriteString("- " + f.Action + " " + f.Path + "\n")
+	}
+	b.WriteString("\n")
+
+	b.WriteString("Conflicts (" + strconv.Itoa(len(agg.Conflicts)) + "):\n")
+	for _, c := range agg.Conflicts {
+		b.WriteString("- " + c.Path + " across proposals " + strings.Join(c.ProposalIDs, ", ") + ": " + c.Reason + "\n")
+	}
+	b.WriteString("\n")
+
+	b.WriteString("Review the aggregate. Return JSON only, with no surrounding prose, in exactly this shape:\n")
+	b.WriteString(`{"verdict":"approve|revise|reject","summary":"...","risks":["..."],"recommendations":["..."]}`)
+	return b.String()
+}
+
+// handleCortexAggregateReview serves GET (current review) and POST (a Reviewer
+// lane's provider-backed review of an aggregate). It never applies or writes
+// proposed files.
+func (wb *Server) handleCortexAggregateReview(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		review := wb.cortexReviews.Current()
+		if review == nil {
+			http.Error(w, "no cortex aggregate review", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, *review)
+	case http.MethodPost:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var in struct {
+			AggregateID string `json:"aggregate_id"`
+			LaneID      string `json:"lane_id"`
+		}
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &in); err != nil {
+				http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
+		var agg *CortexAggregateProposal
+		if in.AggregateID == "" {
+			agg = wb.cortexAggregates.Current()
+		} else {
+			agg = wb.cortexAggregates.Find(in.AggregateID)
+		}
+		if agg == nil {
+			http.Error(w, "cortex aggregate not found", http.StatusNotFound)
+			return
+		}
+		if in.LaneID == "" {
+			http.Error(w, "lane_id is required", http.StatusBadRequest)
+			return
+		}
+
+		task := wb.cortex.Find(agg.TaskID)
+		if task == nil {
+			http.Error(w, "cortex task not found", http.StatusNotFound)
+			return
+		}
+
+		var lane *CortexLane
+		for i := range task.Lanes {
+			if task.Lanes[i].ID == in.LaneID {
+				l := task.Lanes[i]
+				lane = &l
+				break
+			}
+		}
+		if lane == nil {
+			http.Error(w, "lane not found", http.StatusNotFound)
+			return
+		}
+		if lane.Role != cortexRoleReviewer {
+			http.Error(w, "lane is not a reviewer lane", http.StatusConflict)
+			return
+		}
+
+		cfg := wb.provider.Config()
+		if cfg == nil {
+			http.Error(w, "provider must be configured", http.StatusConflict)
+			return
+		}
+
+		userPrompt := cortexAggregateReviewUserPrompt(*agg, *task, *lane)
+		content, reviewErr := requestProviderReview(cfg, cortexReviewSystemPrompt, userPrompt)
+
+		base := CortexAggregateReview{
+			AggregateID: agg.ID,
+			TaskID:      task.ID,
+			LaneID:      lane.ID,
+			LaneIndex:   lane.Index,
+		}
+		if reviewErr != nil {
+			base.Status = cortexReviewStatusFailed
+			base.Risks = []string{}
+			base.Recommendations = []string{}
+			base.Error = truncateString(reviewErr.Error(), 1000)
+			stored := wb.cortexReviews.Append(base)
+			wb.appendCortexEvent("cortex.aggregate.review.failed", "Failed Cortex aggregate review", stored)
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"review": stored,
+				"error":  truncateString(reviewErr.Error(), 1000),
+			})
+			return
+		}
+
+		base.Status = cortexReviewStatusReviewed
+		base.Verdict = content.Verdict
+		base.Summary = content.Summary
+		base.Risks = content.Risks
+		base.Recommendations = content.Recommendations
+		stored := wb.cortexReviews.Append(base)
+		wb.appendCortexEvent("cortex.aggregate.review.created", "Created Cortex aggregate review", stored)
+		writeJSON(w, http.StatusCreated, stored)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (wb *Server) handleCortexAggregateReviews(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	aggregateID := q.Get("aggregate_id")
+	taskID := q.Get("task_id")
+	laneID := q.Get("lane_id")
+
+	var out []CortexAggregateReview
+	switch {
+	case aggregateID != "":
+		out = wb.cortexReviews.ListByAggregate(aggregateID)
+	case taskID != "":
+		out = wb.cortexReviews.ListByTask(taskID)
+	case laneID != "":
+		out = wb.cortexReviews.ListByLane(laneID)
+	default:
+		out = wb.cortexReviews.List()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
