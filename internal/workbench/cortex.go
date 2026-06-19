@@ -877,3 +877,336 @@ func (wb *Server) handleCortexLaneProposals(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+// CortexAggregateConflict describes a single file path that more than one
+// Builder lane proposal changes in incompatible ways.
+type CortexAggregateConflict struct {
+	Path        string   `json:"path"`
+	ProposalIDs []string `json:"proposal_ids"`
+	Reason      string   `json:"reason"`
+}
+
+// CortexAggregateProposal merges a task's proposed Builder lane proposals into a
+// single reviewable candidate. It is review material only: nothing here is ever
+// written to disk, and it never carries the provider API key. Files reuse
+// []BuilderProposedFile.
+type CortexAggregateProposal struct {
+	ID                string                    `json:"id"`
+	TS                time.Time                 `json:"ts"`
+	TaskID            string                    `json:"task_id"`
+	Status            string                    `json:"status"`
+	Summary           string                    `json:"summary"`
+	SourceProposalIDs []string                  `json:"source_proposal_ids"`
+	Files             []BuilderProposedFile     `json:"files"`
+	Conflicts         []CortexAggregateConflict `json:"conflicts"`
+	Notes             string                    `json:"notes"`
+}
+
+const (
+	cortexAggregateStatusAggregated = "aggregated"
+	cortexAggregateStatusConflicted = "conflicted"
+	cortexAggregateStatusFailed     = "failed"
+)
+
+// cloneCortexAggregateProposal deep-copies the slices so callers can never
+// mutate the store's internal state through a returned value.
+func cloneCortexAggregateProposal(in CortexAggregateProposal) CortexAggregateProposal {
+	out := in
+	if in.SourceProposalIDs != nil {
+		out.SourceProposalIDs = make([]string, len(in.SourceProposalIDs))
+		copy(out.SourceProposalIDs, in.SourceProposalIDs)
+	}
+	if in.Files != nil {
+		out.Files = make([]BuilderProposedFile, len(in.Files))
+		copy(out.Files, in.Files)
+	}
+	if in.Conflicts != nil {
+		out.Conflicts = make([]CortexAggregateConflict, len(in.Conflicts))
+		for i := range in.Conflicts {
+			c := in.Conflicts[i]
+			if in.Conflicts[i].ProposalIDs != nil {
+				c.ProposalIDs = make([]string, len(in.Conflicts[i].ProposalIDs))
+				copy(c.ProposalIDs, in.Conflicts[i].ProposalIDs)
+			}
+			out.Conflicts[i] = c
+		}
+	}
+	return out
+}
+
+// cortexAggregateStore is the in-memory record of Cortex aggregate proposals.
+// Every accessor returns a deep copy, never a pointer into the stored slice.
+type cortexAggregateStore struct {
+	mu         sync.Mutex
+	nextID     int64
+	aggregates []CortexAggregateProposal
+}
+
+func newCortexAggregateStore() *cortexAggregateStore {
+	return &cortexAggregateStore{}
+}
+
+// Append assigns an id and timestamp to in, stores it, and returns a copy.
+func (s *cortexAggregateStore) Append(in CortexAggregateProposal) CortexAggregateProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	in.ID = strconv.FormatInt(s.nextID, 10)
+	in.TS = time.Now().UTC()
+	s.aggregates = append(s.aggregates, in)
+	return cloneCortexAggregateProposal(in)
+}
+
+// Current returns a deep copy of the most recent aggregate, or nil if none.
+func (s *cortexAggregateStore) Current() *CortexAggregateProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.aggregates) == 0 {
+		return nil
+	}
+	c := cloneCortexAggregateProposal(s.aggregates[len(s.aggregates)-1])
+	return &c
+}
+
+// Find returns a deep copy of the aggregate with the given id, or nil.
+func (s *cortexAggregateStore) Find(id string) *CortexAggregateProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.aggregates {
+		if s.aggregates[i].ID == id {
+			c := cloneCortexAggregateProposal(s.aggregates[i])
+			return &c
+		}
+	}
+	return nil
+}
+
+// List returns deep copies of all aggregates in insertion order.
+func (s *cortexAggregateStore) List() []CortexAggregateProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]CortexAggregateProposal, len(s.aggregates))
+	for i := range s.aggregates {
+		out[i] = cloneCortexAggregateProposal(s.aggregates[i])
+	}
+	return out
+}
+
+// ListByTask returns deep copies of the aggregates for the given task id.
+func (s *cortexAggregateStore) ListByTask(taskID string) []CortexAggregateProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexAggregateProposal{}
+	for i := range s.aggregates {
+		if s.aggregates[i].TaskID == taskID {
+			out = append(out, cloneCortexAggregateProposal(s.aggregates[i]))
+		}
+	}
+	return out
+}
+
+// aggregateLaneProposals merges proposed file changes across lane proposals (in
+// insertion order). A path that more than one proposal changes with a differing
+// action or content is a conflict: it is excluded from files and recorded in
+// conflicts. Identical same-path changes are deduplicated, not conflicted.
+func aggregateLaneProposals(proposals []CortexLaneProposal) ([]BuilderProposedFile, []CortexAggregateConflict) {
+	type entry struct {
+		proposalID string
+		file       BuilderProposedFile
+	}
+	byPath := map[string][]entry{}
+	pathOrder := []string{}
+	for _, p := range proposals {
+		for _, f := range p.Files {
+			if _, seen := byPath[f.Path]; !seen {
+				pathOrder = append(pathOrder, f.Path)
+			}
+			byPath[f.Path] = append(byPath[f.Path], entry{proposalID: p.ID, file: f})
+		}
+	}
+
+	files := []BuilderProposedFile{}
+	conflicts := []CortexAggregateConflict{}
+	for _, path := range pathOrder {
+		entries := byPath[path]
+
+		distinct := []string{}
+		seen := map[string]bool{}
+		for _, e := range entries {
+			if !seen[e.proposalID] {
+				seen[e.proposalID] = true
+				distinct = append(distinct, e.proposalID)
+			}
+		}
+
+		if len(distinct) > 1 {
+			identical := true
+			first := entries[0].file
+			for _, e := range entries[1:] {
+				if e.file.Action != first.Action || e.file.Content != first.Content {
+					identical = false
+					break
+				}
+			}
+			if !identical {
+				conflicts = append(conflicts, CortexAggregateConflict{
+					Path:        path,
+					ProposalIDs: distinct,
+					Reason:      "path changed by multiple lane proposals with differing action or content",
+				})
+				continue
+			}
+		}
+		files = append(files, entries[0].file)
+	}
+	return files, conflicts
+}
+
+// handleCortexAggregate serves GET (current aggregate) and POST (aggregate a
+// task's proposed Builder lane proposals into one reviewable candidate).
+func (wb *Server) handleCortexAggregate(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		agg := wb.cortexAggregates.Current()
+		if agg == nil {
+			http.Error(w, "no cortex aggregate", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, *agg)
+	case http.MethodPost:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var in struct {
+			TaskID string `json:"task_id"`
+		}
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &in); err != nil {
+				http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
+		var task *CortexTask
+		if in.TaskID == "" {
+			task = wb.cortex.Current()
+		} else {
+			task = wb.cortex.Find(in.TaskID)
+		}
+		if task == nil {
+			http.Error(w, "cortex task not found", http.StatusNotFound)
+			return
+		}
+
+		proposed := []CortexLaneProposal{}
+		for _, p := range wb.cortexLaneProposals.ListByTask(task.ID) {
+			if p.Status == builderProposalStatusProposed {
+				proposed = append(proposed, p)
+			}
+		}
+		if len(proposed) == 0 {
+			http.Error(w, "no proposed Builder lane proposals to aggregate", http.StatusConflict)
+			return
+		}
+
+		sourceIDs := make([]string, 0, len(proposed))
+		for _, p := range proposed {
+			sourceIDs = append(sourceIDs, p.ID)
+		}
+		files, conflicts := aggregateLaneProposals(proposed)
+
+		agg := CortexAggregateProposal{
+			TaskID:            task.ID,
+			SourceProposalIDs: sourceIDs,
+			Files:             files,
+			Conflicts:         conflicts,
+		}
+		if len(conflicts) > 0 {
+			agg.Status = cortexAggregateStatusConflicted
+			agg.Summary = fmt.Sprintf("Aggregated %d Builder lane proposal(s); %d path(s) conflict and require review. %d non-conflicting file(s) ready.", len(proposed), len(conflicts), len(files))
+			agg.Notes = "Conflicting files were excluded; resolve conflicts before requesting Lockbox approval."
+		} else {
+			agg.Status = cortexAggregateStatusAggregated
+			agg.Summary = fmt.Sprintf("Aggregated %d Builder lane proposal(s) into %d file(s).", len(proposed), len(files))
+		}
+
+		stored := wb.cortexAggregates.Append(agg)
+		wb.appendCortexEvent("cortex.aggregate.created", "Created Cortex aggregate proposal", stored)
+		writeJSON(w, http.StatusCreated, stored)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (wb *Server) handleCortexAggregates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	taskID := r.URL.Query().Get("task_id")
+	var out []CortexAggregateProposal
+	if taskID != "" {
+		out = wb.cortexAggregates.ListByTask(taskID)
+	} else {
+		out = wb.cortexAggregates.List()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleCortexAggregateLockbox creates a Lockbox approval request from an
+// aggregated (non-conflicted) Cortex aggregate proposal. It records the request
+// for review only; no proposed files are ever applied.
+func (wb *Server) handleCortexAggregateLockbox(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var in struct {
+		ID string `json:"id"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &in); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	var agg *CortexAggregateProposal
+	if in.ID == "" {
+		agg = wb.cortexAggregates.Current()
+	} else {
+		agg = wb.cortexAggregates.Find(in.ID)
+	}
+	if agg == nil {
+		http.Error(w, "cortex aggregate not found", http.StatusNotFound)
+		return
+	}
+	if agg.Status != cortexAggregateStatusAggregated {
+		http.Error(w, "aggregate is not in aggregated status", http.StatusConflict)
+		return
+	}
+
+	goal := ""
+	if task := wb.cortex.Find(agg.TaskID); task != nil {
+		goal = task.Goal
+	}
+
+	files := make([]BuilderProposedFile, len(agg.Files))
+	copy(files, agg.Files)
+	request := wb.lockbox.Append(LockboxApprovalRequest{
+		ProposalID: "aggregate:" + agg.ID,
+		Goal:       goal,
+		Status:     lockboxStatusPending,
+		Summary:    agg.Summary,
+		Files:      files,
+	})
+	wb.appendCortexEvent("cortex.aggregate.lockbox_requested", "Created Lockbox request from Cortex aggregate", request)
+	writeJSON(w, http.StatusCreated, request)
+}

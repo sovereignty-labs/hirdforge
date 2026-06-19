@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -4269,5 +4269,474 @@ func TestWorkbenchCortexLaneProposeDoesNotWriteFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
 		t.Errorf("proposed file newfile.go must not exist on disk (err=%v)", err)
+	}
+}
+
+// seedLaneProposal stores a proposed Cortex Builder lane proposal directly,
+// without a provider round-trip, for aggregation tests.
+func seedLaneProposal(t *testing.T, wb *Server, taskID, laneID string, files []BuilderProposedFile) CortexLaneProposal {
+	t.Helper()
+	return wb.cortexLaneProposals.Append(CortexLaneProposal{
+		TaskID:  taskID,
+		LaneID:  laneID,
+		Status:  "proposed",
+		Summary: "lane " + laneID,
+		Files:   files,
+	})
+}
+
+func aggregatePaths(agg CortexAggregateProposal) []string {
+	out := []string{}
+	for _, f := range agg.Files {
+		out = append(out, f.Path)
+	}
+	return out
+}
+
+func TestWorkbenchCortexAggregate404NoTask(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregate409NoProposed(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	// Only a failed lane proposal exists -> nothing to aggregate.
+	wb.cortexLaneProposals.Append(CortexLaneProposal{TaskID: task.ID, LaneID: "2", Status: "failed", Error: "x"})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateCombinesFiles(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "A"},
+		{Path: "b.go", Action: "create", Content: "B"},
+	})
+	seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{
+		{Path: "c.go", Action: "create", Content: "C"},
+	})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if agg.Status != "aggregated" {
+		t.Errorf("status=%q, want aggregated", agg.Status)
+	}
+	if agg.TaskID != task.ID {
+		t.Errorf("task_id=%q, want %q", agg.TaskID, task.ID)
+	}
+	want := []string{"a.go", "b.go", "c.go"}
+	got := aggregatePaths(agg)
+	if len(got) != len(want) {
+		t.Fatalf("files=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("file[%d]=%q, want %q", i, got[i], want[i])
+		}
+	}
+	if len(agg.Conflicts) != 0 {
+		t.Errorf("expected no conflicts, got %d", len(agg.Conflicts))
+	}
+}
+
+func TestWorkbenchCortexAggregateSourceOrder(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	p1 := seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	p2 := seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{{Path: "b.go", Action: "create", Content: "B"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(agg.SourceProposalIDs) != 2 || agg.SourceProposalIDs[0] != p1.ID || agg.SourceProposalIDs[1] != p2.ID {
+		t.Errorf("source_proposal_ids=%v, want [%s %s]", agg.SourceProposalIDs, p1.ID, p2.ID)
+	}
+}
+
+func TestWorkbenchCortexAggregateConflictContent(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	p1 := seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	p2 := seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "DIFFERENT"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if agg.Status != "conflicted" {
+		t.Errorf("status=%q, want conflicted", agg.Status)
+	}
+	if len(agg.Conflicts) != 1 {
+		t.Fatalf("conflicts=%d, want 1", len(agg.Conflicts))
+	}
+	c := agg.Conflicts[0]
+	if c.Path != "a.go" {
+		t.Errorf("conflict path=%q, want a.go", c.Path)
+	}
+	ids := map[string]bool{}
+	for _, id := range c.ProposalIDs {
+		ids[id] = true
+	}
+	if !ids[p1.ID] || !ids[p2.ID] {
+		t.Errorf("conflict proposal_ids=%v, want both %s and %s", c.ProposalIDs, p1.ID, p2.ID)
+	}
+	for _, f := range agg.Files {
+		if f.Path == "a.go" {
+			t.Error("conflicting file a.go should be excluded from files")
+		}
+	}
+}
+
+func TestWorkbenchCortexAggregateConflictAction(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{{Path: "a.go", Action: "delete", Content: ""}})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if agg.Status != "conflicted" {
+		t.Errorf("status=%q, want conflicted", agg.Status)
+	}
+	if len(agg.Conflicts) != 1 || agg.Conflicts[0].Path != "a.go" {
+		t.Errorf("expected 1 conflict on a.go, got %v", agg.Conflicts)
+	}
+}
+
+func TestWorkbenchCortexAggregateSamePathSameContent(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "SAME"}})
+	seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "SAME"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if agg.Status != "aggregated" {
+		t.Errorf("status=%q, want aggregated", agg.Status)
+	}
+	if len(agg.Conflicts) != 0 {
+		t.Errorf("expected no conflicts, got %d", len(agg.Conflicts))
+	}
+	if len(agg.Files) != 1 {
+		t.Errorf("expected 1 deduplicated file, got %d: %v", len(agg.Files), aggregatePaths(agg))
+	}
+	if len(agg.Files) > 0 && agg.Files[0].Path != "a.go" {
+		t.Errorf("file path=%q, want a.go", agg.Files[0].Path)
+	}
+}
+
+func TestWorkbenchCortexAggregateConflictExcludes(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "A"},
+		{Path: "keep.go", Action: "create", Content: "K"},
+	})
+	seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "DIFFERENT"},
+	})
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if agg.Status != "conflicted" {
+		t.Errorf("status=%q, want conflicted", agg.Status)
+	}
+	hasKeep := false
+	for _, f := range agg.Files {
+		if f.Path == "a.go" {
+			t.Error("conflicting file a.go should be excluded")
+		}
+		if f.Path == "keep.go" {
+			hasKeep = true
+		}
+	}
+	if !hasKeep {
+		t.Error("non-conflicting file keep.go should be included")
+	}
+	if len(agg.Conflicts) != 1 || agg.Conflicts[0].Path != "a.go" {
+		t.Errorf("expected 1 conflict on a.go, got %v", agg.Conflicts)
+	}
+}
+
+func TestWorkbenchCortexAggregateGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateGETCurrent(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	created := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("aggregate: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	var createdAgg CortexAggregateProposal
+	if err := json.Unmarshal(created.Body.Bytes(), &createdAgg); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if agg.ID != createdAgg.ID {
+		t.Errorf("current aggregate id=%q, want %q", agg.ID, createdAgg.ID)
+	}
+}
+
+func TestWorkbenchCortexAggregatesEmpty(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregates", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty aggregates, got %q", body)
+	}
+}
+
+func TestWorkbenchCortexAggregatesFilterByTask(t *testing.T) {
+	wb := New()
+	task1 := createCortexTask(t, wb, `{"goal":"first","mode":"multi"}`)
+	seedLaneProposal(t, wb, task1.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{"task_id":"`+task1.ID+`"}`)
+	task2 := createCortexTask(t, wb, `{"goal":"second","mode":"multi"}`)
+	seedLaneProposal(t, wb, task2.ID, "2", []BuilderProposedFile{{Path: "b.go", Action: "create", Content: "B"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{"task_id":"`+task2.ID+`"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregates?task_id="+task1.ID, nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var filtered []CortexAggregateProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &filtered); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(filtered) != 1 || filtered[0].TaskID != task1.ID {
+		t.Fatalf("expected 1 aggregate for task1, got %v", filtered)
+	}
+
+	reqAll := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregates", nil)
+	wAll := httptest.NewRecorder()
+	wb.mux.ServeHTTP(wAll, reqAll)
+	var all []CortexAggregateProposal
+	if err := json.Unmarshal(wAll.Body.Bytes(), &all); err != nil {
+		t.Fatalf("decode all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("expected 2 total aggregates, got %d", len(all))
+	}
+}
+
+func TestWorkbenchCortexAggregateEvent(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	if w := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`); w.Code != http.StatusCreated {
+		t.Fatalf("aggregate: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	ev := cortexHasEvent(wb, "cortex.aggregate.created")
+	if ev == nil {
+		t.Fatal("cortex.aggregate.created event not appended")
+	}
+	if ev.Message != "Created Cortex aggregate proposal" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+	if len(ev.Data) == 0 {
+		t.Error("expected event to carry aggregate data")
+	}
+}
+
+func TestWorkbenchCortexAggregateNoAPIKey(t *testing.T) {
+	const secret = "aggregate-secret"
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"`+secret+`","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+
+	agg := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if agg.Code != http.StatusCreated {
+		t.Fatalf("aggregate: expected 201, got %d: %s", agg.Code, agg.Body.String())
+	}
+	assertNoSecret(t, "aggregate", secret, agg.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/cortex/aggregate", "/api/workbench/cortex/aggregates"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+func TestWorkbenchCortexAggregateLockbox404NoAggregate(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateLockbox409Conflicted(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	seedLaneProposal(t, wb, task.ID, "3", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "DIFFERENT"}})
+	agg := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	var decoded CortexAggregateProposal
+	json.Unmarshal(agg.Body.Bytes(), &decoded)
+	if decoded.Status != "conflicted" {
+		t.Fatalf("expected conflicted aggregate, got %q", decoded.Status)
+	}
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexAggregateLockboxCreatesRequest(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"ship it","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "A", Rationale: "x"},
+		{Path: "b.go", Action: "create", Content: "B", Rationale: "y"},
+	})
+	aggResp := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if aggResp.Code != http.StatusCreated {
+		t.Fatalf("aggregate: expected 201, got %d: %s", aggResp.Code, aggResp.Body.String())
+	}
+	var agg CortexAggregateProposal
+	json.Unmarshal(aggResp.Body.Bytes(), &agg)
+	if agg.Status != "aggregated" {
+		t.Fatalf("expected aggregated, got %q", agg.Status)
+	}
+
+	w := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var req LockboxApprovalRequest
+	if err := json.Unmarshal(w.Body.Bytes(), &req); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if req.ProposalID != "aggregate:"+agg.ID {
+		t.Errorf("proposal_id=%q, want aggregate:%s", req.ProposalID, agg.ID)
+	}
+	if req.Goal != "ship it" {
+		t.Errorf("goal=%q, want 'ship it'", req.Goal)
+	}
+	if req.Summary != agg.Summary {
+		t.Errorf("summary=%q, want %q", req.Summary, agg.Summary)
+	}
+	if req.Status != "pending" {
+		t.Errorf("status=%q, want pending", req.Status)
+	}
+	if len(req.Files) != len(agg.Files) {
+		t.Fatalf("files=%d, want %d", len(req.Files), len(agg.Files))
+	}
+	for i := range agg.Files {
+		if req.Files[i] != agg.Files[i] {
+			t.Errorf("file[%d]=%+v, want %+v", i, req.Files[i], agg.Files[i])
+		}
+	}
+
+	// The request is stored in the Lockbox.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/workbench/lockbox/request", nil)
+	getRec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Errorf("GET lockbox/request: expected 200, got %d", getRec.Code)
+	}
+}
+
+func TestWorkbenchCortexAggregateLockboxEvent(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if w := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`); w.Code != http.StatusCreated {
+		t.Fatalf("aggregate/lockbox: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	ev := cortexHasEvent(wb, "cortex.aggregate.lockbox_requested")
+	if ev == nil {
+		t.Fatal("cortex.aggregate.lockbox_requested event not appended")
+	}
+	if ev.Message != "Created Lockbox request from Cortex aggregate" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchCortexAggregateLockboxDoesNotApplyFiles(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "newfile.go", Action: "create", Content: "package x\n"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+
+	before := snapshotDir(t, dir)
+	if w := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`); w.Code != http.StatusCreated {
+		t.Fatalf("aggregate/lockbox: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	after := snapshotDir(t, dir)
+
+	if len(before) != len(after) {
+		t.Fatalf("file count changed: %d -> %d", len(before), len(after))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
+		t.Errorf("aggregate proposed file newfile.go must not be written to disk (err=%v)", err)
 	}
 }
