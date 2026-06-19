@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -3077,5 +3077,409 @@ func TestWorkbenchLockboxApproveDoesNotModifyFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
 		t.Errorf("proposed file newfile.go must not exist on disk (err=%v)", err)
+	}
+}
+
+// createCortexTask posts a cortex task and decodes the 201 response.
+func createCortexTask(t *testing.T, wb *Server, body string) CortexTask {
+	t.Helper()
+	w := postJSON(t, wb, "/api/workbench/cortex/task", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("cortex task create: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var task CortexTask
+	if err := json.Unmarshal(w.Body.Bytes(), &task); err != nil {
+		t.Fatalf("decode cortex task: %v", err)
+	}
+	return task
+}
+
+func cortexRoleCounts(lanes []CortexLane) map[string]int {
+	m := map[string]int{}
+	for _, l := range lanes {
+		m[l.Role]++
+	}
+	return m
+}
+
+func TestWorkbenchCortexRejectsMissingGoal(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/task", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexRejectsUnknownMode(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/task", `{"goal":"g","mode":"swarm"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexRejectsNegativeCount(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/task", `{"goal":"g","roles":{"builder":-1}}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexRejectsZeroLanes(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/task", `{"goal":"g","roles":{"architect":0,"builder":0,"reviewer":0,"validator":0}}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexRejectsTooManyLanes(t *testing.T) {
+	wb := New()
+	// 4 + 4 + 3 + 2 = 13 > 12
+	w := postJSON(t, wb, "/api/workbench/cortex/task", `{"goal":"g","roles":{"architect":4,"builder":4,"reviewer":3,"validator":2}}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexSingleDefault(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"ship it"}`)
+	if task.ID == "" {
+		t.Error("expected id to be set")
+	}
+	if task.TS.IsZero() {
+		t.Error("expected ts to be set")
+	}
+	if task.Goal != "ship it" {
+		t.Errorf("expected goal=ship it, got %q", task.Goal)
+	}
+	if task.Status != "planned" {
+		t.Errorf("expected status=planned, got %q", task.Status)
+	}
+	if len(task.Lanes) != 1 {
+		t.Fatalf("expected 1 lane, got %d", len(task.Lanes))
+	}
+	lane := task.Lanes[0]
+	if lane.Role != "builder" {
+		t.Errorf("expected role=builder, got %q", lane.Role)
+	}
+	if lane.Index != 1 {
+		t.Errorf("expected index=1, got %d", lane.Index)
+	}
+	if lane.Status != "pending" {
+		t.Errorf("expected status=pending, got %q", lane.Status)
+	}
+	if lane.Task != "Builder lane 1: ship it" {
+		t.Errorf("unexpected lane task: %q", lane.Task)
+	}
+}
+
+func TestWorkbenchCortexMultiDefault(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	if len(task.Lanes) != 5 {
+		t.Fatalf("expected 5 lanes, got %d", len(task.Lanes))
+	}
+	counts := cortexRoleCounts(task.Lanes)
+	if counts["architect"] != 1 || counts["builder"] != 2 || counts["reviewer"] != 1 || counts["validator"] != 1 {
+		t.Errorf("unexpected role counts: %v", counts)
+	}
+}
+
+func TestWorkbenchCortexExplicitRoles(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","roles":{"builder":3,"reviewer":2}}`)
+	if len(task.Lanes) != 5 {
+		t.Fatalf("expected 5 lanes, got %d", len(task.Lanes))
+	}
+	counts := cortexRoleCounts(task.Lanes)
+	if counts["builder"] != 3 {
+		t.Errorf("expected 3 builders, got %d", counts["builder"])
+	}
+	if counts["reviewer"] != 2 {
+		t.Errorf("expected 2 reviewers, got %d", counts["reviewer"])
+	}
+	if counts["architect"] != 0 || counts["validator"] != 0 {
+		t.Errorf("expected no architect/validator lanes, got %v", counts)
+	}
+}
+
+func TestWorkbenchCortexLaneOrdering(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	wantRoles := []string{"architect", "builder", "builder", "reviewer", "validator"}
+	if len(task.Lanes) != len(wantRoles) {
+		t.Fatalf("expected %d lanes, got %d", len(wantRoles), len(task.Lanes))
+	}
+	for i, want := range wantRoles {
+		if task.Lanes[i].Role != want {
+			t.Errorf("lane[%d] role=%q, want %q", i, task.Lanes[i].Role, want)
+		}
+		if task.Lanes[i].ID != strconv.Itoa(i+1) {
+			t.Errorf("lane[%d] id=%q, want %q", i, task.Lanes[i].ID, strconv.Itoa(i+1))
+		}
+	}
+}
+
+func TestWorkbenchCortexLaneIndexes(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","roles":{"builder":3,"reviewer":2}}`)
+	var builders, reviewers []int
+	for _, l := range task.Lanes {
+		switch l.Role {
+		case "builder":
+			builders = append(builders, l.Index)
+		case "reviewer":
+			reviewers = append(reviewers, l.Index)
+		}
+	}
+	if len(builders) != 3 || builders[0] != 1 || builders[1] != 2 || builders[2] != 3 {
+		t.Errorf("expected builder indexes [1 2 3], got %v", builders)
+	}
+	if len(reviewers) != 2 || reviewers[0] != 1 || reviewers[1] != 2 {
+		t.Errorf("expected reviewer indexes [1 2], got %v", reviewers)
+	}
+}
+
+func TestWorkbenchCortexLaneWorktreeFieldsEmpty(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	for _, l := range task.Lanes {
+		if l.WorkspacePath != "" {
+			t.Errorf("lane %s workspace_path should be empty, got %q", l.ID, l.WorkspacePath)
+		}
+		if l.BaseBranch != "" {
+			t.Errorf("lane %s base_branch should be empty, got %q", l.ID, l.BaseBranch)
+		}
+		if l.WorktreeBranch != "" {
+			t.Errorf("lane %s worktree_branch should be empty, got %q", l.ID, l.WorktreeBranch)
+		}
+	}
+}
+
+func TestWorkbenchCortexTaskGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/task", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexTaskGETCurrent(t *testing.T) {
+	wb := New()
+	created := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/task", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var task CortexTask
+	if err := json.Unmarshal(w.Body.Bytes(), &task); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if task.ID != created.ID {
+		t.Errorf("expected current task id=%q, got %q", created.ID, task.ID)
+	}
+}
+
+func TestWorkbenchCortexTasksEmpty(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/tasks", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty tasks, got %q", body)
+	}
+}
+
+func TestWorkbenchCortexTasksNewestLast(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"first"}`)
+	createCortexTask(t, wb, `{"goal":"second"}`)
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/tasks", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var tasks []CortexTask
+	if err := json.Unmarshal(w.Body.Bytes(), &tasks); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d", len(tasks))
+	}
+	if tasks[0].Goal != "first" {
+		t.Errorf("expected oldest goal=first, got %q", tasks[0].Goal)
+	}
+	if tasks[1].Goal != "second" {
+		t.Errorf("expected newest goal=second, got %q", tasks[1].Goal)
+	}
+}
+
+func TestWorkbenchCortexLanesGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lanes", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLanesGETCurrent(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lanes", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var lanes []CortexLane
+	if err := json.Unmarshal(w.Body.Bytes(), &lanes); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(lanes) != 5 {
+		t.Fatalf("expected 5 lanes, got %d", len(lanes))
+	}
+}
+
+func TestWorkbenchCortexRun404(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/run", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexRunSingle(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"ship"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/run", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var task CortexTask
+	if err := json.Unmarshal(w.Body.Bytes(), &task); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if task.Status != "completed" {
+		t.Errorf("expected task status=completed, got %q", task.Status)
+	}
+	if len(task.Lanes) != 1 {
+		t.Fatalf("expected 1 lane, got %d", len(task.Lanes))
+	}
+	lane := task.Lanes[0]
+	if lane.Status != "completed" {
+		t.Errorf("expected lane status=completed, got %q", lane.Status)
+	}
+	if lane.Result != "Builder lane 1 ready for isolated worktree proposal generation." {
+		t.Errorf("unexpected lane result: %q", lane.Result)
+	}
+}
+
+func TestWorkbenchCortexRunMulti(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/run", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var task CortexTask
+	if err := json.Unmarshal(w.Body.Bytes(), &task); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if task.Status != "completed" {
+		t.Errorf("expected task status=completed, got %q", task.Status)
+	}
+	if len(task.Lanes) != 5 {
+		t.Fatalf("expected 5 lanes, got %d", len(task.Lanes))
+	}
+	for _, l := range task.Lanes {
+		if l.Status != "completed" {
+			t.Errorf("lane %s (%s) status=%q, want completed", l.ID, l.Role, l.Status)
+		}
+		if l.Result == "" {
+			t.Errorf("lane %s (%s) expected a non-empty result", l.ID, l.Role)
+		}
+	}
+	results := map[string]string{}
+	for _, l := range task.Lanes {
+		results[l.Role+":"+strconv.Itoa(l.Index)] = l.Result
+	}
+	if results["architect:1"] != "Architect lane 1 planned decomposition." {
+		t.Errorf("unexpected architect result: %q", results["architect:1"])
+	}
+	if results["builder:2"] != "Builder lane 2 ready for isolated worktree proposal generation." {
+		t.Errorf("unexpected builder result: %q", results["builder:2"])
+	}
+	if results["validator:1"] != "Validator lane 1 ready to recommend validation checks." {
+		t.Errorf("unexpected validator result: %q", results["validator:1"])
+	}
+}
+
+func TestWorkbenchCortexRunAppendsEvents(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`) // 5 lanes
+	w := postJSON(t, wb, "/api/workbench/cortex/run", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	counts := map[string]int{}
+	for _, e := range wb.store.List() {
+		counts[e.Type]++
+	}
+	if counts["cortex.task.started"] != 1 {
+		t.Errorf("expected 1 cortex.task.started, got %d", counts["cortex.task.started"])
+	}
+	if counts["cortex.task.completed"] != 1 {
+		t.Errorf("expected 1 cortex.task.completed, got %d", counts["cortex.task.completed"])
+	}
+	if counts["cortex.lane.started"] != 5 {
+		t.Errorf("expected 5 cortex.lane.started, got %d", counts["cortex.lane.started"])
+	}
+	if counts["cortex.lane.completed"] != 5 {
+		t.Errorf("expected 5 cortex.lane.completed, got %d", counts["cortex.lane.completed"])
+	}
+}
+
+func TestWorkbenchCortexNoAPIKey(t *testing.T) {
+	const secret = "cortex-top-secret"
+	wb := New()
+	// Configure a provider with a secret; Cortex must never touch or leak it.
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"`+secret+`","model":"m"}`)
+
+	created := postJSON(t, wb, "/api/workbench/cortex/task", `{"goal":"do it","mode":"multi"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	assertNoSecret(t, "cortex task create", secret, created.Body.Bytes())
+
+	run := postJSON(t, wb, "/api/workbench/cortex/run", `{}`)
+	if run.Code != http.StatusOK {
+		t.Fatalf("run: expected 200, got %d: %s", run.Code, run.Body.String())
+	}
+	assertNoSecret(t, "cortex run", secret, run.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/cortex/task", "/api/workbench/cortex/tasks", "/api/workbench/cortex/lanes"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
 	}
 }
