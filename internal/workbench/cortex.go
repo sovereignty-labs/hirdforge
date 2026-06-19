@@ -580,3 +580,300 @@ func (wb *Server) handleCortexWorktrees(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// CortexLaneProposal is a provider-produced, in-memory-only change proposal for
+// a single Cortex Builder lane. Like a global Builder proposal it is review
+// material: nothing here is ever written to disk, and it never carries the
+// provider API key. Files reuse []BuilderProposedFile.
+type CortexLaneProposal struct {
+	ID            string                `json:"id"`
+	TS            time.Time             `json:"ts"`
+	TaskID        string                `json:"task_id"`
+	LaneID        string                `json:"lane_id"`
+	LaneIndex     int                   `json:"lane_index"`
+	WorkspacePath string                `json:"workspace_path"`
+	Status        string                `json:"status"`
+	Summary       string                `json:"summary"`
+	Files         []BuilderProposedFile `json:"files"`
+	Error         string                `json:"error"`
+}
+
+// cloneCortexLaneProposal deep-copies the files slice so callers can never
+// mutate the store's internal state through a returned value.
+func cloneCortexLaneProposal(in CortexLaneProposal) CortexLaneProposal {
+	out := in
+	if in.Files != nil {
+		out.Files = make([]BuilderProposedFile, len(in.Files))
+		copy(out.Files, in.Files)
+	}
+	return out
+}
+
+// cortexLaneProposalStore is the in-memory record of Cortex Builder lane
+// proposals. Every accessor returns a deep copy, never a pointer into the
+// stored slice.
+type cortexLaneProposalStore struct {
+	mu        sync.Mutex
+	nextID    int64
+	proposals []CortexLaneProposal
+}
+
+func newCortexLaneProposalStore() *cortexLaneProposalStore {
+	return &cortexLaneProposalStore{}
+}
+
+// Append assigns an id and timestamp to in, stores it, and returns a copy.
+func (s *cortexLaneProposalStore) Append(in CortexLaneProposal) CortexLaneProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	in.ID = strconv.FormatInt(s.nextID, 10)
+	in.TS = time.Now().UTC()
+	s.proposals = append(s.proposals, in)
+	return cloneCortexLaneProposal(in)
+}
+
+// Current returns a deep copy of the most recent proposal, or nil if none.
+func (s *cortexLaneProposalStore) Current() *CortexLaneProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.proposals) == 0 {
+		return nil
+	}
+	c := cloneCortexLaneProposal(s.proposals[len(s.proposals)-1])
+	return &c
+}
+
+// Find returns a deep copy of the proposal with the given id, or nil.
+func (s *cortexLaneProposalStore) Find(id string) *CortexLaneProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.proposals {
+		if s.proposals[i].ID == id {
+			c := cloneCortexLaneProposal(s.proposals[i])
+			return &c
+		}
+	}
+	return nil
+}
+
+// List returns deep copies of all proposals in insertion order.
+func (s *cortexLaneProposalStore) List() []CortexLaneProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]CortexLaneProposal, len(s.proposals))
+	for i := range s.proposals {
+		out[i] = cloneCortexLaneProposal(s.proposals[i])
+	}
+	return out
+}
+
+// ListByTask returns deep copies of the proposals for the given task id.
+func (s *cortexLaneProposalStore) ListByTask(taskID string) []CortexLaneProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexLaneProposal{}
+	for i := range s.proposals {
+		if s.proposals[i].TaskID == taskID {
+			out = append(out, cloneCortexLaneProposal(s.proposals[i]))
+		}
+	}
+	return out
+}
+
+// ListByLane returns deep copies of the proposals for the given lane id.
+func (s *cortexLaneProposalStore) ListByLane(laneID string) []CortexLaneProposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexLaneProposal{}
+	for i := range s.proposals {
+		if s.proposals[i].LaneID == laneID {
+			out = append(out, cloneCortexLaneProposal(s.proposals[i]))
+		}
+	}
+	return out
+}
+
+// cortexLaneProposalUserPrompt renders the provider user message for a Builder
+// lane proposal: it scopes the request to the task goal, the lane, the lane's
+// worktree/workspace, and the read-only inspection context.
+func cortexLaneProposalUserPrompt(task CortexTask, lane CortexLane, contextPath string, contextProject ProjectState, insp ProjectInspection, warning string) string {
+	var b strings.Builder
+	b.WriteString("Cortex Builder lane change proposal.\n")
+	b.WriteString("Task goal: " + task.Goal + "\n")
+	b.WriteString("Lane id: " + lane.ID + "\n")
+	b.WriteString("Lane index: " + strconv.Itoa(lane.Index) + "\n")
+	b.WriteString("Lane task: " + lane.Task + "\n")
+	b.WriteString("Workspace path: " + contextPath + "\n")
+	b.WriteString("Base branch: " + lane.BaseBranch + "\n")
+	b.WriteString("Worktree branch: " + lane.WorktreeBranch + "\n")
+	if warning != "" {
+		b.WriteString("Warning: " + warning + "\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(builderProjectContext(task.Goal, contextProject, insp))
+	b.WriteString("Propose the file changes for this Builder lane only. ")
+	b.WriteString("Return JSON only, with no surrounding prose, in exactly this shape:\n")
+	b.WriteString(`{"summary":"...","files":[{"path":"relative/path","action":"create|modify|delete","content":"...","rationale":"..."}]}`)
+	b.WriteString("\n")
+	b.WriteString("Paths must be relative to the workspace root. Use action \"delete\" with empty content to remove a file. The files array may be empty if no changes are needed.")
+	return b.String()
+}
+
+// handleCortexLanePropose asks the provider for a change proposal scoped to a
+// single Builder lane and stores it per lane. It inspects the lane's workspace
+// (or the project as a fallback) read-only and never writes proposed files.
+func (wb *Server) handleCortexLanePropose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var in struct {
+		TaskID string `json:"task_id"`
+		LaneID string `json:"lane_id"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &in); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	var task *CortexTask
+	if in.TaskID == "" {
+		task = wb.cortex.Current()
+	} else {
+		task = wb.cortex.Find(in.TaskID)
+	}
+	if task == nil {
+		http.Error(w, "cortex task not found", http.StatusNotFound)
+		return
+	}
+	if in.LaneID == "" {
+		http.Error(w, "lane_id is required", http.StatusBadRequest)
+		return
+	}
+
+	var lane *CortexLane
+	for i := range task.Lanes {
+		if task.Lanes[i].ID == in.LaneID {
+			l := task.Lanes[i]
+			lane = &l
+			break
+		}
+	}
+	if lane == nil {
+		http.Error(w, "lane not found", http.StatusNotFound)
+		return
+	}
+	if lane.Role != cortexRoleBuilder {
+		http.Error(w, "lane is not a builder lane", http.StatusConflict)
+		return
+	}
+
+	cfg := wb.provider.Config()
+	if cfg == nil {
+		http.Error(w, "provider must be configured", http.StatusConflict)
+		return
+	}
+	project := wb.project.Get()
+	if project == nil {
+		http.Error(w, "project must be open", http.StatusConflict)
+		return
+	}
+
+	// Choose the inspection context path: the lane's worktree when present,
+	// otherwise the project path with a warning surfaced in the prompt.
+	contextPath := lane.WorkspacePath
+	warning := ""
+	if contextPath == "" {
+		contextPath = project.Path
+		warning = "lane workspace_path is empty; using project path " + project.Path + " as proposal context"
+	}
+
+	contextProject := ProjectState{
+		Path: contextPath,
+		Name: filepath.Base(contextPath),
+		Git:  isGitRepo(contextPath),
+	}
+	if contextProject.Git {
+		if branch, derr := detectBranch(contextPath); derr == nil {
+			contextProject.CurrentBranch = branch
+		}
+	}
+	insp := inspectProject(contextProject)
+
+	userPrompt := cortexLaneProposalUserPrompt(*task, *lane, contextPath, contextProject, insp, warning)
+	summary, files, proposeErr := requestProviderProposal(cfg, builderProposalSystemPrompt, userPrompt)
+
+	base := CortexLaneProposal{
+		TaskID:        task.ID,
+		LaneID:        lane.ID,
+		LaneIndex:     lane.Index,
+		WorkspacePath: contextPath,
+	}
+	if proposeErr != nil {
+		base.Status = builderProposalStatusFailed
+		base.Files = []BuilderProposedFile{}
+		base.Error = truncateString(proposeErr.Error(), 1000)
+		stored := wb.cortexLaneProposals.Append(base)
+		wb.appendCortexEvent("cortex.lane.proposal.failed", "Failed Cortex Builder lane proposal", stored)
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"proposal": stored,
+			"error":    truncateString(proposeErr.Error(), 1000),
+		})
+		return
+	}
+
+	base.Status = builderProposalStatusProposed
+	base.Summary = summary
+	base.Files = files
+	stored := wb.cortexLaneProposals.Append(base)
+	wb.appendCortexEvent("cortex.lane.proposal.created", "Created Cortex Builder lane proposal", stored)
+	writeJSON(w, http.StatusCreated, stored)
+}
+
+func (wb *Server) handleCortexLaneProposal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	proposal := wb.cortexLaneProposals.Current()
+	if proposal == nil {
+		http.Error(w, "no lane proposal", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, *proposal)
+}
+
+func (wb *Server) handleCortexLaneProposals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	taskID := r.URL.Query().Get("task_id")
+	laneID := r.URL.Query().Get("lane_id")
+
+	var out []CortexLaneProposal
+	switch {
+	case taskID != "" && laneID != "":
+		out = []CortexLaneProposal{}
+		for _, p := range wb.cortexLaneProposals.List() {
+			if p.TaskID == taskID && p.LaneID == laneID {
+				out = append(out, p)
+			}
+		}
+	case taskID != "":
+		out = wb.cortexLaneProposals.ListByTask(taskID)
+	case laneID != "":
+		out = wb.cortexLaneProposals.ListByLane(laneID)
+	default:
+		out = wb.cortexLaneProposals.List()
+	}
+	writeJSON(w, http.StatusOK, out)
+}

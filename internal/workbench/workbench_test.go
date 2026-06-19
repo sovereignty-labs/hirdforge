@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -3735,5 +3735,539 @@ func TestWorkbenchCortexWorktreesNoAPIKey(t *testing.T) {
 		if strings.HasPrefix(e.Type, "cortex.") {
 			assertNoSecret(t, "event "+e.Type, secret, e.Data)
 		}
+	}
+}
+
+// cortexFirstBuilderLane returns the first Builder lane of a task.
+func cortexFirstBuilderLane(t *testing.T, task CortexTask) CortexLane {
+	t.Helper()
+	for _, l := range task.Lanes {
+		if l.Role == "builder" {
+			return l
+		}
+	}
+	t.Fatalf("no builder lane in task %s", task.ID)
+	return CortexLane{}
+}
+
+// cortexLaneProposeSetup builds a workbench with a git project open and a mock
+// provider configured, returning the workbench and the project dir.
+func cortexLaneProposeSetup(t *testing.T, handler http.HandlerFunc) (*Server, string) {
+	t.Helper()
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	server := startMockProvider(t, handler)
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	return wb, dir
+}
+
+// cortexHasEvent returns the first event of the given type, or nil.
+func cortexHasEvent(wb *Server, evType string) *WorkbenchEvent {
+	for _, e := range wb.store.List() {
+		if e.Type == evType {
+			ev := e
+			return &ev
+		}
+	}
+	return nil
+}
+
+func TestWorkbenchCortexLaneProposeRequiresLaneID(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLanePropose404NoTask(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"1"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLanePropose404MissingLane(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"999"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLanePropose409NonBuilder(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	var architectID string
+	for _, l := range task.Lanes {
+		if l.Role == "architect" {
+			architectID = l.ID
+		}
+	}
+	if architectID == "" {
+		t.Fatal("no architect lane present")
+	}
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+architectID+`"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLanePropose409NoProvider(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLanePropose409NoProject(t *testing.T) {
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"k","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLaneProposeUsesWorkspacePath(t *testing.T) {
+	var capturedUser string
+	wb, dir := cortexLaneProposeSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 2 {
+			capturedUser = body.Messages[1]["content"]
+		}
+		proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}})(w, r)
+	})
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	registerWorktreeCleanup(t, dir, task.ID)
+	wt := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if wt.Code != http.StatusOK {
+		t.Fatalf("worktrees: expected 200, got %d: %s", wt.Code, wt.Body.String())
+	}
+	var allocated CortexTask
+	if err := json.Unmarshal(wt.Body.Bytes(), &allocated); err != nil {
+		t.Fatalf("decode allocated: %v", err)
+	}
+	b := cortexFirstBuilderLane(t, allocated)
+	if b.WorkspacePath == "" {
+		t.Fatal("builder lane has no workspace_path after allocation")
+	}
+
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var prop CortexLaneProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &prop); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prop.WorkspacePath != b.WorkspacePath {
+		t.Errorf("proposal workspace_path=%q, want lane workspace %q", prop.WorkspacePath, b.WorkspacePath)
+	}
+	if !strings.Contains(capturedUser, b.WorkspacePath) {
+		t.Errorf("expected prompt to reference workspace path %q:\n%s", b.WorkspacePath, capturedUser)
+	}
+}
+
+func TestWorkbenchCortexLaneProposeFallsBackToProjectPath(t *testing.T) {
+	var capturedUser string
+	wb, dir := cortexLaneProposeSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 2 {
+			capturedUser = body.Messages[1]["content"]
+		}
+		proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}})(w, r)
+	})
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`) // no worktree allocation
+	b := cortexFirstBuilderLane(t, task)
+	if b.WorkspacePath != "" {
+		t.Fatal("expected empty workspace_path before allocation")
+	}
+
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var prop CortexLaneProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &prop); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prop.WorkspacePath != dir {
+		t.Errorf("expected fallback to project path %q, got %q", dir, prop.WorkspacePath)
+	}
+	if !strings.Contains(capturedUser, "Warning") {
+		t.Errorf("expected fallback warning in prompt:\n%s", capturedUser)
+	}
+	if !strings.Contains(capturedUser, dir) {
+		t.Errorf("expected project path %q in prompt", dir)
+	}
+}
+
+func TestWorkbenchCortexLaneProposePromptContext(t *testing.T) {
+	var capturedUser, capturedSystem string
+	wb, dir := cortexLaneProposeSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 2 {
+			capturedSystem = body.Messages[0]["content"]
+			capturedUser = body.Messages[1]["content"]
+		}
+		proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}})(w, r)
+	})
+	task := createCortexTask(t, wb, `{"goal":"ship the thing","mode":"multi"}`)
+	registerWorktreeCleanup(t, dir, task.ID)
+	wt := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	var allocated CortexTask
+	if err := json.Unmarshal(wt.Body.Bytes(), &allocated); err != nil {
+		t.Fatalf("decode allocated: %v", err)
+	}
+	b := cortexFirstBuilderLane(t, allocated)
+
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{
+		"ship the thing",
+		"Lane id: " + b.ID,
+		"Lane index: " + strconv.Itoa(b.Index),
+		b.Task,
+		b.WorktreeBranch,
+		b.BaseBranch,
+		`"summary"`,
+	} {
+		if !strings.Contains(capturedUser, want) {
+			t.Errorf("expected prompt to contain %q:\n%s", want, capturedUser)
+		}
+	}
+	if capturedSystem != builderProposalSystemPrompt {
+		t.Errorf("unexpected system prompt: %q", capturedSystem)
+	}
+}
+
+func TestWorkbenchCortexLaneProposeStores(t *testing.T) {
+	files := []BuilderProposedFile{
+		{Path: "main.go", Action: "modify", Content: "package main\n", Rationale: "u"},
+		{Path: "x.go", Action: "create", Content: "package x\n", Rationale: "a"},
+	}
+	wb, _ := cortexLaneProposeSetup(t, proposalResponse("apply changes", files))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var prop CortexLaneProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &prop); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prop.ID == "" || prop.TS.IsZero() {
+		t.Error("expected id and ts to be set")
+	}
+	if prop.TaskID != task.ID {
+		t.Errorf("task_id=%q, want %q", prop.TaskID, task.ID)
+	}
+	if prop.LaneID != b.ID {
+		t.Errorf("lane_id=%q, want %q", prop.LaneID, b.ID)
+	}
+	if prop.LaneIndex != b.Index {
+		t.Errorf("lane_index=%d, want %d", prop.LaneIndex, b.Index)
+	}
+	if prop.Status != "proposed" {
+		t.Errorf("status=%q, want proposed", prop.Status)
+	}
+	if prop.Summary != "apply changes" {
+		t.Errorf("summary=%q", prop.Summary)
+	}
+	if len(prop.Files) != len(files) {
+		t.Fatalf("expected %d files, got %d", len(files), len(prop.Files))
+	}
+	for i := range files {
+		if prop.Files[i] != files[i] {
+			t.Errorf("file[%d]=%+v, want %+v", i, prop.Files[i], files[i])
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposal", nil)
+	rec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET lane/proposal: expected 200, got %d", rec.Code)
+	}
+}
+
+func TestWorkbenchCortexLaneProposeFailed(t *testing.T) {
+	wb, _ := cortexLaneProposeSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream exploded"}`))
+	})
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Proposal CortexLaneProposal `json:"proposal"`
+		Error    string             `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Proposal.Status != "failed" {
+		t.Errorf("status=%q, want failed", result.Proposal.Status)
+	}
+	if result.Proposal.Error == "" {
+		t.Error("expected proposal.error to be set")
+	}
+	if len(result.Proposal.Files) != 0 {
+		t.Errorf("expected empty files on failure, got %d", len(result.Proposal.Files))
+	}
+	if !strings.Contains(result.Error, "upstream exploded") {
+		t.Errorf("expected error to include upstream body, got %q", result.Error)
+	}
+}
+
+func TestWorkbenchCortexLaneProposalGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposal", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexLaneProposalGETCurrent(t *testing.T) {
+	wb, _ := cortexLaneProposeSetup(t, proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}}))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+	created := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("propose: expected 201, got %d: %s", created.Code, created.Body.String())
+	}
+	var createdProp CortexLaneProposal
+	if err := json.Unmarshal(created.Body.Bytes(), &createdProp); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposal", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var prop CortexLaneProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &prop); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if prop.ID != createdProp.ID {
+		t.Errorf("current proposal id=%q, want %q", prop.ID, createdProp.ID)
+	}
+}
+
+func TestWorkbenchCortexLaneProposalsEmpty(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposals", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty proposals, got %q", body)
+	}
+}
+
+func TestWorkbenchCortexLaneProposalsFilterByTask(t *testing.T) {
+	wb, _ := cortexLaneProposeSetup(t, proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}}))
+	task1 := createCortexTask(t, wb, `{"goal":"first","mode":"multi"}`)
+	b1 := cortexFirstBuilderLane(t, task1)
+	postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"task_id":"`+task1.ID+`","lane_id":"`+b1.ID+`"}`)
+	task2 := createCortexTask(t, wb, `{"goal":"second","mode":"multi"}`)
+	b2 := cortexFirstBuilderLane(t, task2)
+	postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"task_id":"`+task2.ID+`","lane_id":"`+b2.ID+`"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposals?task_id="+task1.ID, nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var props []CortexLaneProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &props); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(props) != 1 {
+		t.Fatalf("expected 1 proposal for task1, got %d", len(props))
+	}
+	if props[0].TaskID != task1.ID {
+		t.Errorf("task_id=%q, want %q", props[0].TaskID, task1.ID)
+	}
+
+	reqAll := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposals", nil)
+	wAll := httptest.NewRecorder()
+	wb.mux.ServeHTTP(wAll, reqAll)
+	var all []CortexLaneProposal
+	if err := json.Unmarshal(wAll.Body.Bytes(), &all); err != nil {
+		t.Fatalf("decode all: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("expected 2 total proposals, got %d", len(all))
+	}
+}
+
+func TestWorkbenchCortexLaneProposalsFilterByLane(t *testing.T) {
+	wb, _ := cortexLaneProposeSetup(t, proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}}))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	var builders []CortexLane
+	for _, l := range task.Lanes {
+		if l.Role == "builder" {
+			builders = append(builders, l)
+		}
+	}
+	if len(builders) < 2 {
+		t.Fatalf("expected >=2 builder lanes, got %d", len(builders))
+	}
+	for _, b := range builders {
+		postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	}
+	target := builders[0]
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposals?lane_id="+target.ID, nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var props []CortexLaneProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &props); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(props) != 1 {
+		t.Fatalf("expected 1 proposal for lane %s, got %d", target.ID, len(props))
+	}
+	if props[0].LaneID != target.ID {
+		t.Errorf("lane_id=%q, want %q", props[0].LaneID, target.ID)
+	}
+}
+
+func TestWorkbenchCortexLaneProposeEvents(t *testing.T) {
+	wb, _ := cortexLaneProposeSetup(t, proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}}))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+	if w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`); w.Code != http.StatusCreated {
+		t.Fatalf("created: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb, "cortex.lane.proposal.created"); ev == nil {
+		t.Error("cortex.lane.proposal.created event not appended")
+	} else if ev.Message != "Created Cortex Builder lane proposal" {
+		t.Errorf("created event message: %q", ev.Message)
+	}
+
+	wb2, _ := cortexLaneProposeSetup(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	task2 := createCortexTask(t, wb2, `{"goal":"g","mode":"multi"}`)
+	b2 := cortexFirstBuilderLane(t, task2)
+	if w := postJSON(t, wb2, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b2.ID+`"}`); w.Code != http.StatusBadGateway {
+		t.Fatalf("failed: expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb2, "cortex.lane.proposal.failed"); ev == nil {
+		t.Error("cortex.lane.proposal.failed event not appended")
+	} else if ev.Message != "Failed Cortex Builder lane proposal" {
+		t.Errorf("failed event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchCortexLaneProposeNoAPIKey(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	const secret = "lane-propose-secret"
+	server := startMockProvider(t, proposalResponse("ok", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}}))
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"`+secret+`","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+
+	post := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if post.Code != http.StatusCreated {
+		t.Fatalf("propose: expected 201, got %d: %s", post.Code, post.Body.String())
+	}
+	assertNoSecret(t, "lane propose", secret, post.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/cortex/lane/proposal", "/api/workbench/cortex/lane/proposals"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+func TestWorkbenchCortexLaneProposeDoesNotWriteFiles(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	files := []BuilderProposedFile{
+		{Path: "newfile.go", Action: "create", Content: "package newpkg\n", Rationale: "add"},
+		{Path: ".gitkeep", Action: "modify", Content: "changed\n", Rationale: "edit"},
+	}
+	server := startMockProvider(t, proposalResponse("touch", files))
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task) // empty workspace_path -> falls back to project dir
+
+	before := snapshotDir(t, dir)
+	w := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("propose: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	after := snapshotDir(t, dir)
+
+	if len(before) != len(after) {
+		t.Fatalf("file count changed: %d -> %d", len(before), len(after))
+	}
+	for path, content := range before {
+		if after[path] != content {
+			t.Errorf("file %q content changed", path)
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok {
+			t.Errorf("unexpected new file %q created", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
+		t.Errorf("proposed file newfile.go must not exist on disk (err=%v)", err)
 	}
 }
