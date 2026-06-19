@@ -821,14 +821,40 @@ func TestWorkbenchProviderTestFailure(t *testing.T) {
 	}
 }
 
+// startMockProvider starts an httptest server that stands in for the provider
+// and registers its shutdown with the test. It is used so build/start tests
+// never make a real network call.
+func startMockProvider(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	return server
+}
+
+// planResponse returns a handler that replies with an OpenAI-style envelope
+// whose message content is a JSON plan with the given steps.
+func planResponse(plan []string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		content, _ := json.Marshal(map[string]any{"plan": plan})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "test",
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(content)}},
+			},
+		})
+	}
+}
+
 func openGitProjectForBuilder(t *testing.T, wb *workbench) string {
 	t.Helper()
 	if !gitAvailable(t) {
 		t.Skip("git not available")
 	}
 	dir := initGitRepo(t)
+	server := startMockProvider(t, planResponse([]string{"alpha", "beta", "gamma"}))
 	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
-	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"k","model":"m"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
 	return dir
 }
 
@@ -1194,5 +1220,423 @@ func TestWorkbenchDiffEventAppended(t *testing.T) {
 	}
 	if found.Message != "Requested project diff" {
 		t.Errorf("unexpected message: %q", found.Message)
+	}
+}
+
+// openBuilderProvider opens a fresh git project and configures the provider at
+// the given base URL with the given key and model.
+func openBuilderProvider(t *testing.T, wb *workbench, baseURL, apiKey, model string) string {
+	t.Helper()
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider",
+		`{"base_url":"`+baseURL+`","api_key":"`+apiKey+`","model":"`+model+`"}`)
+	return dir
+}
+
+func TestWorkbenchBuildStartUpstreamRequest(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	var (
+		gotPath   string
+		gotMethod string
+		gotAuth   string
+		gotCT     string
+		gotBody   struct {
+			Model       string              `json:"model"`
+			Messages    []map[string]string `json:"messages"`
+			Temperature float64             `json:"temperature"`
+		}
+	)
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		gotCT = r.Header.Get("Content-Type")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		planResponse([]string{"only step"})(w, r)
+	})
+
+	wb := newWorkbench()
+	dir := openBuilderProvider(t, wb, server.URL, "secret-key", "plan-model")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"add a feature"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if gotPath != "/chat/completions" {
+		t.Errorf("expected path /chat/completions, got %q", gotPath)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %q", gotMethod)
+	}
+	if gotAuth != "Bearer secret-key" {
+		t.Errorf("expected Authorization=Bearer secret-key, got %q", gotAuth)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("expected content-type application/json, got %q", gotCT)
+	}
+	if gotBody.Model != "plan-model" {
+		t.Errorf("expected model plan-model, got %q", gotBody.Model)
+	}
+	if gotBody.Temperature != 0 {
+		t.Errorf("expected temperature 0, got %v", gotBody.Temperature)
+	}
+	if len(gotBody.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(gotBody.Messages), gotBody.Messages)
+	}
+	if gotBody.Messages[0]["role"] != "system" || gotBody.Messages[0]["content"] != builderSystemPrompt {
+		t.Errorf("unexpected system message: %+v", gotBody.Messages[0])
+	}
+	if gotBody.Messages[1]["role"] != "user" {
+		t.Errorf("expected second message role=user, got %q", gotBody.Messages[1]["role"])
+	}
+	userContent := gotBody.Messages[1]["content"]
+	for _, want := range []string{
+		"Goal: add a feature",
+		"Project name: " + filepath.Base(dir),
+		"Project path: " + dir,
+		"Git: true",
+		"Current branch:",
+		`{"plan":["step 1","step 2","step 3"]}`,
+	} {
+		if !strings.Contains(userContent, want) {
+			t.Errorf("expected user prompt to contain %q, got:\n%s", want, userContent)
+		}
+	}
+}
+
+func TestWorkbenchBuildStartUsesProviderPlan(t *testing.T) {
+	server := startMockProvider(t, planResponse([]string{"first step", "second step"}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var session BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if session.Status != "planned" {
+		t.Errorf("expected status planned, got %q", session.Status)
+	}
+	want := []string{"first step", "second step"}
+	if len(session.Plan) != len(want) {
+		t.Fatalf("expected %d plan items, got %d (%v)", len(want), len(session.Plan), session.Plan)
+	}
+	for i := range want {
+		if session.Plan[i] != want[i] {
+			t.Errorf("plan[%d]=%q, want %q", i, session.Plan[i], want[i])
+		}
+	}
+}
+
+func TestWorkbenchBuildStartFallsBackOnInvalidContent(t *testing.T) {
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": "here is some prose, not JSON"}},
+			},
+		})
+	})
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var session BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if session.Status != "planned" {
+		t.Errorf("expected status planned, got %q", session.Status)
+	}
+	want := fallbackPlan()
+	if len(session.Plan) != len(want) {
+		t.Fatalf("expected fallback plan length %d, got %d (%v)", len(want), len(session.Plan), session.Plan)
+	}
+	for i := range want {
+		if session.Plan[i] != want[i] {
+			t.Errorf("plan[%d]=%q, want fallback %q", i, session.Plan[i], want[i])
+		}
+	}
+}
+
+func TestWorkbenchBuildStartUpstream500(t *testing.T) {
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream exploded"}`))
+	})
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"do it"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Session BuilderSession `json:"session"`
+		Error   string         `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Session.Status != "failed" {
+		t.Errorf("expected status failed, got %q", result.Session.Status)
+	}
+	if result.Session.ID == "" {
+		t.Error("expected failed session to be assigned an id")
+	}
+	if result.Error == "" {
+		t.Error("expected error message to be populated")
+	}
+	if !strings.Contains(result.Error, "upstream exploded") {
+		t.Errorf("expected error to include upstream body, got %q", result.Error)
+	}
+	want := fallbackPlan()
+	if len(result.Session.Plan) != len(want) {
+		t.Errorf("expected fallback plan length %d, got %d", len(want), len(result.Session.Plan))
+	}
+	if result.Session.PromptPreview == nil {
+		t.Error("expected prompt_preview on failed session")
+	}
+
+	events := wb.store.List()
+	var found bool
+	for _, e := range events {
+		if e.Type == "builder.plan.failed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected builder.plan.failed event")
+	}
+}
+
+func TestWorkbenchBuildStartNetworkError(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	// Start a server then immediately close it so the address refuses
+	// connections, producing a transport-layer error.
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, deadURL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"do it"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Session BuilderSession `json:"session"`
+		Error   string         `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Session.Status != "failed" {
+		t.Errorf("expected status failed, got %q", result.Session.Status)
+	}
+	if result.Error == "" {
+		t.Error("expected error message for network failure")
+	}
+	if result.Session.PromptPreview == nil {
+		t.Error("expected prompt_preview on failed session")
+	}
+}
+
+func TestWorkbenchBuildStartIncludesPromptPreview(t *testing.T) {
+	server := startMockProvider(t, planResponse([]string{"a step"}))
+	wb := newWorkbench()
+	dir := openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship the thing"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var session BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if session.PromptPreview == nil {
+		t.Fatal("expected prompt_preview to be set")
+	}
+	if session.PromptPreview.SystemPrompt != builderSystemPrompt {
+		t.Errorf("expected system prompt %q, got %q", builderSystemPrompt, session.PromptPreview.SystemPrompt)
+	}
+	for _, want := range []string{"ship the thing", filepath.Base(dir), dir, "Git: true"} {
+		if !strings.Contains(session.PromptPreview.UserPrompt, want) {
+			t.Errorf("expected user prompt to contain %q, got:\n%s", want, session.PromptPreview.UserPrompt)
+		}
+	}
+}
+
+func TestWorkbenchBuildPrompt404BeforeSession(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/prompt", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildPromptAfterSession(t *testing.T) {
+	wb := newWorkbench()
+	openGitProjectForBuilder(t, wb)
+	if w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`); w.Code != http.StatusCreated {
+		t.Fatalf("build/start: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/prompt", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected application/json content type, got %q", got)
+	}
+	var preview PromptPreview
+	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if preview.SystemPrompt != builderSystemPrompt {
+		t.Errorf("expected system prompt %q, got %q", builderSystemPrompt, preview.SystemPrompt)
+	}
+	if !strings.Contains(preview.UserPrompt, "ship it") {
+		t.Errorf("expected user prompt to include goal, got %q", preview.UserPrompt)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, has := raw["api_key"]; has {
+		t.Error("prompt response must not contain api_key field")
+	}
+}
+
+func TestWorkbenchBuilderPromptEventNoAPIKey(t *testing.T) {
+	server := startMockProvider(t, planResponse([]string{"a step"}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "super-secret-key", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "builder.prompt.created" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("builder.prompt.created event not found")
+	}
+	if found.Message != "Created Builder prompt" {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+	if strings.Contains(string(found.Data), "super-secret-key") {
+		t.Error("builder.prompt.created data must not contain the raw api key")
+	}
+
+	var data map[string]any
+	if err := json.Unmarshal(found.Data, &data); err != nil {
+		t.Fatalf("decode data: %v", err)
+	}
+	if _, has := data["api_key"]; has {
+		t.Error("builder.prompt.created data must not contain api_key field")
+	}
+	// The event must carry the sanitized BuilderPrompt fields.
+	for _, k := range []string{"goal", "project", "provider_model", "system_prompt", "user_prompt"} {
+		if _, ok := data[k]; !ok {
+			t.Errorf("expected builder.prompt.created data to contain %q", k)
+		}
+	}
+}
+
+func TestWorkbenchBuildStartResponseNoAPIKey(t *testing.T) {
+	// Success path.
+	okServer := startMockProvider(t, planResponse([]string{"a step"}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, okServer.URL, "top-secret", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "top-secret") {
+		t.Error("success response leaked api key")
+	}
+	var rawOK map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &rawOK); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, has := rawOK["api_key"]; has {
+		t.Error("success response must not contain api_key field")
+	}
+
+	// Failure path.
+	badServer := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	wb2 := newWorkbench()
+	openBuilderProvider(t, wb2, badServer.URL, "top-secret", "m")
+
+	w2 := postJSON(t, wb2, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w2.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if strings.Contains(w2.Body.String(), "top-secret") {
+		t.Error("failure response leaked api key")
+	}
+	var rawFail map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &rawFail); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, has := rawFail["api_key"]; has {
+		t.Error("failure response must not contain api_key field")
+	}
+}
+
+func TestFallbackPlanDeterministic(t *testing.T) {
+	want := []string{"Inspect project context", "Prepare Builder prompt", builderPlanPlaceholder}
+
+	a := fallbackPlan()
+	b := fallbackPlan()
+	if len(a) != len(want) {
+		t.Fatalf("expected %d items, got %d", len(want), len(a))
+	}
+	for i := range want {
+		if a[i] != want[i] || b[i] != want[i] {
+			t.Errorf("item %d: a=%q b=%q want=%q", i, a[i], b[i], want[i])
+		}
+	}
+
+	// Each call must return an independent slice.
+	a[0] = "mutated"
+	c := fallbackPlan()
+	if c[0] != want[0] {
+		t.Errorf("fallback plan not independent across calls, got %q", c[0])
 	}
 }
