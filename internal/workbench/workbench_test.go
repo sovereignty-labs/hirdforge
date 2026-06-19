@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore(), cortexApplies: newCortexApplyStore(), cortexApplyPreviews: newCortexApplyPreviewStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore(), cortexApplies: newCortexApplyStore(), cortexApplyPreviews: newCortexApplyPreviewStore(), cortexValidations: newCortexValidationStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -6056,6 +6056,347 @@ func TestWorkbenchCortexApplyPreviewNoAPIKey(t *testing.T) {
 	}
 	for _, e := range wb.store.List() {
 		if strings.HasPrefix(e.Type, "cortex.apply.preview") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+// cortexValidationSetup builds a workbench with a project open and one applied
+// apply result current, ready for a validation run.
+func cortexValidationSetup(t *testing.T) (*Server, string, CortexApplyResult) {
+	t.Helper()
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	applyResult := wb.cortexApplies.Append(CortexApplyResult{AggregateID: "agg-1", Status: "applied", Files: []CortexAppliedFile{}})
+	return wb, dir, applyResult
+}
+
+// buildValidatorBinary compiles a tiny program that writes the given stdout and
+// stderr and exits with exitCode, returning the executable path. It is run as a
+// validation command (single token, no shell needed).
+func buildValidatorBinary(t *testing.T, stdoutMsg, stderrMsg string, exitCode int) string {
+	t.Helper()
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go toolchain not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module validatorbin\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := fmt.Sprintf(`package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	if s := %q; s != "" {
+		fmt.Fprint(os.Stdout, s)
+	}
+	if s := %q; s != "" {
+		fmt.Fprint(os.Stderr, s)
+	}
+	os.Exit(%d)
+}
+`, stdoutMsg, stderrMsg, exitCode)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "vbin")
+	cmd := exec.Command("go", "build", "-o", exe, ".")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build validator: %v\n%s", err, out)
+	}
+	return exe
+}
+
+func postValidateCommand(t *testing.T, wb *Server, command string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"command": command})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return postJSON(t, wb, "/api/workbench/cortex/apply/validate", string(body))
+}
+
+func TestWorkbenchCortexApplyValidate404NoApply(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/validate", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyValidateRejectsFailedApply(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	wb.cortexApplies.Append(CortexApplyResult{Status: "failed", Files: []CortexAppliedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/validate", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyValidateRejectsWithoutProject(t *testing.T) {
+	wb := New()
+	wb.cortexApplies.Append(CortexApplyResult{Status: "applied", Files: []CortexAppliedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/validate", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyValidateRejectsNoCommandNoHints(t *testing.T) {
+	wb, _, _ := cortexValidationSetup(t)
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/validate", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyValidateExplicitCommand(t *testing.T) {
+	exe := buildValidatorBinary(t, "ok", "", 0)
+	wb, _, apply := cortexValidationSetup(t)
+	w := postValidateCommand(t, wb, exe)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v.Status != "passed" {
+		t.Errorf("status=%q, want passed", v.Status)
+	}
+	if v.Command != exe {
+		t.Errorf("command=%q, want %q", v.Command, exe)
+	}
+	if v.ApplyID != apply.ID {
+		t.Errorf("apply_id=%q, want %q", v.ApplyID, apply.ID)
+	}
+	if v.AggregateID != apply.AggregateID {
+		t.Errorf("aggregate_id=%q, want %q", v.AggregateID, apply.AggregateID)
+	}
+}
+
+func TestWorkbenchCortexApplyValidateUsesTestHint(t *testing.T) {
+	exe := buildValidatorBinary(t, "", "", 0)
+	wb, dir, _ := cortexValidationSetup(t)
+	wb.inspection.Set(ProjectInspection{Project: ProjectState{Path: dir}, TestHints: []string{exe}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/validate", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if v.Command != exe {
+		t.Errorf("command=%q, want first test hint %q", v.Command, exe)
+	}
+	if v.Status != "passed" {
+		t.Errorf("status=%q, want passed", v.Status)
+	}
+}
+
+func TestWorkbenchCortexApplyValidatePassed(t *testing.T) {
+	exe := buildValidatorBinary(t, "", "", 0)
+	wb, _, _ := cortexValidationSetup(t)
+	w := postValidateCommand(t, wb, exe)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if v.Status != "passed" || v.ExitCode != 0 {
+		t.Errorf("status=%q exit=%d, want passed/0", v.Status, v.ExitCode)
+	}
+}
+
+func TestWorkbenchCortexApplyValidateFailed(t *testing.T) {
+	exe := buildValidatorBinary(t, "", "boom", 3)
+	wb, _, _ := cortexValidationSetup(t)
+	w := postValidateCommand(t, wb, exe)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if v.Status != "failed" {
+		t.Errorf("status=%q, want failed", v.Status)
+	}
+	if v.ExitCode != 3 {
+		t.Errorf("exit_code=%d, want 3", v.ExitCode)
+	}
+}
+
+func TestWorkbenchCortexApplyValidateErrorMissingExecutable(t *testing.T) {
+	wb, _, _ := cortexValidationSetup(t)
+	w := postValidateCommand(t, wb, "hirdforge-no-such-validator-binary-xyz")
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if v.Status != "error" {
+		t.Errorf("status=%q, want error", v.Status)
+	}
+	if v.Error == "" {
+		t.Error("expected error to be populated")
+	}
+}
+
+func TestWorkbenchCortexApplyValidateCapturesOutput(t *testing.T) {
+	exe := buildValidatorBinary(t, "STDOUT-MARK", "STDERR-MARK", 0)
+	wb, _, _ := cortexValidationSetup(t)
+	w := postValidateCommand(t, wb, exe)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if !strings.Contains(v.Stdout, "STDOUT-MARK") {
+		t.Errorf("stdout=%q, want STDOUT-MARK", v.Stdout)
+	}
+	if !strings.Contains(v.Stderr, "STDERR-MARK") {
+		t.Errorf("stderr=%q, want STDERR-MARK", v.Stderr)
+	}
+}
+
+func TestWorkbenchCortexApplyValidateCapsOutput(t *testing.T) {
+	big := strings.Repeat("x", cortexValidationOutputCap+1000)
+	exe := buildValidatorBinary(t, big, "", 0)
+	wb, _, _ := cortexValidationSetup(t)
+	w := postValidateCommand(t, wb, exe)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if len(v.Stdout) != cortexValidationOutputCap {
+		t.Errorf("stdout len=%d, want capped to %d", len(v.Stdout), cortexValidationOutputCap)
+	}
+}
+
+func TestWorkbenchCortexApplyValidationCompletedEvent(t *testing.T) {
+	exe := buildValidatorBinary(t, "", "", 0)
+	wb, _, _ := cortexValidationSetup(t)
+	if w := postValidateCommand(t, wb, exe); w.Code != http.StatusOK {
+		t.Fatalf("validate: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb, "cortex.apply.validation.completed"); ev == nil {
+		t.Error("cortex.apply.validation.completed event not appended")
+	} else if ev.Message != "Completed Cortex apply validation" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchCortexApplyValidationGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/validation", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyValidationGETCurrent(t *testing.T) {
+	exe := buildValidatorBinary(t, "", "", 0)
+	wb, _, _ := cortexValidationSetup(t)
+	created := postValidateCommand(t, wb, exe)
+	var createdV CortexApplyValidation
+	json.Unmarshal(created.Body.Bytes(), &createdV)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/validation", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var v CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if v.ID != createdV.ID {
+		t.Errorf("current validation id=%q, want %q", v.ID, createdV.ID)
+	}
+}
+
+func TestWorkbenchCortexApplyValidationsEmpty(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/validations", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty validations, got %q", body)
+	}
+}
+
+func TestWorkbenchCortexApplyValidationsFilterByApply(t *testing.T) {
+	wb := New()
+	wb.cortexValidations.Append(CortexApplyValidation{ApplyID: "ap-1", AggregateID: "agg-1", Status: "passed"})
+	wb.cortexValidations.Append(CortexApplyValidation{ApplyID: "ap-2", AggregateID: "agg-2", Status: "passed"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/validations?apply_id=ap-1", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	var filtered []CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &filtered)
+	if len(filtered) != 1 || filtered[0].ApplyID != "ap-1" {
+		t.Fatalf("expected 1 validation for ap-1, got %v", filtered)
+	}
+
+	reqAll := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/validations", nil)
+	wAll := httptest.NewRecorder()
+	wb.mux.ServeHTTP(wAll, reqAll)
+	var all []CortexApplyValidation
+	json.Unmarshal(wAll.Body.Bytes(), &all)
+	if len(all) != 2 {
+		t.Errorf("expected 2 total validations, got %d", len(all))
+	}
+}
+
+func TestWorkbenchCortexApplyValidationsFilterByAggregate(t *testing.T) {
+	wb := New()
+	wb.cortexValidations.Append(CortexApplyValidation{ApplyID: "ap-1", AggregateID: "agg-1", Status: "passed"})
+	wb.cortexValidations.Append(CortexApplyValidation{ApplyID: "ap-2", AggregateID: "agg-2", Status: "passed"})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/validations?aggregate_id=agg-2", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	var filtered []CortexApplyValidation
+	json.Unmarshal(w.Body.Bytes(), &filtered)
+	if len(filtered) != 1 || filtered[0].AggregateID != "agg-2" {
+		t.Fatalf("expected 1 validation for agg-2, got %v", filtered)
+	}
+}
+
+func TestWorkbenchCortexApplyValidateNoAPIKey(t *testing.T) {
+	const secret = "validation-secret"
+	exe := buildValidatorBinary(t, "out", "err", 0)
+	wb, _, _ := cortexValidationSetup(t)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"`+secret+`","model":"m"}`)
+
+	post := postValidateCommand(t, wb, exe)
+	if post.Code != http.StatusOK {
+		t.Fatalf("validate: expected 200, got %d: %s", post.Code, post.Body.String())
+	}
+	assertNoSecret(t, "validate", secret, post.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/cortex/apply/validation", "/api/workbench/cortex/apply/validations"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.apply.validation") {
 			assertNoSecret(t, "event "+e.Type, secret, e.Data)
 		}
 	}

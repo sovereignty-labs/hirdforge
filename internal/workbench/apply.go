@@ -1,12 +1,14 @@
 package workbench
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -721,6 +723,270 @@ func (wb *Server) handleCortexApplyPreviews(w http.ResponseWriter, r *http.Reque
 		out = wb.cortexApplyPreviews.ListByAggregate(aggregateID)
 	} else {
 		out = wb.cortexApplyPreviews.List()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// CortexApplyValidation records a bounded local validation command run against
+// an applied Cortex aggregate. It never calls the provider, never carries the
+// provider API key, and does not roll back.
+type CortexApplyValidation struct {
+	ID          string    `json:"id"`
+	TS          time.Time `json:"ts"`
+	ApplyID     string    `json:"apply_id"`
+	AggregateID string    `json:"aggregate_id"`
+	Status      string    `json:"status"`
+	Command     string    `json:"command"`
+	ExitCode    int       `json:"exit_code"`
+	Stdout      string    `json:"stdout"`
+	Stderr      string    `json:"stderr"`
+	Error       string    `json:"error"`
+}
+
+const (
+	cortexValidationStatusPassed = "passed"
+	cortexValidationStatusFailed = "failed"
+	cortexValidationStatusError  = "error"
+
+	// cortexValidationTimeout bounds a single validation command.
+	cortexValidationTimeout = 60 * time.Second
+	// cortexValidationOutputCap caps captured stdout/stderr.
+	cortexValidationOutputCap = 8192
+)
+
+// cortexValidationStore is the in-memory record of Cortex apply validations.
+// CortexApplyValidation has no reference fields, so a struct copy is a full
+// copy; every accessor returns one rather than a pointer into the slice.
+type cortexValidationStore struct {
+	mu          sync.Mutex
+	nextID      int64
+	validations []CortexApplyValidation
+}
+
+func newCortexValidationStore() *cortexValidationStore {
+	return &cortexValidationStore{}
+}
+
+// Append assigns an id and timestamp to in, stores it, and returns a copy.
+func (s *cortexValidationStore) Append(in CortexApplyValidation) CortexApplyValidation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	in.ID = strconv.FormatInt(s.nextID, 10)
+	in.TS = time.Now().UTC()
+	s.validations = append(s.validations, in)
+	return in
+}
+
+// Current returns a copy of the most recent validation, or nil if none.
+func (s *cortexValidationStore) Current() *CortexApplyValidation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.validations) == 0 {
+		return nil
+	}
+	c := s.validations[len(s.validations)-1]
+	return &c
+}
+
+// Find returns a copy of the validation with the given id, or nil.
+func (s *cortexValidationStore) Find(id string) *CortexApplyValidation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.validations {
+		if s.validations[i].ID == id {
+			c := s.validations[i]
+			return &c
+		}
+	}
+	return nil
+}
+
+// List returns copies of all validations in insertion order.
+func (s *cortexValidationStore) List() []CortexApplyValidation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]CortexApplyValidation, len(s.validations))
+	copy(out, s.validations)
+	return out
+}
+
+// ListByApply returns copies of validations for the given apply id.
+func (s *cortexValidationStore) ListByApply(applyID string) []CortexApplyValidation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexApplyValidation{}
+	for i := range s.validations {
+		if s.validations[i].ApplyID == applyID {
+			out = append(out, s.validations[i])
+		}
+	}
+	return out
+}
+
+// ListByAggregate returns copies of validations for the given aggregate id.
+func (s *cortexValidationStore) ListByAggregate(aggregateID string) []CortexApplyValidation {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexApplyValidation{}
+	for i := range s.validations {
+		if s.validations[i].AggregateID == aggregateID {
+			out = append(out, s.validations[i])
+		}
+	}
+	return out
+}
+
+// runCortexValidation runs a bounded validation command in projectPath, capturing
+// (and capping) stdout/stderr separately. It returns the exit code on a clean
+// run, or a non-nil error for a start failure or timeout. It does not use a
+// shell: the command is split on whitespace into executable + args. It never
+// streams and never writes files itself.
+func runCortexValidation(projectPath, command string) (int, string, string, error) {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return -1, "", "", errors.New("command is empty")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cortexValidationTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, fields[0], fields[1:]...)
+	cmd.Dir = projectPath
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+
+	outStr := truncateString(stdout.String(), cortexValidationOutputCap)
+	errStr := truncateString(stderr.String(), cortexValidationOutputCap)
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return -1, outStr, errStr, fmt.Errorf("command timed out after %s", cortexValidationTimeout)
+	}
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			// The command ran and exited non-zero: not an internal error.
+			return exitErr.ExitCode(), outStr, errStr, nil
+		}
+		// Start failure (e.g. executable not found).
+		return -1, outStr, errStr, runErr
+	}
+	return 0, outStr, errStr, nil
+}
+
+// handleCortexApplyValidate runs a bounded local validation command against an
+// applied aggregate. It never calls the provider.
+func (wb *Server) handleCortexApplyValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var in struct {
+		ApplyID string `json:"apply_id"`
+		Command string `json:"command"`
+	}
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &in); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+
+	var applyResult *CortexApplyResult
+	if in.ApplyID == "" {
+		applyResult = wb.cortexApplies.Current()
+	} else {
+		applyResult = wb.cortexApplies.Find(in.ApplyID)
+	}
+	if applyResult == nil {
+		http.Error(w, "cortex apply result not found", http.StatusNotFound)
+		return
+	}
+	if applyResult.Status != cortexApplyStatusApplied {
+		http.Error(w, "apply result is not in applied status", http.StatusConflict)
+		return
+	}
+
+	project := wb.project.Get()
+	if project == nil {
+		http.Error(w, "project must be open", http.StatusConflict)
+		return
+	}
+
+	command := in.Command
+	if command == "" {
+		insp := wb.inspection.Get()
+		if insp == nil || len(insp.TestHints) == 0 {
+			http.Error(w, "no command provided and no project inspection test hints available; run project inspection or pass a command", http.StatusConflict)
+			return
+		}
+		command = insp.TestHints[0]
+	}
+
+	exitCode, stdout, stderr, runErr := runCortexValidation(project.Path, command)
+	validation := CortexApplyValidation{
+		ApplyID:     applyResult.ID,
+		AggregateID: applyResult.AggregateID,
+		Command:     command,
+		ExitCode:    exitCode,
+		Stdout:      stdout,
+		Stderr:      stderr,
+	}
+	httpStatus := http.StatusOK
+	switch {
+	case runErr != nil:
+		validation.Status = cortexValidationStatusError
+		validation.Error = truncateString(runErr.Error(), 1000)
+		httpStatus = http.StatusBadGateway
+	case exitCode == 0:
+		validation.Status = cortexValidationStatusPassed
+		httpStatus = http.StatusOK
+	default:
+		validation.Status = cortexValidationStatusFailed
+		httpStatus = http.StatusBadGateway
+	}
+
+	stored := wb.cortexValidations.Append(validation)
+	wb.appendCortexEvent("cortex.apply.validation.completed", "Completed Cortex apply validation", stored)
+	writeJSON(w, httpStatus, stored)
+}
+
+func (wb *Server) handleCortexApplyValidation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	validation := wb.cortexValidations.Current()
+	if validation == nil {
+		http.Error(w, "no cortex apply validation", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, *validation)
+}
+
+func (wb *Server) handleCortexApplyValidations(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	applyID := r.URL.Query().Get("apply_id")
+	aggregateID := r.URL.Query().Get("aggregate_id")
+
+	var out []CortexApplyValidation
+	switch {
+	case applyID != "":
+		out = wb.cortexValidations.ListByApply(applyID)
+	case aggregateID != "":
+		out = wb.cortexValidations.ListByAggregate(aggregateID)
+	default:
+		out = wb.cortexValidations.List()
 	}
 	writeJSON(w, http.StatusOK, out)
 }
