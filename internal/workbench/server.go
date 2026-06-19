@@ -45,6 +45,7 @@ const indexHTML = `<!doctype html>
     <li><code>GET /api/workbench/cortex/task</code></li>
     <li><code>GET /api/workbench/cortex/tasks</code></li>
     <li><code>GET /api/workbench/cortex/lanes</code></li>
+    <li><code>GET /api/workbench/cortex/worktrees</code></li>
     <li><code>GET /api/workbench/validation</code></li>
     <li><code>GET /api/workbench/diff</code></li>
   </ul>
@@ -132,6 +133,7 @@ func (wb *Server) registerRoutes() *http.ServeMux {
 	mux.HandleFunc("/api/workbench/cortex/tasks", wb.handleCortexTasks)
 	mux.HandleFunc("/api/workbench/cortex/lanes", wb.handleCortexLanes)
 	mux.HandleFunc("/api/workbench/cortex/run", wb.handleCortexRun)
+	mux.HandleFunc("/api/workbench/cortex/worktrees", wb.handleCortexWorktrees)
 
 	mux.HandleFunc("/api/workbench/validation", wb.handleValidation)
 	mux.HandleFunc("/api/workbench/diff", wb.handleDiff)

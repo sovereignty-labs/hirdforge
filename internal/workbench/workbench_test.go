@@ -3483,3 +3483,257 @@ func TestWorkbenchCortexNoAPIKey(t *testing.T) {
 		}
 	}
 }
+
+// registerWorktreeCleanup removes the worktree root that worktree allocation
+// creates outside the project for the given task. The whole temp tree is also
+// auto-removed by t.TempDir, so this is belt-and-suspenders.
+func registerWorktreeCleanup(t *testing.T, projectDir, taskID string) {
+	t.Helper()
+	root := filepath.Join(filepath.Dir(projectDir), ".hirdforge-worktrees", filepath.Base(projectDir), "task-"+taskID)
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+}
+
+func TestWorkbenchCortexWorktrees404NoTask(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexWorktrees409NoProject(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexWorktrees409NonGit(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexWorktreesAllocates(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`) // builder x2
+	registerWorktreeCleanup(t, dir, task.ID)
+
+	w := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated CortexTask
+	if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	root := filepath.Join(filepath.Dir(dir), ".hirdforge-worktrees", filepath.Base(dir), "task-"+task.ID)
+	builders := 0
+	for _, l := range updated.Lanes {
+		if l.Role != "builder" {
+			continue
+		}
+		builders++
+		if l.WorkspacePath == "" || l.BaseBranch == "" || l.WorktreeBranch == "" {
+			t.Errorf("builder lane %s has empty worktree fields: %q / %q / %q", l.ID, l.WorkspacePath, l.BaseBranch, l.WorktreeBranch)
+			continue
+		}
+		wantPath := filepath.Join(root, "builder-"+strconv.Itoa(l.Index))
+		if l.WorkspacePath != wantPath {
+			t.Errorf("lane %s workspace_path=%q, want %q", l.ID, l.WorkspacePath, wantPath)
+		}
+		wantBranch := "hirdforge/task-" + task.ID + "/builder-" + strconv.Itoa(l.Index)
+		if l.WorktreeBranch != wantBranch {
+			t.Errorf("lane %s worktree_branch=%q, want %q", l.ID, l.WorktreeBranch, wantBranch)
+		}
+		if info, err := os.Stat(l.WorkspacePath); err != nil || !info.IsDir() {
+			t.Errorf("lane %s worktree dir not created at %q (err=%v)", l.ID, l.WorkspacePath, err)
+		}
+	}
+	if builders != 2 {
+		t.Errorf("expected 2 builder lanes, saw %d", builders)
+	}
+}
+
+func TestWorkbenchCortexWorktreesLeavesOtherRoles(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	registerWorktreeCleanup(t, dir, task.ID)
+
+	w := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var updated CortexTask
+	if err := json.Unmarshal(w.Body.Bytes(), &updated); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, l := range updated.Lanes {
+		if l.Role == "builder" {
+			continue
+		}
+		if l.WorkspacePath != "" || l.BaseBranch != "" || l.WorktreeBranch != "" {
+			t.Errorf("non-builder lane %s (%s) should be unchanged, got %q / %q / %q",
+				l.ID, l.Role, l.WorkspacePath, l.BaseBranch, l.WorktreeBranch)
+		}
+	}
+}
+
+func TestWorkbenchCortexWorktreesIdempotent(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	registerWorktreeCleanup(t, dir, task.ID)
+
+	first := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first: expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+	var firstTask CortexTask
+	if err := json.Unmarshal(first.Body.Bytes(), &firstTask); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+
+	// Re-allocating must not re-run git worktree add for allocated lanes.
+	second := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second: expected 200 (idempotent), got %d: %s", second.Code, second.Body.String())
+	}
+	var secondTask CortexTask
+	if err := json.Unmarshal(second.Body.Bytes(), &secondTask); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	if len(firstTask.Lanes) != len(secondTask.Lanes) {
+		t.Fatalf("lane count changed: %d vs %d", len(firstTask.Lanes), len(secondTask.Lanes))
+	}
+	for i := range firstTask.Lanes {
+		f, s := firstTask.Lanes[i], secondTask.Lanes[i]
+		if f.WorkspacePath != s.WorkspacePath || f.BaseBranch != s.BaseBranch || f.WorktreeBranch != s.WorktreeBranch {
+			t.Errorf("lane %s changed on re-allocation: %q/%q/%q -> %q/%q/%q",
+				f.ID, f.WorkspacePath, f.BaseBranch, f.WorktreeBranch, s.WorkspacePath, s.BaseBranch, s.WorktreeBranch)
+		}
+	}
+}
+
+func TestWorkbenchCortexWorktreesGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/worktrees", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexWorktreesGETBuilderOnly(t *testing.T) {
+	wb := New()
+	createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`) // architect1, builder2, reviewer1, validator1
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/worktrees", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var lanes []CortexLane
+	if err := json.Unmarshal(w.Body.Bytes(), &lanes); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(lanes) != 2 {
+		t.Fatalf("expected 2 builder lanes, got %d", len(lanes))
+	}
+	for _, l := range lanes {
+		if l.Role != "builder" {
+			t.Errorf("expected only builder lanes, got role %q", l.Role)
+		}
+	}
+}
+
+func TestWorkbenchCortexWorktreesEvent(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	registerWorktreeCleanup(t, dir, task.ID)
+
+	w := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var found *WorkbenchEvent
+	events := wb.store.List()
+	for i := range events {
+		if events[i].Type == "cortex.worktrees.allocated" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("cortex.worktrees.allocated event not found")
+	}
+	if found.Message != "Allocated Cortex Builder worktrees" {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+	if len(found.Data) == 0 {
+		t.Error("expected event to carry task data")
+	}
+}
+
+func TestWorkbenchCortexWorktreesNoAPIKey(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	const secret = "worktree-top-secret"
+	wb := New()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"`+secret+`","model":"m"}`)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	registerWorktreeCleanup(t, dir, task.ID)
+
+	post := postJSON(t, wb, "/api/workbench/cortex/worktrees", `{}`)
+	if post.Code != http.StatusOK {
+		t.Fatalf("post: expected 200, got %d: %s", post.Code, post.Body.String())
+	}
+	assertNoSecret(t, "worktrees post", secret, post.Body.Bytes())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/worktrees", nil)
+	rec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(rec, req)
+	assertNoSecret(t, "worktrees get", secret, rec.Body.Bytes())
+
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}

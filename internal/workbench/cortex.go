@@ -1,11 +1,16 @@
 package workbench
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -171,6 +176,28 @@ func (s *cortexStore) UpdateLane(taskID, laneID, status, result, errMsg string) 
 				s.tasks[i].Lanes[j].Status = status
 				s.tasks[i].Lanes[j].Result = result
 				s.tasks[i].Lanes[j].Error = errMsg
+				c := cloneCortexTask(s.tasks[i])
+				return &c
+			}
+		}
+	}
+	return nil
+}
+
+// SetLaneWorktree fills the workspace/branch fields of a lane within a task and
+// returns a deep copy of the task, or nil if the task or lane is not found.
+func (s *cortexStore) SetLaneWorktree(taskID, laneID, workspacePath, baseBranch, worktreeBranch string) *CortexTask {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.tasks {
+		if s.tasks[i].ID != taskID {
+			continue
+		}
+		for j := range s.tasks[i].Lanes {
+			if s.tasks[i].Lanes[j].ID == laneID {
+				s.tasks[i].Lanes[j].WorkspacePath = workspacePath
+				s.tasks[i].Lanes[j].BaseBranch = baseBranch
+				s.tasks[i].Lanes[j].WorktreeBranch = worktreeBranch
 				c := cloneCortexTask(s.tasks[i])
 				return &c
 			}
@@ -419,4 +446,137 @@ func (wb *Server) handleCortexRun(w http.ResponseWriter, r *http.Request) {
 	wb.appendCortexEvent("cortex.task.completed", "Completed Cortex task", completed)
 
 	writeJSON(w, http.StatusOK, *completed)
+}
+
+// cortexWorktreeTimeout bounds each "git worktree add" invocation.
+const cortexWorktreeTimeout = 30 * time.Second
+
+// cortexBuilderLanes returns the task's Builder lanes (a non-nil slice).
+func cortexBuilderLanes(task *CortexTask) []CortexLane {
+	out := []CortexLane{}
+	if task != nil {
+		for _, l := range task.Lanes {
+			if l.Role == cortexRoleBuilder {
+				out = append(out, l)
+			}
+		}
+	}
+	return out
+}
+
+// gitWorktreeAdd runs a bounded "git -C <repo> worktree add -B <branch> <path>
+// <base>" and returns its combined output (capped) and any error.
+func gitWorktreeAdd(repoPath, branch, worktreePath, baseBranch string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), cortexWorktreeTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "add", "-B", branch, worktreePath, baseBranch)
+	out, err := cmd.CombinedOutput()
+	return truncateString(strings.TrimSpace(string(out)), 1000), err
+}
+
+// handleCortexWorktrees serves GET (Builder lanes with their worktree fields)
+// and POST (allocate git worktrees for the task's Builder lanes only). It never
+// writes project files or runs provider/lane execution.
+func (wb *Server) handleCortexWorktrees(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		task := wb.cortex.Current()
+		if task == nil {
+			http.Error(w, "no cortex task", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, cortexBuilderLanes(task))
+	case http.MethodPost:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var in struct {
+			ID string `json:"id"`
+		}
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &in); err != nil {
+				http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
+		var task *CortexTask
+		if in.ID == "" {
+			task = wb.cortex.Current()
+		} else {
+			task = wb.cortex.Find(in.ID)
+		}
+		if task == nil {
+			http.Error(w, "cortex task not found", http.StatusNotFound)
+			return
+		}
+		taskID := task.ID
+
+		project := wb.project.Get()
+		if project == nil {
+			http.Error(w, "project must be open", http.StatusConflict)
+			return
+		}
+		if !project.Git {
+			http.Error(w, "project is not a git repo", http.StatusConflict)
+			return
+		}
+
+		baseBranch := project.CurrentBranch
+		if baseBranch == "" {
+			detected, derr := detectBranch(project.Path)
+			if derr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"error": truncateString("detect base branch failed: "+derr.Error(), 1000),
+				})
+				return
+			}
+			baseBranch = detected
+		}
+
+		// Worktree root lives outside the project, alongside it.
+		root := filepath.Join(filepath.Dir(project.Path), ".hirdforge-worktrees", filepath.Base(project.Path), "task-"+taskID)
+
+		for _, lane := range task.Lanes {
+			if lane.Role != cortexRoleBuilder {
+				continue // only Builder lanes receive worktrees
+			}
+			if lane.WorkspacePath != "" || lane.WorktreeBranch != "" {
+				continue // idempotent: already allocated
+			}
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"lane":  lane.ID,
+					"error": truncateString("create worktree root failed: "+err.Error(), 1000),
+				})
+				return
+			}
+			worktreePath := filepath.Join(root, "builder-"+strconv.Itoa(lane.Index))
+			branch := "hirdforge/task-" + taskID + "/builder-" + strconv.Itoa(lane.Index)
+			if out, gerr := gitWorktreeAdd(project.Path, branch, worktreePath, baseBranch); gerr != nil {
+				msg := gerr.Error()
+				if out != "" {
+					msg += ": " + out
+				}
+				writeJSON(w, http.StatusBadGateway, map[string]any{
+					"lane":  lane.ID,
+					"error": truncateString("git worktree add failed: "+msg, 1000),
+				})
+				return
+			}
+			wb.cortex.SetLaneWorktree(taskID, lane.ID, worktreePath, baseBranch, branch)
+		}
+
+		updated := wb.cortex.Find(taskID)
+		if updated == nil {
+			http.Error(w, "cortex task not found", http.StatusInternalServerError)
+			return
+		}
+		wb.appendCortexEvent("cortex.worktrees.allocated", "Allocated Cortex Builder worktrees", updated)
+		writeJSON(w, http.StatusOK, *updated)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
