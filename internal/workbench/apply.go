@@ -313,45 +313,9 @@ func (wb *Server) handleCortexApply(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		var request *LockboxApprovalRequest
-		if in.LockboxRequestID == "" {
-			request = wb.lockbox.Current()
-		} else {
-			for _, lr := range wb.lockbox.List() {
-				if lr.ID == in.LockboxRequestID {
-					found := lr
-					request = &found
-					break
-				}
-			}
-		}
-		if request == nil {
-			http.Error(w, "lockbox request not found", http.StatusNotFound)
-			return
-		}
-		if request.Status != lockboxStatusApproved {
-			http.Error(w, "lockbox request is not approved", http.StatusConflict)
-			return
-		}
-		if !strings.HasPrefix(request.ProposalID, "aggregate:") {
-			http.Error(w, "lockbox request is not a Cortex aggregate request", http.StatusConflict)
-			return
-		}
-
-		aggregateID := strings.TrimPrefix(request.ProposalID, "aggregate:")
-		agg := wb.cortexAggregates.Find(aggregateID)
-		if agg == nil {
-			http.Error(w, "cortex aggregate not found", http.StatusNotFound)
-			return
-		}
-		if agg.Status != cortexAggregateStatusAggregated {
-			http.Error(w, "cortex aggregate is not in aggregated status", http.StatusConflict)
-			return
-		}
-
-		project := wb.project.Get()
-		if project == nil {
-			http.Error(w, "project must be open", http.StatusConflict)
+		request, agg, project, gateStatus, gateMsg := wb.cortexApplyGate(in.LockboxRequestID)
+		if gateStatus != 0 {
+			http.Error(w, gateMsg, gateStatus)
 			return
 		}
 
@@ -390,6 +354,373 @@ func (wb *Server) handleCortexApplies(w http.ResponseWriter, r *http.Request) {
 		out = wb.cortexApplies.ListByAggregate(aggregateID)
 	} else {
 		out = wb.cortexApplies.List()
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// cortexApplyGate resolves and validates the approved aggregate Lockbox request
+// shared by apply and apply-preview. On failure it returns a non-zero HTTP
+// status and a message; on success the status is 0 and the resolved request,
+// aggregate, and open project are returned.
+func (wb *Server) cortexApplyGate(lockboxRequestID string) (*LockboxApprovalRequest, *CortexAggregateProposal, *ProjectState, int, string) {
+	var request *LockboxApprovalRequest
+	if lockboxRequestID == "" {
+		request = wb.lockbox.Current()
+	} else {
+		for _, lr := range wb.lockbox.List() {
+			if lr.ID == lockboxRequestID {
+				found := lr
+				request = &found
+				break
+			}
+		}
+	}
+	if request == nil {
+		return nil, nil, nil, http.StatusNotFound, "lockbox request not found"
+	}
+	if request.Status != lockboxStatusApproved {
+		return nil, nil, nil, http.StatusConflict, "lockbox request is not approved"
+	}
+	if !strings.HasPrefix(request.ProposalID, "aggregate:") {
+		return nil, nil, nil, http.StatusConflict, "lockbox request is not a Cortex aggregate request"
+	}
+
+	agg := wb.cortexAggregates.Find(strings.TrimPrefix(request.ProposalID, "aggregate:"))
+	if agg == nil {
+		return nil, nil, nil, http.StatusNotFound, "cortex aggregate not found"
+	}
+	if agg.Status != cortexAggregateStatusAggregated {
+		return nil, nil, nil, http.StatusConflict, "cortex aggregate is not in aggregated status"
+	}
+
+	project := wb.project.Get()
+	if project == nil {
+		return nil, nil, nil, http.StatusConflict, "project must be open"
+	}
+	return request, agg, project, 0, ""
+}
+
+// CortexApplyPreviewFile is the per-file planned effect of an apply, computed
+// without touching the filesystem beyond reading existing files.
+type CortexApplyPreviewFile struct {
+	Path   string `json:"path"`
+	Action string `json:"action"`
+	Status string `json:"status"`
+	Exists bool   `json:"exists"`
+	Diff   string `json:"diff"`
+	Error  string `json:"error"`
+}
+
+// CortexApplyPreview is a non-writing preview of applying an approved aggregate:
+// it reports per-file planned effects, current file state, and a diff-like
+// preview. It never carries the provider API key and never writes files.
+type CortexApplyPreview struct {
+	ID               string                   `json:"id"`
+	TS               time.Time                `json:"ts"`
+	AggregateID      string                   `json:"aggregate_id"`
+	LockboxRequestID string                   `json:"lockbox_request_id"`
+	Status           string                   `json:"status"`
+	Files            []CortexApplyPreviewFile `json:"files"`
+	Error            string                   `json:"error"`
+}
+
+const (
+	cortexApplyPreviewStatusReady   = "ready"
+	cortexApplyPreviewStatusBlocked = "blocked"
+	cortexApplyPreviewStatusFailed  = "failed"
+)
+
+// cloneCortexApplyPreview deep-copies the files slice so callers can never
+// mutate the store's internal state through a returned value.
+func cloneCortexApplyPreview(in CortexApplyPreview) CortexApplyPreview {
+	out := in
+	if in.Files != nil {
+		out.Files = make([]CortexApplyPreviewFile, len(in.Files))
+		copy(out.Files, in.Files)
+	}
+	return out
+}
+
+// cortexApplyPreviewStore is the in-memory record of Cortex apply previews.
+// Every accessor returns a deep copy, never a pointer into the stored slice.
+type cortexApplyPreviewStore struct {
+	mu       sync.Mutex
+	nextID   int64
+	previews []CortexApplyPreview
+}
+
+func newCortexApplyPreviewStore() *cortexApplyPreviewStore {
+	return &cortexApplyPreviewStore{}
+}
+
+// Append assigns an id and timestamp to in, stores it, and returns a copy.
+func (s *cortexApplyPreviewStore) Append(in CortexApplyPreview) CortexApplyPreview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	in.ID = strconv.FormatInt(s.nextID, 10)
+	in.TS = time.Now().UTC()
+	s.previews = append(s.previews, in)
+	return cloneCortexApplyPreview(in)
+}
+
+// Current returns a deep copy of the most recent preview, or nil if none.
+func (s *cortexApplyPreviewStore) Current() *CortexApplyPreview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.previews) == 0 {
+		return nil
+	}
+	c := cloneCortexApplyPreview(s.previews[len(s.previews)-1])
+	return &c
+}
+
+// Find returns a deep copy of the preview with the given id, or nil.
+func (s *cortexApplyPreviewStore) Find(id string) *CortexApplyPreview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.previews {
+		if s.previews[i].ID == id {
+			c := cloneCortexApplyPreview(s.previews[i])
+			return &c
+		}
+	}
+	return nil
+}
+
+// List returns deep copies of all previews in insertion order.
+func (s *cortexApplyPreviewStore) List() []CortexApplyPreview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]CortexApplyPreview, len(s.previews))
+	for i := range s.previews {
+		out[i] = cloneCortexApplyPreview(s.previews[i])
+	}
+	return out
+}
+
+// ListByAggregate returns deep copies of previews for the given aggregate id.
+func (s *cortexApplyPreviewStore) ListByAggregate(aggregateID string) []CortexApplyPreview {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []CortexApplyPreview{}
+	for i := range s.previews {
+		if s.previews[i].AggregateID == aggregateID {
+			out = append(out, cloneCortexApplyPreview(s.previews[i]))
+		}
+	}
+	return out
+}
+
+// cortexDiffLines splits content into lines, dropping the trailing empty element
+// produced by a final newline so a "no diff" change set is empty.
+func cortexDiffLines(s string) []string {
+	if s == "" {
+		return []string{}
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+// cortexUnifiedDiff renders a simple whole-file, line-based unified-style diff:
+// every old line is removed and every new line is added. It is intentionally not
+// a minimal (Myers) diff.
+func cortexUnifiedDiff(path, oldContent, newContent string) string {
+	var b strings.Builder
+	b.WriteString("--- a/" + path + "\n")
+	b.WriteString("+++ b/" + path + "\n")
+	for _, line := range cortexDiffLines(oldContent) {
+		b.WriteString("-" + line + "\n")
+	}
+	for _, line := range cortexDiffLines(newContent) {
+		b.WriteString("+" + line + "\n")
+	}
+	return b.String()
+}
+
+// previewOneFile computes the non-writing planned effect for one proposed file.
+func previewOneFile(projectPath string, f BuilderProposedFile) CortexApplyPreviewFile {
+	pf := CortexApplyPreviewFile{Path: f.Path, Action: f.Action}
+	target, err := resolveProjectPath(projectPath, f.Path)
+	if err != nil {
+		pf.Status = cortexApplyPreviewStatusBlocked
+		pf.Error = truncateString(err.Error(), 1000)
+		return pf
+	}
+
+	info, statErr := os.Lstat(target)
+	pf.Exists = statErr == nil
+	isRegular := pf.Exists && info.Mode().IsRegular()
+
+	switch f.Action {
+	case proposalActionCreate:
+		if !pf.Exists {
+			pf.Status = cortexApplyPreviewStatusReady
+			pf.Diff = cortexUnifiedDiff(f.Path, "", f.Content)
+			return pf
+		}
+		if !isRegular {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = "create target exists and is not a regular file"
+			return pf
+		}
+		existing, readErr := os.ReadFile(target)
+		if readErr != nil {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = truncateString("create target exists and could not be read: "+readErr.Error(), 1000)
+			return pf
+		}
+		if string(existing) == f.Content {
+			pf.Status = cortexApplyPreviewStatusReady
+			pf.Diff = "no-op: target already exists with identical content"
+			return pf
+		}
+		pf.Status = cortexApplyPreviewStatusBlocked
+		pf.Error = "create target already exists with different content"
+		pf.Diff = cortexUnifiedDiff(f.Path, string(existing), f.Content)
+		return pf
+	case proposalActionModify:
+		if !pf.Exists {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = "modify target does not exist"
+			return pf
+		}
+		if !isRegular {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = "modify target is not a regular file"
+			return pf
+		}
+		existing, readErr := os.ReadFile(target)
+		if readErr != nil {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = truncateString("modify target could not be read: "+readErr.Error(), 1000)
+			return pf
+		}
+		pf.Status = cortexApplyPreviewStatusReady
+		pf.Diff = cortexUnifiedDiff(f.Path, string(existing), f.Content)
+		return pf
+	case proposalActionDelete:
+		if !pf.Exists {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = "delete target does not exist"
+			return pf
+		}
+		if !isRegular {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = "delete target is not a regular file"
+			return pf
+		}
+		existing, readErr := os.ReadFile(target)
+		if readErr != nil {
+			pf.Status = cortexApplyPreviewStatusBlocked
+			pf.Error = truncateString("delete target could not be read: "+readErr.Error(), 1000)
+			return pf
+		}
+		pf.Status = cortexApplyPreviewStatusReady
+		pf.Diff = cortexUnifiedDiff(f.Path, string(existing), "")
+		return pf
+	default:
+		pf.Status = cortexApplyPreviewStatusBlocked
+		pf.Error = truncateString("unsupported action "+f.Action, 1000)
+		return pf
+	}
+}
+
+// previewAggregateFiles evaluates every file (it does not stop on the first
+// blocked file) and returns the per-file planned effects. It never writes.
+func previewAggregateFiles(projectPath string, files []BuilderProposedFile) []CortexApplyPreviewFile {
+	out := make([]CortexApplyPreviewFile, 0, len(files))
+	for _, f := range files {
+		out = append(out, previewOneFile(projectPath, f))
+	}
+	return out
+}
+
+// handleCortexApplyPreview serves GET (current preview) and POST (build a
+// non-writing preview of applying an approved aggregate).
+func (wb *Server) handleCortexApplyPreview(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		preview := wb.cortexApplyPreviews.Current()
+		if preview == nil {
+			http.Error(w, "no cortex apply preview", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, *preview)
+	case http.MethodPost:
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		if err != nil {
+			http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var in struct {
+			LockboxRequestID string `json:"lockbox_request_id"`
+		}
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &in); err != nil {
+				http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+
+		request, agg, project, gateStatus, gateMsg := wb.cortexApplyGate(in.LockboxRequestID)
+		if gateStatus != 0 {
+			http.Error(w, gateMsg, gateStatus)
+			return
+		}
+
+		previewFiles := previewAggregateFiles(project.Path, agg.Files)
+		status := cortexApplyPreviewStatusReady
+		for _, pf := range previewFiles {
+			switch pf.Status {
+			case cortexApplyPreviewStatusFailed:
+				status = cortexApplyPreviewStatusFailed
+			case cortexApplyPreviewStatusBlocked:
+				if status != cortexApplyPreviewStatusFailed {
+					status = cortexApplyPreviewStatusBlocked
+				}
+			}
+		}
+
+		preview := CortexApplyPreview{
+			AggregateID:      agg.ID,
+			LockboxRequestID: request.ID,
+			Status:           status,
+			Files:            previewFiles,
+		}
+		if status == cortexApplyPreviewStatusFailed {
+			preview.Error = "apply preview failed due to an internal error"
+		}
+		stored := wb.cortexApplyPreviews.Append(preview)
+		wb.appendCortexEvent("cortex.apply.preview.created", "Created Cortex apply preview", stored)
+
+		switch status {
+		case cortexApplyPreviewStatusReady:
+			writeJSON(w, http.StatusOK, stored)
+		case cortexApplyPreviewStatusBlocked:
+			writeJSON(w, http.StatusConflict, stored)
+		default:
+			writeJSON(w, http.StatusBadGateway, stored)
+		}
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (wb *Server) handleCortexApplyPreviews(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	aggregateID := r.URL.Query().Get("aggregate_id")
+	var out []CortexApplyPreview
+	if aggregateID != "" {
+		out = wb.cortexApplyPreviews.ListByAggregate(aggregateID)
+	} else {
+		out = wb.cortexApplyPreviews.List()
 	}
 	writeJSON(w, http.StatusOK, out)
 }

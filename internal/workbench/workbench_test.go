@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore(), cortexApplies: newCortexApplyStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore(), cortexApplies: newCortexApplyStore(), cortexApplyPreviews: newCortexApplyPreviewStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -5650,6 +5650,412 @@ func TestWorkbenchCortexApplyNoAPIKey(t *testing.T) {
 	}
 	for _, e := range wb.store.List() {
 		if strings.HasPrefix(e.Type, "cortex.apply") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+func previewFileByPath(preview CortexApplyPreview, path string) (CortexApplyPreviewFile, bool) {
+	for _, pf := range preview.Files {
+		if pf.Path == path {
+			return pf, true
+		}
+	}
+	return CortexApplyPreviewFile{}, false
+}
+
+func TestWorkbenchCortexApplyPreview404NoLockboxRequest(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewRejectsPending(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "aggregated", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "pending", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewRejectsRejected(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "aggregated", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "rejected", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewRejectsNonAggregateProposal(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "1", Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreview404MissingAggregate(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:nonexistent", Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewRejectsConflictedAggregate(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "conflicted", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewRejectsWithoutProject(t *testing.T) {
+	wb := New()
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "aggregated", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewCreateNew(t *testing.T) {
+	dir := t.TempDir()
+	wb, agg := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "newfile.go", Action: "create", Content: "package x\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if preview.Status != "ready" {
+		t.Errorf("status=%q, want ready", preview.Status)
+	}
+	if preview.AggregateID != agg.ID {
+		t.Errorf("aggregate_id=%q, want %q", preview.AggregateID, agg.ID)
+	}
+	pf, ok := previewFileByPath(preview, "newfile.go")
+	if !ok {
+		t.Fatal("missing preview file for newfile.go")
+	}
+	if pf.Status != "ready" || pf.Exists {
+		t.Errorf("file preview=%+v, want ready and not existing", pf)
+	}
+	if !strings.Contains(pf.Diff, "+++ b/newfile.go") || !strings.Contains(pf.Diff, "+package x") {
+		t.Errorf("unexpected diff: %q", pf.Diff)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
+		t.Errorf("preview must not write the file (err=%v)", err)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewCreateIdentical(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("same\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "same\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (ready), got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	if preview.Status != "ready" {
+		t.Errorf("status=%q, want ready", preview.Status)
+	}
+	pf, _ := previewFileByPath(preview, "a.go")
+	if pf.Status != "ready" || !pf.Exists {
+		t.Errorf("file preview=%+v, want ready and existing", pf)
+	}
+	if !strings.Contains(pf.Diff, "no-op") {
+		t.Errorf("expected no-op diff, got %q", pf.Diff)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewCreateDifferent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "new\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (blocked), got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	if preview.Status != "blocked" {
+		t.Errorf("status=%q, want blocked", preview.Status)
+	}
+	pf, _ := previewFileByPath(preview, "a.go")
+	if pf.Status != "blocked" || pf.Error == "" {
+		t.Errorf("file preview=%+v, want blocked with error", pf)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewModifyExisting(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "existing.go"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "existing.go", Action: "modify", Content: "new\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	pf, _ := previewFileByPath(preview, "existing.go")
+	if pf.Status != "ready" || !pf.Exists {
+		t.Errorf("file preview=%+v, want ready and existing", pf)
+	}
+	if !strings.Contains(pf.Diff, "-old") || !strings.Contains(pf.Diff, "+new") {
+		t.Errorf("expected modify diff, got %q", pf.Diff)
+	}
+	content, _ := os.ReadFile(filepath.Join(dir, "existing.go"))
+	if string(content) != "old\n" {
+		t.Errorf("preview must not modify the file, got %q", content)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewModifyMissing(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "missing.go", Action: "modify", Content: "x\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	pf, _ := previewFileByPath(preview, "missing.go")
+	if pf.Status != "blocked" {
+		t.Errorf("file status=%q, want blocked", pf.Status)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewDeleteExisting(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gone.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "gone.go", Action: "delete", Content: ""}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	pf, _ := previewFileByPath(preview, "gone.go")
+	if pf.Status != "ready" || !pf.Exists {
+		t.Errorf("file preview=%+v, want ready and existing", pf)
+	}
+	if !strings.Contains(pf.Diff, "-x") {
+		t.Errorf("expected delete diff with removals, got %q", pf.Diff)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gone.go")); err != nil {
+		t.Errorf("preview must not delete the file: %v", err)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewDeleteMissing(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "missing.go", Action: "delete", Content: ""}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	pf, _ := previewFileByPath(preview, "missing.go")
+	if pf.Status != "blocked" {
+		t.Errorf("file status=%q, want blocked", pf.Status)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewUnsupportedAction(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "rename", Content: "x\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	pf, _ := previewFileByPath(preview, "a.go")
+	if pf.Status != "blocked" || pf.Error == "" {
+		t.Errorf("file preview=%+v, want blocked with error", pf)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewEvaluatesAllFiles(t *testing.T) {
+	dir := t.TempDir()
+	files := []BuilderProposedFile{
+		{Path: "new.go", Action: "create", Content: "n\n"},
+		{Path: "missing.go", Action: "modify", Content: "m\n"},
+		{Path: "absent.go", Action: "delete", Content: ""},
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, files)
+	w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 (some blocked), got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	if preview.Status != "blocked" {
+		t.Errorf("status=%q, want blocked", preview.Status)
+	}
+	if len(preview.Files) != 3 {
+		t.Fatalf("expected all 3 files evaluated, got %d", len(preview.Files))
+	}
+	statuses := map[string]string{}
+	for _, pf := range preview.Files {
+		statuses[pf.Path] = pf.Status
+	}
+	if statuses["new.go"] != "ready" {
+		t.Errorf("new.go status=%q, want ready", statuses["new.go"])
+	}
+	if statuses["missing.go"] != "blocked" || statuses["absent.go"] != "blocked" {
+		t.Errorf("expected missing.go and absent.go blocked, got %v", statuses)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewReadyEvent(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A\n"}})
+	if w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`); w.Code != http.StatusOK {
+		t.Fatalf("preview: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb, "cortex.apply.preview.created"); ev == nil {
+		t.Error("cortex.apply.preview.created event not appended")
+	} else if ev.Message != "Created Cortex apply preview" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewBlockedEvent(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "missing.go", Action: "modify", Content: "m\n"}})
+	if w := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`); w.Code != http.StatusConflict {
+		t.Fatalf("preview: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb, "cortex.apply.preview.created"); ev == nil {
+		t.Error("cortex.apply.preview.created event not appended for blocked preview")
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/preview", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewGETCurrent(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A\n"}})
+	created := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	var createdPreview CortexApplyPreview
+	json.Unmarshal(created.Body.Bytes(), &createdPreview)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/preview", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var preview CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &preview)
+	if preview.ID != createdPreview.ID {
+		t.Errorf("current preview id=%q, want %q", preview.ID, createdPreview.ID)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewsEmpty(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/previews", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty previews, got %q", body)
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewsFilterByAggregate(t *testing.T) {
+	wb := New()
+	wb.cortexApplyPreviews.Append(CortexApplyPreview{AggregateID: "agg-1", Status: "ready", Files: []CortexApplyPreviewFile{}})
+	wb.cortexApplyPreviews.Append(CortexApplyPreview{AggregateID: "agg-2", Status: "ready", Files: []CortexApplyPreviewFile{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/previews?aggregate_id=agg-1", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	var filtered []CortexApplyPreview
+	json.Unmarshal(w.Body.Bytes(), &filtered)
+	if len(filtered) != 1 || filtered[0].AggregateID != "agg-1" {
+		t.Fatalf("expected 1 preview for agg-1, got %v", filtered)
+	}
+
+	reqAll := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply/previews", nil)
+	wAll := httptest.NewRecorder()
+	wb.mux.ServeHTTP(wAll, reqAll)
+	var all []CortexApplyPreview
+	json.Unmarshal(wAll.Body.Bytes(), &all)
+	if len(all) != 2 {
+		t.Errorf("expected 2 total previews, got %d", len(all))
+	}
+}
+
+func TestWorkbenchCortexApplyPreviewNoAPIKey(t *testing.T) {
+	const secret = "apply-preview-secret"
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A\n"}})
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"`+secret+`","model":"m"}`)
+
+	post := postJSON(t, wb, "/api/workbench/cortex/apply/preview", `{}`)
+	if post.Code != http.StatusOK {
+		t.Fatalf("preview: expected 200, got %d: %s", post.Code, post.Body.String())
+	}
+	assertNoSecret(t, "apply preview", secret, post.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/cortex/apply/preview", "/api/workbench/cortex/apply/previews"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.apply.preview") {
 			assertNoSecret(t, "event "+e.Type, secret, e.Data)
 		}
 	}
