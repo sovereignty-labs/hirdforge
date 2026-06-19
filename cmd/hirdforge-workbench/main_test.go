@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState()}
+	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -2098,4 +2098,539 @@ func TestWorkbenchInspectionAndBuildNoAPIKey(t *testing.T) {
 		t.Fatalf("inspection GET expected 200, got %d", getRec.Code)
 	}
 	assertNoAPIKey(t, "inspection", secret, getRec.Body.Bytes())
+}
+
+// proposalResponse returns a handler that replies with an OpenAI-style envelope
+// whose message content is a JSON change proposal.
+func proposalResponse(summary string, files []BuilderProposedFile) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		content, _ := json.Marshal(map[string]any{"summary": summary, "files": files})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "test",
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(content)}},
+			},
+		})
+	}
+}
+
+// assertNoSecret fails if body contains the api key value or the literal token
+// "api_key". It works for both object and array response bodies.
+func assertNoSecret(t *testing.T, label, secret string, body []byte) {
+	t.Helper()
+	s := string(body)
+	if strings.Contains(s, secret) {
+		t.Errorf("%s response leaked the api key value", label)
+	}
+	if strings.Contains(s, "api_key") {
+		t.Errorf("%s response contains the api_key token", label)
+	}
+}
+
+// snapshotDir returns a map of relative path -> content for every file under
+// root, excluding the .git directory (whose index git status may touch).
+func snapshotDir(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return nil
+		}
+		data, derr := os.ReadFile(path)
+		if derr != nil {
+			return nil
+		}
+		snap[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	return snap
+}
+
+func TestWorkbenchBuildProposeRejectsMissingGoal(t *testing.T) {
+	server := startMockProvider(t, proposalResponse("s", nil))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildPropose409WithoutProject(t *testing.T) {
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"k","model":"m"}`)
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"ship it"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildPropose409WithoutProvider(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := newWorkbench()
+	dir := initGitRepo(t)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"ship it"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildProposeAutoInspects(t *testing.T) {
+	server := startMockProvider(t, proposalResponse("did stuff", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "add"},
+	}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	if wb.inspection.Get() != nil {
+		t.Fatal("expected no inspection before propose")
+	}
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"ship it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if wb.inspection.Get() == nil {
+		t.Fatal("expected propose to auto-create an inspection")
+	}
+	var found bool
+	for _, e := range wb.store.List() {
+		if e.Type == "project.inspected" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected project.inspected event from auto-inspect")
+	}
+}
+
+func TestWorkbenchBuildProposeUpstreamRequest(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	var (
+		gotPath   string
+		gotMethod string
+		gotAuth   string
+		gotBody   struct {
+			Model       string              `json:"model"`
+			Messages    []map[string]string `json:"messages"`
+			Temperature float64             `json:"temperature"`
+		}
+	)
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		gotAuth = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		proposalResponse("s", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "x"}})(w, r)
+	})
+
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "secret-key", "plan-model")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if gotPath != "/chat/completions" {
+		t.Errorf("expected path /chat/completions, got %q", gotPath)
+	}
+	if gotMethod != http.MethodPost {
+		t.Errorf("expected POST, got %q", gotMethod)
+	}
+	if gotAuth != "Bearer secret-key" {
+		t.Errorf("expected Authorization=Bearer secret-key, got %q", gotAuth)
+	}
+	if gotBody.Model != "plan-model" {
+		t.Errorf("expected model plan-model, got %q", gotBody.Model)
+	}
+	if gotBody.Temperature != 0 {
+		t.Errorf("expected temperature 0, got %v", gotBody.Temperature)
+	}
+	if len(gotBody.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(gotBody.Messages), gotBody.Messages)
+	}
+	if gotBody.Messages[0]["role"] != "system" || gotBody.Messages[0]["content"] != builderProposalSystemPrompt {
+		t.Errorf("unexpected system message: %+v", gotBody.Messages[0])
+	}
+	if gotBody.Messages[1]["role"] != "user" {
+		t.Errorf("expected second message role=user, got %q", gotBody.Messages[1]["role"])
+	}
+	userContent := gotBody.Messages[1]["content"]
+	for _, want := range []string{"Goal: do it", `"summary"`, `"files"`, "create|modify|delete"} {
+		if !strings.Contains(userContent, want) {
+			t.Errorf("expected user prompt to contain %q, got:\n%s", want, userContent)
+		}
+	}
+}
+
+func TestWorkbenchBuildProposeStoresValidProposal(t *testing.T) {
+	files := []BuilderProposedFile{
+		{Path: "main.go", Action: "modify", Content: "package main\n// changed\n", Rationale: "update"},
+		{Path: "old.go", Action: "delete", Content: "", Rationale: "remove"},
+		{Path: "new.go", Action: "create", Content: "package new\n", Rationale: "add"},
+	}
+	server := startMockProvider(t, proposalResponse("apply changes", files))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"refactor"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var proposal BuilderChangeProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &proposal); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if proposal.ID == "" {
+		t.Error("expected id to be set")
+	}
+	if proposal.TS.IsZero() {
+		t.Error("expected ts to be set")
+	}
+	if proposal.Goal != "refactor" {
+		t.Errorf("expected goal=refactor, got %q", proposal.Goal)
+	}
+	if proposal.Status != "proposed" {
+		t.Errorf("expected status=proposed, got %q", proposal.Status)
+	}
+	if proposal.Summary != "apply changes" {
+		t.Errorf("expected summary='apply changes', got %q", proposal.Summary)
+	}
+	if len(proposal.Files) != len(files) {
+		t.Fatalf("expected %d files, got %d", len(files), len(proposal.Files))
+	}
+	for i := range files {
+		if proposal.Files[i] != files[i] {
+			t.Errorf("file[%d]=%+v, want %+v", i, proposal.Files[i], files[i])
+		}
+	}
+}
+
+func TestWorkbenchBuildProposalGET404(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/proposal", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchBuildProposalGETReturnsCurrent(t *testing.T) {
+	server := startMockProvider(t, proposalResponse("current proposal", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"},
+	}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+	if w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`); w.Code != http.StatusCreated {
+		t.Fatalf("propose: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/proposal", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var proposal BuilderChangeProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &proposal); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if proposal.Summary != "current proposal" {
+		t.Errorf("expected summary='current proposal', got %q", proposal.Summary)
+	}
+	if proposal.Status != "proposed" {
+		t.Errorf("expected status=proposed, got %q", proposal.Status)
+	}
+}
+
+func TestWorkbenchBuildProposalsGETEmpty(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/proposals", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty proposals, got %q", body)
+	}
+}
+
+func TestWorkbenchBuildProposalsGETIncludes(t *testing.T) {
+	server := startMockProvider(t, proposalResponse("a proposal", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"},
+	}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"first"}`)
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"second"}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/build/proposals", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var proposals []BuilderChangeProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &proposals); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(proposals) != 2 {
+		t.Fatalf("expected 2 proposals, got %d", len(proposals))
+	}
+	if proposals[0].Goal != "first" {
+		t.Errorf("expected oldest goal=first, got %q", proposals[0].Goal)
+	}
+	if proposals[1].Goal != "second" {
+		t.Errorf("expected newest goal=second, got %q", proposals[1].Goal)
+	}
+}
+
+func TestWorkbenchBuildProposeInvalidActionFails(t *testing.T) {
+	server := startMockProvider(t, proposalResponse("bad", []BuilderProposedFile{
+		{Path: "a.go", Action: "frobnicate", Content: "x", Rationale: "y"},
+	}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Proposal BuilderChangeProposal `json:"proposal"`
+		Error    string                `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Proposal.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", result.Proposal.Status)
+	}
+	if result.Proposal.Summary != builderProposalFallbackSummary {
+		t.Errorf("expected fallback summary, got %q", result.Proposal.Summary)
+	}
+	if len(result.Proposal.Files) != 0 {
+		t.Errorf("expected empty files on failed proposal, got %d", len(result.Proposal.Files))
+	}
+	if !strings.Contains(result.Error, "action") {
+		t.Errorf("expected error to mention action, got %q", result.Error)
+	}
+}
+
+func TestWorkbenchBuildProposeMissingPathFails(t *testing.T) {
+	server := startMockProvider(t, proposalResponse("bad", []BuilderProposedFile{
+		{Path: "", Action: "create", Content: "x", Rationale: "y"},
+	}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Proposal BuilderChangeProposal `json:"proposal"`
+		Error    string                `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Proposal.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", result.Proposal.Status)
+	}
+	if !strings.Contains(result.Error, "path") {
+		t.Errorf("expected error to mention path, got %q", result.Error)
+	}
+}
+
+func TestWorkbenchBuildPropose500Fails(t *testing.T) {
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream exploded"}`))
+	})
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result struct {
+		Proposal BuilderChangeProposal `json:"proposal"`
+		Error    string                `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Proposal.Status != "failed" {
+		t.Errorf("expected status=failed, got %q", result.Proposal.Status)
+	}
+	if !strings.Contains(result.Error, "upstream exploded") {
+		t.Errorf("expected error to include upstream body, got %q", result.Error)
+	}
+}
+
+func TestWorkbenchBuildProposalCreatedEventNoAPIKey(t *testing.T) {
+	const secret = "propose-secret-key"
+	server := startMockProvider(t, proposalResponse("ok", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"},
+	}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, secret, "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "builder.proposal.created" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("builder.proposal.created event not found")
+	}
+	if found.Message != "Created Builder change proposal" {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+	assertNoSecret(t, "proposal.created event", secret, found.Data)
+}
+
+func TestWorkbenchBuildProposalFailedEventNoAPIKey(t *testing.T) {
+	const secret = "propose-secret-key"
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, secret, "m")
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "builder.proposal.failed" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("builder.proposal.failed event not found")
+	}
+	if found.Message != "Builder change proposal failed" {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+	assertNoSecret(t, "proposal.failed event", secret, found.Data)
+}
+
+func TestWorkbenchBuildProposeNoResponseHasAPIKey(t *testing.T) {
+	const secret = "propose-top-secret"
+	server := startMockProvider(t, proposalResponse("ok", []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"},
+	}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, secret, "m")
+
+	proposeRec := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if proposeRec.Code != http.StatusCreated {
+		t.Fatalf("propose expected 201, got %d", proposeRec.Code)
+	}
+	assertNoSecret(t, "propose", secret, proposeRec.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/build/proposal", "/api/workbench/build/proposals"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+
+	// Failed proposal response must also be clean.
+	bad := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	wb2 := newWorkbench()
+	openBuilderProvider(t, wb2, bad.URL, secret, "m")
+	failRec := postJSON(t, wb2, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if failRec.Code != http.StatusBadGateway {
+		t.Fatalf("failed propose expected 502, got %d", failRec.Code)
+	}
+	assertNoSecret(t, "failed propose", secret, failRec.Body.Bytes())
+}
+
+func TestWorkbenchBuildProposeDoesNotModifyFiles(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := newWorkbench()
+	dir := initGitRepo(t)
+	writeFile(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeFile(t, dir, "keep.txt", "keep me\n")
+
+	before := snapshotDir(t, dir)
+
+	// The provider proposes create/modify/delete; none must touch disk.
+	files := []BuilderProposedFile{
+		{Path: "newfile.go", Action: "create", Content: "package newpkg\n", Rationale: "add"},
+		{Path: "main.go", Action: "modify", Content: "package main\n// rewritten\n", Rationale: "edit"},
+		{Path: "keep.txt", Action: "delete", Content: "", Rationale: "remove"},
+	}
+	server := startMockProvider(t, proposalResponse("touch everything", files))
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	after := snapshotDir(t, dir)
+	if len(before) != len(after) {
+		t.Fatalf("file count changed: before %d, after %d", len(before), len(after))
+	}
+	for path, content := range before {
+		if after[path] != content {
+			t.Errorf("file %q content changed", path)
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok {
+			t.Errorf("unexpected new file %q created", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
+		t.Errorf("proposed file newfile.go must not exist on disk (err=%v)", err)
+	}
 }
