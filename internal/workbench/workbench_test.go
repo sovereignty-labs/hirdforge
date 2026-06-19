@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore(), cortexApplies: newCortexApplyStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -5254,5 +5254,403 @@ func TestWorkbenchCortexAggregateReviewDoesNotWriteFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
 		t.Errorf("review must not write proposed file newfile.go (err=%v)", err)
+	}
+}
+
+// cortexApplyApprovedSetup opens projectDir, builds an aggregated aggregate from
+// files, creates a Lockbox request from it and approves it. It returns the
+// workbench (with the approved request current) and the aggregate.
+func cortexApplyApprovedSetup(t *testing.T, projectDir string, files []BuilderProposedFile) (*Server, CortexAggregateProposal) {
+	t.Helper()
+	wb := New()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+projectDir+`"}`)
+	task := createCortexTask(t, wb, `{"goal":"ship it","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", files)
+	aggResp := postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+	if aggResp.Code != http.StatusCreated {
+		t.Fatalf("aggregate: expected 201, got %d: %s", aggResp.Code, aggResp.Body.String())
+	}
+	var agg CortexAggregateProposal
+	if err := json.Unmarshal(aggResp.Body.Bytes(), &agg); err != nil {
+		t.Fatalf("decode aggregate: %v", err)
+	}
+	lbResp := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`)
+	if lbResp.Code != http.StatusCreated {
+		t.Fatalf("aggregate/lockbox: expected 201, got %d: %s", lbResp.Code, lbResp.Body.String())
+	}
+	var request LockboxApprovalRequest
+	if err := json.Unmarshal(lbResp.Body.Bytes(), &request); err != nil {
+		t.Fatalf("decode lockbox request: %v", err)
+	}
+	if app := postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"`+request.ID+`"}`); app.Code != http.StatusOK {
+		t.Fatalf("approve: expected 200, got %d: %s", app.Code, app.Body.String())
+	}
+	return wb, agg
+}
+
+func TestCortexApplySafePathRejectsEmpty(t *testing.T) {
+	if _, err := resolveProjectPath(t.TempDir(), ""); err == nil {
+		t.Error("expected error for empty path")
+	}
+}
+
+func TestCortexApplySafePathRejectsAbsolute(t *testing.T) {
+	if _, err := resolveProjectPath(t.TempDir(), "/etc/passwd"); err == nil {
+		t.Error("expected error for absolute path")
+	}
+}
+
+func TestCortexApplySafePathRejectsTraversal(t *testing.T) {
+	root := t.TempDir()
+	if _, err := resolveProjectPath(root, "../outside.txt"); err == nil {
+		t.Error("expected error for parent traversal")
+	}
+	if _, err := resolveProjectPath(root, "a/../../b.txt"); err == nil {
+		t.Error("expected error for nested traversal escape")
+	}
+}
+
+func TestCortexApplySafePathAllowsNested(t *testing.T) {
+	root := t.TempDir()
+	got, err := resolveProjectPath(root, "a/b/c.go")
+	if err != nil {
+		t.Fatalf("unexpected error for nested path: %v", err)
+	}
+	want := filepath.Join(root, "a", "b", "c.go")
+	if got != want {
+		t.Errorf("resolved=%q, want %q", got, want)
+	}
+}
+
+func TestWorkbenchCortexApply404NoLockboxRequest(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsPending(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "aggregated", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "pending", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsRejected(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "aggregated", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "rejected", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsNonAggregateProposal(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "1", Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApply404MissingAggregate(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:nonexistent", Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsConflictedAggregate(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "conflicted", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsWithoutProject(t *testing.T) {
+	wb := New()
+	agg := wb.cortexAggregates.Append(CortexAggregateProposal{Status: "aggregated", Files: []BuilderProposedFile{}})
+	wb.lockbox.Append(LockboxApprovalRequest{ProposalID: "aggregate:" + agg.ID, Status: "approved", Files: []BuilderProposedFile{}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyCreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	wb, agg := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "newfile.go", Action: "create", Content: "package x\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result CortexApplyResult
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if result.Status != "applied" {
+		t.Errorf("status=%q, want applied", result.Status)
+	}
+	if result.AggregateID != agg.ID {
+		t.Errorf("aggregate_id=%q, want %q", result.AggregateID, agg.ID)
+	}
+	if len(result.Files) != 1 || result.Files[0].Status != "applied" || result.Files[0].Action != "create" {
+		t.Fatalf("unexpected applied files: %+v", result.Files)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "newfile.go"))
+	if err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+	if string(content) != "package x\n" {
+		t.Errorf("content=%q", content)
+	}
+}
+
+func TestWorkbenchCortexApplyModifiesFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "existing.go"), []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "existing.go", Action: "modify", Content: "new\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "existing.go"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(content) != "new\n" {
+		t.Errorf("content=%q, want %q", content, "new\n")
+	}
+}
+
+func TestWorkbenchCortexApplyDeletesFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gone.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "gone.go", Action: "delete", Content: ""}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gone.go")); !os.IsNotExist(err) {
+		t.Errorf("file should be deleted (err=%v)", err)
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsModifyMissing(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "missing.go", Action: "modify", Content: "x\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result CortexApplyResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Status != "failed" {
+		t.Errorf("status=%q, want failed", result.Status)
+	}
+	if len(result.Files) != 1 || result.Files[0].Status != "failed" {
+		t.Errorf("expected one failed file, got %+v", result.Files)
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsDeleteMissing(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "missing.go", Action: "delete", Content: ""}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyRejectsUnsupportedAction(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "rename", Content: "x\n"}})
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result CortexApplyResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Status != "failed" {
+		t.Errorf("status=%q, want failed", result.Status)
+	}
+}
+
+func TestWorkbenchCortexApplyStopsOnFirstFailure(t *testing.T) {
+	dir := t.TempDir()
+	files := []BuilderProposedFile{
+		{Path: "good.go", Action: "create", Content: "g\n"},
+		{Path: "missing.go", Action: "modify", Content: "m\n"},
+		{Path: "other.go", Action: "create", Content: "o\n"},
+	}
+	wb, _ := cortexApplyApprovedSetup(t, dir, files)
+	w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var result CortexApplyResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.Status != "failed" {
+		t.Errorf("status=%q, want failed", result.Status)
+	}
+	if len(result.Files) != 2 {
+		t.Fatalf("expected 2 attempted files (stopped on failure), got %d: %+v", len(result.Files), result.Files)
+	}
+	if result.Files[0].Status != "applied" || result.Files[1].Status != "failed" {
+		t.Errorf("unexpected file statuses: %+v", result.Files)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "good.go")); err != nil {
+		t.Errorf("good.go should be created before the failure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "other.go")); !os.IsNotExist(err) {
+		t.Errorf("other.go must not be created after stopping (err=%v)", err)
+	}
+}
+
+func TestWorkbenchCortexApplyCompletedEvent(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A\n"}})
+	if w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`); w.Code != http.StatusOK {
+		t.Fatalf("apply: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb, "cortex.apply.completed"); ev == nil {
+		t.Error("cortex.apply.completed event not appended")
+	} else if ev.Message != "Applied Cortex aggregate" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchCortexApplyFailedEvent(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "missing.go", Action: "modify", Content: "x\n"}})
+	if w := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`); w.Code != http.StatusBadGateway {
+		t.Fatalf("apply: expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	if ev := cortexHasEvent(wb, "cortex.apply.failed"); ev == nil {
+		t.Error("cortex.apply.failed event not appended")
+	} else if ev.Message != "Failed to apply Cortex aggregate" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchCortexApplyGET404(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchCortexApplyGETCurrent(t *testing.T) {
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A\n"}})
+	created := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("apply: expected 200, got %d: %s", created.Code, created.Body.String())
+	}
+	var createdResult CortexApplyResult
+	json.Unmarshal(created.Body.Bytes(), &createdResult)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/apply", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result CortexApplyResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.ID != createdResult.ID {
+		t.Errorf("current result id=%q, want %q", result.ID, createdResult.ID)
+	}
+}
+
+func TestWorkbenchCortexAppliesEmpty(t *testing.T) {
+	wb := New()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/applies", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty applies, got %q", body)
+	}
+}
+
+func TestWorkbenchCortexAppliesFilterByAggregate(t *testing.T) {
+	wb := New()
+	wb.cortexApplies.Append(CortexApplyResult{AggregateID: "agg-1", Status: "applied", Files: []CortexAppliedFile{}})
+	wb.cortexApplies.Append(CortexApplyResult{AggregateID: "agg-2", Status: "applied", Files: []CortexAppliedFile{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/applies?aggregate_id=agg-1", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	var filtered []CortexApplyResult
+	json.Unmarshal(w.Body.Bytes(), &filtered)
+	if len(filtered) != 1 || filtered[0].AggregateID != "agg-1" {
+		t.Fatalf("expected 1 result for agg-1, got %v", filtered)
+	}
+
+	reqAll := httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/applies", nil)
+	wAll := httptest.NewRecorder()
+	wb.mux.ServeHTTP(wAll, reqAll)
+	var all []CortexApplyResult
+	json.Unmarshal(wAll.Body.Bytes(), &all)
+	if len(all) != 2 {
+		t.Errorf("expected 2 total results, got %d", len(all))
+	}
+}
+
+func TestWorkbenchCortexApplyNoAPIKey(t *testing.T) {
+	const secret = "apply-secret"
+	dir := t.TempDir()
+	wb, _ := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A\n"}})
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"https://api.example.com","api_key":"`+secret+`","model":"m"}`)
+
+	post := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if post.Code != http.StatusOK {
+		t.Fatalf("apply: expected 200, got %d: %s", post.Code, post.Body.String())
+	}
+	assertNoSecret(t, "apply", secret, post.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/cortex/apply", "/api/workbench/cortex/applies"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "cortex.apply") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
 	}
 }

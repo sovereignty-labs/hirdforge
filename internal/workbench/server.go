@@ -52,6 +52,8 @@ const indexHTML = `<!doctype html>
     <li><code>GET /api/workbench/cortex/aggregates</code></li>
     <li><code>GET /api/workbench/cortex/aggregate/review</code></li>
     <li><code>GET /api/workbench/cortex/aggregate/reviews</code></li>
+    <li><code>GET /api/workbench/cortex/apply</code></li>
+    <li><code>GET /api/workbench/cortex/applies</code></li>
     <li><code>GET /api/workbench/validation</code></li>
     <li><code>GET /api/workbench/diff</code></li>
   </ul>
@@ -75,6 +77,7 @@ type Server struct {
 	cortexLaneProposals *cortexLaneProposalStore
 	cortexAggregates    *cortexAggregateStore
 	cortexReviews       *cortexReviewStore
+	cortexApplies       *cortexApplyStore
 
 	mux *http.ServeMux
 }
@@ -97,6 +100,7 @@ func New() *Server {
 		cortexLaneProposals: newCortexLaneProposalStore(),
 		cortexAggregates:    newCortexAggregateStore(),
 		cortexReviews:       newCortexReviewStore(),
+		cortexApplies:       newCortexApplyStore(),
 	}
 	wb.mux = wb.registerRoutes()
 	return wb
@@ -157,6 +161,8 @@ func (wb *Server) registerRoutes() *http.ServeMux {
 	mux.HandleFunc("/api/workbench/cortex/aggregate/lockbox", wb.handleCortexAggregateLockbox)
 	mux.HandleFunc("/api/workbench/cortex/aggregate/review", wb.handleCortexAggregateReview)
 	mux.HandleFunc("/api/workbench/cortex/aggregate/reviews", wb.handleCortexAggregateReviews)
+	mux.HandleFunc("/api/workbench/cortex/apply", wb.handleCortexApply)
+	mux.HandleFunc("/api/workbench/cortex/applies", wb.handleCortexApplies)
 
 	mux.HandleFunc("/api/workbench/validation", wb.handleValidation)
 	mux.HandleFunc("/api/workbench/diff", wb.handleDiff)
