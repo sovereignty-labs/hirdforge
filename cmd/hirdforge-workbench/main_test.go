@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore()}
+	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -2614,6 +2614,451 @@ func TestWorkbenchBuildProposeDoesNotModifyFiles(t *testing.T) {
 	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	after := snapshotDir(t, dir)
+	if len(before) != len(after) {
+		t.Fatalf("file count changed: before %d, after %d", len(before), len(after))
+	}
+	for path, content := range before {
+		if after[path] != content {
+			t.Errorf("file %q content changed", path)
+		}
+	}
+	for path := range after {
+		if _, ok := before[path]; !ok {
+			t.Errorf("unexpected new file %q created", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "newfile.go")); !os.IsNotExist(err) {
+		t.Errorf("proposed file newfile.go must not exist on disk (err=%v)", err)
+	}
+}
+
+// workbenchWithProposal sets up a workbench with an open git project, a mock
+// provider, and one stored "proposed" change proposal built from files. It
+// returns the workbench and the decoded proposal.
+func workbenchWithProposal(t *testing.T, files []BuilderProposedFile) (*workbench, BuilderChangeProposal) {
+	t.Helper()
+	server := startMockProvider(t, proposalResponse("proposed summary", files))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+	w := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("propose: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var proposal BuilderChangeProposal
+	if err := json.Unmarshal(w.Body.Bytes(), &proposal); err != nil {
+		t.Fatalf("decode proposal: %v", err)
+	}
+	return wb, proposal
+}
+
+// decodeLockboxRequest decodes a recorder body into a LockboxApprovalRequest.
+func decodeLockboxRequest(t *testing.T, w *httptest.ResponseRecorder) LockboxApprovalRequest {
+	t.Helper()
+	var req LockboxApprovalRequest
+	if err := json.Unmarshal(w.Body.Bytes(), &req); err != nil {
+		t.Fatalf("decode lockbox request: %v", err)
+	}
+	return req
+}
+
+func TestWorkbenchLockboxRequest409NoProposal(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/lockbox/request", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxRequestFromCurrent(t *testing.T) {
+	files := []BuilderProposedFile{
+		{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"},
+		{Path: "b.go", Action: "delete", Content: "", Rationale: "y"},
+	}
+	wb, proposal := workbenchWithProposal(t, files)
+
+	w := postJSON(t, wb, "/api/workbench/lockbox/request", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	req := decodeLockboxRequest(t, w)
+	if req.ID == "" {
+		t.Error("expected id to be set")
+	}
+	if req.TS.IsZero() {
+		t.Error("expected ts to be set")
+	}
+	if req.ProposalID != proposal.ID {
+		t.Errorf("expected proposal_id=%q, got %q", proposal.ID, req.ProposalID)
+	}
+	if req.Goal != proposal.Goal {
+		t.Errorf("expected goal=%q, got %q", proposal.Goal, req.Goal)
+	}
+	if req.Status != "pending" {
+		t.Errorf("expected status=pending, got %q", req.Status)
+	}
+	if req.Summary != proposal.Summary {
+		t.Errorf("expected summary=%q, got %q", proposal.Summary, req.Summary)
+	}
+	if len(req.Files) != len(files) {
+		t.Fatalf("expected %d files, got %d", len(files), len(req.Files))
+	}
+	for i := range files {
+		if req.Files[i] != files[i] {
+			t.Errorf("file[%d]=%+v, want %+v", i, req.Files[i], files[i])
+		}
+	}
+	if req.DecisionTS != nil {
+		t.Errorf("expected nil decision_ts for pending, got %v", req.DecisionTS)
+	}
+	if req.DecisionReason != "" {
+		t.Errorf("expected empty decision_reason, got %q", req.DecisionReason)
+	}
+}
+
+func TestWorkbenchLockboxRequestFromExplicitID(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, proposal := workbenchWithProposal(t, files)
+
+	w := postJSON(t, wb, "/api/workbench/lockbox/request", `{"proposal_id":"`+proposal.ID+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	req := decodeLockboxRequest(t, w)
+	if req.ProposalID != proposal.ID {
+		t.Errorf("expected proposal_id=%q, got %q", proposal.ID, req.ProposalID)
+	}
+	if req.Status != "pending" {
+		t.Errorf("expected status=pending, got %q", req.Status)
+	}
+}
+
+func TestWorkbenchLockboxRequest404MissingProposal(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, _ := workbenchWithProposal(t, files)
+
+	w := postJSON(t, wb, "/api/workbench/lockbox/request", `{"proposal_id":"nonexistent"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxRequest409FailedProposal(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	server := startMockProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+	fr := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`)
+	if fr.Code != http.StatusBadGateway {
+		t.Fatalf("propose: expected 502, got %d: %s", fr.Code, fr.Body.String())
+	}
+
+	w := postJSON(t, wb, "/api/workbench/lockbox/request", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for failed proposal, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxRequestGET404(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/lockbox/request", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxRequestGETCurrent(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, _ := workbenchWithProposal(t, files)
+	created := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/lockbox/request", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	got := decodeLockboxRequest(t, w)
+	if got.ID != created.ID {
+		t.Errorf("expected current request id=%q, got %q", created.ID, got.ID)
+	}
+	if got.Status != "pending" {
+		t.Errorf("expected status=pending, got %q", got.Status)
+	}
+}
+
+func TestWorkbenchLockboxRequestsEmpty(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/lockbox/requests", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty requests, got %q", body)
+	}
+}
+
+func TestWorkbenchLockboxRequestsNewestLast(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	server := startMockProvider(t, proposalResponse("s", files))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"first"}`)
+	postJSON(t, wb, "/api/workbench/lockbox/request", `{}`)
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"second"}`)
+	postJSON(t, wb, "/api/workbench/lockbox/request", `{}`)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/lockbox/requests", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var reqs []LockboxApprovalRequest
+	if err := json.Unmarshal(w.Body.Bytes(), &reqs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(reqs))
+	}
+	if reqs[0].Goal != "first" {
+		t.Errorf("expected oldest goal=first, got %q", reqs[0].Goal)
+	}
+	if reqs[1].Goal != "second" {
+		t.Errorf("expected newest goal=second, got %q", reqs[1].Goal)
+	}
+}
+
+func TestWorkbenchLockboxApproveMissingID(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/lockbox/approve", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxApprove404(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"nope"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxApprove409AlreadyDecided(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, _ := workbenchWithProposal(t, files)
+	req := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+
+	first := postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"`+req.ID+`"}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first approve: expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+	second := postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"`+req.ID+`"}`)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second approve: expected 409, got %d: %s", second.Code, second.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxApproveUpdates(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, _ := workbenchWithProposal(t, files)
+	req := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+
+	w := postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"`+req.ID+`","reason":"looks good"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	got := decodeLockboxRequest(t, w)
+	if got.Status != "approved" {
+		t.Errorf("expected status=approved, got %q", got.Status)
+	}
+	if got.DecisionTS == nil || got.DecisionTS.IsZero() {
+		t.Error("expected decision_ts to be set")
+	}
+	if got.DecisionReason != "looks good" {
+		t.Errorf("expected decision_reason='looks good', got %q", got.DecisionReason)
+	}
+}
+
+func TestWorkbenchLockboxRejectMissingID(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/lockbox/reject", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxReject404(t *testing.T) {
+	wb := newWorkbench()
+	w := postJSON(t, wb, "/api/workbench/lockbox/reject", `{"id":"nope"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxReject409AlreadyDecided(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, _ := workbenchWithProposal(t, files)
+	req := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+
+	first := postJSON(t, wb, "/api/workbench/lockbox/reject", `{"id":"`+req.ID+`"}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first reject: expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+	second := postJSON(t, wb, "/api/workbench/lockbox/reject", `{"id":"`+req.ID+`"}`)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second reject: expected 409, got %d: %s", second.Code, second.Body.String())
+	}
+}
+
+func TestWorkbenchLockboxRejectUpdates(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, _ := workbenchWithProposal(t, files)
+	req := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+
+	w := postJSON(t, wb, "/api/workbench/lockbox/reject", `{"id":"`+req.ID+`","reason":"not safe"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	got := decodeLockboxRequest(t, w)
+	if got.Status != "rejected" {
+		t.Errorf("expected status=rejected, got %q", got.Status)
+	}
+	if got.DecisionTS == nil || got.DecisionTS.IsZero() {
+		t.Error("expected decision_ts to be set")
+	}
+	if got.DecisionReason != "not safe" {
+		t.Errorf("expected decision_reason='not safe', got %q", got.DecisionReason)
+	}
+}
+
+func TestWorkbenchLockboxEventsAppended(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	server := startMockProvider(t, proposalResponse("s", files))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"first"}`)
+	r1 := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+	postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"`+r1.ID+`"}`)
+
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"second"}`)
+	r2 := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+	postJSON(t, wb, "/api/workbench/lockbox/reject", `{"id":"`+r2.ID+`"}`)
+
+	msgs := map[string]string{}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "lockbox.") {
+			msgs[e.Type] = e.Message
+		}
+	}
+	want := map[string]string{
+		"lockbox.request.created":  "Created Lockbox approval request",
+		"lockbox.request.approved": "Approved Lockbox request",
+		"lockbox.request.rejected": "Rejected Lockbox request",
+	}
+	for typ, wantMsg := range want {
+		got, ok := msgs[typ]
+		if !ok {
+			t.Errorf("expected event %q to be appended", typ)
+			continue
+		}
+		if got != wantMsg {
+			t.Errorf("event %q: expected message %q, got %q", typ, wantMsg, got)
+		}
+	}
+}
+
+func TestWorkbenchLockboxNoAPIKey(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	const secret = "lockbox-top-secret"
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	server := startMockProvider(t, proposalResponse("s", files))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, secret, "m")
+
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"first"}`)
+	created := postJSON(t, wb, "/api/workbench/lockbox/request", `{}`)
+	assertNoSecret(t, "request create", secret, created.Body.Bytes())
+	r1 := decodeLockboxRequest(t, created)
+
+	for _, path := range []string{"/api/workbench/lockbox/request", "/api/workbench/lockbox/requests"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		wb.mux.ServeHTTP(rec, req)
+		assertNoSecret(t, path, secret, rec.Body.Bytes())
+	}
+
+	approved := postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"`+r1.ID+`","reason":"ok"}`)
+	assertNoSecret(t, "approve", secret, approved.Body.Bytes())
+
+	postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"second"}`)
+	r2 := decodeLockboxRequest(t, postJSON(t, wb, "/api/workbench/lockbox/request", `{}`))
+	rejected := postJSON(t, wb, "/api/workbench/lockbox/reject", `{"id":"`+r2.ID+`","reason":"no"}`)
+	assertNoSecret(t, "reject", secret, rejected.Body.Bytes())
+
+	// Lockbox event payloads must be clean too. (Other event types such as
+	// provider.configured legitimately carry an "api_key_set" flag, so only the
+	// lockbox events are checked here.)
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "lockbox.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+func TestWorkbenchLockboxApproveDoesNotModifyFiles(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	wb := newWorkbench()
+	dir := initGitRepo(t)
+	writeFile(t, dir, "main.go", "package main\n\nfunc main() {}\n")
+	writeFile(t, dir, "keep.txt", "keep me\n")
+
+	before := snapshotDir(t, dir)
+
+	files := []BuilderProposedFile{
+		{Path: "newfile.go", Action: "create", Content: "package newpkg\n", Rationale: "add"},
+		{Path: "main.go", Action: "modify", Content: "package main\n// rewritten\n", Rationale: "edit"},
+		{Path: "keep.txt", Action: "delete", Content: "", Rationale: "remove"},
+	}
+	server := startMockProvider(t, proposalResponse("touch everything", files))
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+
+	if pr := postJSON(t, wb, "/api/workbench/build/propose", `{"goal":"do it"}`); pr.Code != http.StatusCreated {
+		t.Fatalf("propose: expected 201, got %d: %s", pr.Code, pr.Body.String())
+	}
+	cr := postJSON(t, wb, "/api/workbench/lockbox/request", `{}`)
+	if cr.Code != http.StatusCreated {
+		t.Fatalf("request: expected 201, got %d: %s", cr.Code, cr.Body.String())
+	}
+	req := decodeLockboxRequest(t, cr)
+
+	ar := postJSON(t, wb, "/api/workbench/lockbox/approve", `{"id":"`+req.ID+`","reason":"go"}`)
+	if ar.Code != http.StatusOK {
+		t.Fatalf("approve: expected 200, got %d: %s", ar.Code, ar.Body.String())
 	}
 
 	after := snapshotDir(t, dir)
