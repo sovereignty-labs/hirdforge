@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -182,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore()}
+	wb := &workbench{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -1639,4 +1641,461 @@ func TestFallbackPlanDeterministic(t *testing.T) {
 	if c[0] != want[0] {
 		t.Errorf("fallback plan not independent across calls, got %q", c[0])
 	}
+}
+
+// writeFile writes content to dir/rel, creating parent directories as needed.
+func writeFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	p := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// inspectProjectAt calls GET /api/workbench/project/inspect and decodes the
+// resulting inspection, failing the test on a non-200 response.
+func inspectProjectAt(t *testing.T, wb *workbench) ProjectInspection {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project/inspect", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("inspect: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("inspect: expected application/json, got %q", got)
+	}
+	var insp ProjectInspection
+	if err := json.Unmarshal(w.Body.Bytes(), &insp); err != nil {
+		t.Fatalf("decode inspection: %v", err)
+	}
+	return insp
+}
+
+func TestWorkbenchProjectInspect409WithoutProject(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project/inspect", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProjectInspectGitRepo(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	writeFile(t, dir, "untracked.go", "package main\n")
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	insp := inspectProjectAt(t, wb)
+
+	if insp.Project.Path != dir {
+		t.Errorf("expected project.path=%q, got %q", dir, insp.Project.Path)
+	}
+	if !insp.Project.Git {
+		t.Error("expected project.git=true")
+	}
+	if len(insp.Files) == 0 {
+		t.Error("expected non-empty files")
+	}
+	if !strings.Contains(insp.GitStatus, "untracked.go") {
+		t.Errorf("expected git_status to mention untracked.go, got %q", insp.GitStatus)
+	}
+}
+
+func TestWorkbenchProjectInspectNonGitEmptyStatus(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	insp := inspectProjectAt(t, wb)
+
+	if insp.Project.Git {
+		t.Error("expected project.git=false for non-git dir")
+	}
+	if insp.GitStatus != "" {
+		t.Errorf("expected empty git_status for non-git dir, got %q", insp.GitStatus)
+	}
+}
+
+func TestWorkbenchProjectInspectSkipsHeavyDirs(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	writeFile(t, dir, "node_modules/pkg/index.js", "x")
+	writeFile(t, dir, "vendor/dep/d.go", "x")
+	writeFile(t, dir, "dist/out.js", "x")
+	writeFile(t, dir, "build/artifact.o", "x")
+	writeFile(t, dir, ".venv/lib/site.py", "x")
+	writeFile(t, dir, "__pycache__/c.pyc", "x")
+	writeFile(t, dir, "main.go", "package main\n")
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	insp := inspectProjectAt(t, wb)
+
+	for _, f := range insp.Files {
+		for _, bad := range []string{".git", "node_modules", "vendor", "dist", "build", ".venv", "__pycache__"} {
+			if f == bad || strings.HasPrefix(f, bad+"/") {
+				t.Errorf("expected %q to be skipped, but found %q", bad, f)
+			}
+		}
+	}
+	var foundMain bool
+	for _, f := range insp.Files {
+		if f == "main.go" {
+			foundMain = true
+		}
+	}
+	if !foundMain {
+		t.Errorf("expected main.go in files, got %v", insp.Files)
+	}
+}
+
+func TestWorkbenchProjectInspectDetectsLanguages(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	writeFile(t, dir, "a.go", "package main\n")
+	writeFile(t, dir, "b.py", "print(1)\n")
+	writeFile(t, dir, "c.ts", "const x = 1\n")
+	writeFile(t, dir, "d.rs", "fn main() {}\n")
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	insp := inspectProjectAt(t, wb)
+
+	langs := map[string]bool{}
+	for _, l := range insp.Languages {
+		langs[l] = true
+	}
+	for _, want := range []string{"Go", "Python", "TypeScript", "Rust"} {
+		if !langs[want] {
+			t.Errorf("expected language %q in %v", want, insp.Languages)
+		}
+	}
+}
+
+func TestWorkbenchProjectInspectDetectsConfigFiles(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	writeFile(t, dir, "go.mod", "module x\n")
+	writeFile(t, dir, "package.json", "{}\n")
+	writeFile(t, dir, "Dockerfile", "FROM scratch\n")
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	insp := inspectProjectAt(t, wb)
+
+	cfg := map[string]bool{}
+	for _, c := range insp.ConfigFiles {
+		cfg[c] = true
+	}
+	for _, want := range []string{"go.mod", "package.json", "Dockerfile"} {
+		if !cfg[want] {
+			t.Errorf("expected config file %q in %v", want, insp.ConfigFiles)
+		}
+	}
+}
+
+func TestWorkbenchProjectInspectInfersTestHints(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	writeFile(t, dir, "go.mod", "module x\n")
+	writeFile(t, dir, "Makefile", "test:\n\techo hi\n")
+	// Both Python config files present: pytest must still appear exactly once.
+	writeFile(t, dir, "pyproject.toml", "")
+	writeFile(t, dir, "requirements.txt", "")
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	insp := inspectProjectAt(t, wb)
+
+	hints := map[string]int{}
+	for _, h := range insp.TestHints {
+		hints[h]++
+	}
+	if hints["go test ./..."] == 0 {
+		t.Errorf("expected 'go test ./...' in %v", insp.TestHints)
+	}
+	if hints["make test"] == 0 {
+		t.Errorf("expected 'make test' in %v", insp.TestHints)
+	}
+	if hints["pytest"] != 1 {
+		t.Errorf("expected exactly one 'pytest' hint, got %d in %v", hints["pytest"], insp.TestHints)
+	}
+}
+
+func TestWorkbenchProjectInspectReadmeCapped(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	content := strings.Repeat("a", maxReadmeExcerpt+1000)
+	writeFile(t, dir, "README.md", content)
+
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	insp := inspectProjectAt(t, wb)
+
+	if got := len([]rune(insp.ReadmeExcerpt)); got != maxReadmeExcerpt {
+		t.Errorf("expected README excerpt capped to %d runes, got %d", maxReadmeExcerpt, got)
+	}
+	if !strings.HasPrefix(content, insp.ReadmeExcerpt) {
+		t.Error("expected excerpt to be a prefix of the README")
+	}
+}
+
+func TestWorkbenchProjectInspectedEvent(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	inspectProjectAt(t, wb)
+
+	events := wb.store.List()
+	var found *WorkbenchEvent
+	for i := range events {
+		if events[i].Type == "project.inspected" {
+			found = &events[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("project.inspected event not found")
+	}
+	if found.Message != "Inspected project "+filepath.Base(dir) {
+		t.Errorf("unexpected message: %q", found.Message)
+	}
+	if len(found.Data) == 0 {
+		t.Fatal("expected event to carry inspection data")
+	}
+	var data ProjectInspection
+	if err := json.Unmarshal(found.Data, &data); err != nil {
+		t.Fatalf("decode event data: %v", err)
+	}
+	if data.Project.Path != dir {
+		t.Errorf("expected event data project path %q, got %q", dir, data.Project.Path)
+	}
+}
+
+func TestWorkbenchProjectInspectionGET404(t *testing.T) {
+	wb := newWorkbench()
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project/inspection", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchProjectInspectionGETAfterInspect(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	dir := initGitRepo(t)
+	writeFile(t, dir, "main.go", "package main\n")
+	wb := newWorkbench()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	inspectProjectAt(t, wb)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project/inspection", nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var insp ProjectInspection
+	if err := json.Unmarshal(w.Body.Bytes(), &insp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if insp.Project.Path != dir {
+		t.Errorf("expected project path %q, got %q", dir, insp.Project.Path)
+	}
+	langs := map[string]bool{}
+	for _, l := range insp.Languages {
+		langs[l] = true
+	}
+	if !langs["Go"] {
+		t.Errorf("expected Go language, got %v", insp.Languages)
+	}
+}
+
+func TestWorkbenchBuildStartAutoInspects(t *testing.T) {
+	server := startMockProvider(t, planResponse([]string{"a step"}))
+	wb := newWorkbench()
+	openBuilderProvider(t, wb, server.URL, "k", "m")
+
+	if wb.inspection.Get() != nil {
+		t.Fatal("expected no inspection before build/start")
+	}
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"ship it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if wb.inspection.Get() == nil {
+		t.Fatal("expected build/start to auto-create an inspection")
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/workbench/project/inspection", nil)
+	rec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected inspection 200 after auto-inspect, got %d", rec.Code)
+	}
+	var found bool
+	for _, e := range wb.store.List() {
+		if e.Type == "project.inspected" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected project.inspected event from auto-inspect")
+	}
+}
+
+func TestWorkbenchBuildStartPromptIncludesInspection(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	server := startMockProvider(t, planResponse([]string{"a step"}))
+	wb := newWorkbench()
+	dir := initGitRepo(t)
+	writeFile(t, dir, "go.mod", "module x\n")
+	writeFile(t, dir, "main.go", "package main\n")
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var session BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if session.PromptPreview == nil {
+		t.Fatal("expected prompt_preview")
+	}
+	up := session.PromptPreview.UserPrompt
+	for _, want := range []string{
+		"Git status:",
+		"Config files:",
+		"go.mod",
+		"Languages:",
+		"Test hints:",
+		"go test ./...",
+		"Files (",
+		"- main.go",
+	} {
+		if !strings.Contains(up, want) {
+			t.Errorf("expected user prompt to contain %q, got:\n%s", want, up)
+		}
+	}
+}
+
+func TestWorkbenchBuildStartPromptFileCap(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	server := startMockProvider(t, planResponse([]string{"a step"}))
+	wb := newWorkbench()
+	dir := initGitRepo(t)
+	for i := 0; i < 120; i++ {
+		writeFile(t, dir, fmt.Sprintf("f%03d.txt", i), "x")
+	}
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+
+	w := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var session BuilderSession
+	if err := json.Unmarshal(w.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	up := session.PromptPreview.UserPrompt
+
+	var bullets int
+	for _, line := range strings.Split(up, "\n") {
+		if strings.HasPrefix(line, "- ") {
+			bullets++
+		}
+	}
+	if bullets != builderPromptMaxFiles {
+		t.Errorf("expected %d file bullet lines, got %d", builderPromptMaxFiles, bullets)
+	}
+	if !strings.Contains(up, "Files ("+strconv.Itoa(builderPromptMaxFiles)+" shown):") {
+		t.Errorf("expected file header to show %d, prompt:\n%s", builderPromptMaxFiles, up)
+	}
+}
+
+// assertNoAPIKey fails if body contains the provider secret or an api_key field.
+func assertNoAPIKey(t *testing.T, label, secret string, body []byte) {
+	t.Helper()
+	if strings.Contains(string(body), secret) {
+		t.Errorf("%s response leaked api key", label)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("%s: decode raw: %v", label, err)
+	}
+	if _, has := raw["api_key"]; has {
+		t.Errorf("%s response contains api_key field", label)
+	}
+}
+
+func TestWorkbenchInspectionAndBuildNoAPIKey(t *testing.T) {
+	if !gitAvailable(t) {
+		t.Skip("git not available")
+	}
+	const secret = "inspect-top-secret"
+	server := startMockProvider(t, planResponse([]string{"a step"}))
+	wb := newWorkbench()
+	dir := initGitRepo(t)
+	writeFile(t, dir, "main.go", "package main\n")
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"`+secret+`","model":"m"}`)
+
+	inspReq := httptest.NewRequest(http.MethodGet, "/api/workbench/project/inspect", nil)
+	inspRec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(inspRec, inspReq)
+	if inspRec.Code != http.StatusOK {
+		t.Fatalf("inspect expected 200, got %d", inspRec.Code)
+	}
+	assertNoAPIKey(t, "inspect", secret, inspRec.Body.Bytes())
+
+	buildRec := postJSON(t, wb, "/api/workbench/build/start", `{"goal":"do it"}`)
+	if buildRec.Code != http.StatusCreated {
+		t.Fatalf("build expected 201, got %d: %s", buildRec.Code, buildRec.Body.String())
+	}
+	assertNoAPIKey(t, "build", secret, buildRec.Body.Bytes())
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/workbench/project/inspection", nil)
+	getRec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("inspection GET expected 200, got %d", getRec.Code)
+	}
+	assertNoAPIKey(t, "inspection", secret, getRec.Body.Bytes())
 }
