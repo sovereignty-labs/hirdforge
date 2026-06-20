@@ -271,6 +271,34 @@ func TestWorkbenchUIAggregateReviewMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUILockboxApplyMarkers checks the served app.js carries the
+// Lockbox approval + apply-preview UX logic by stable identifier, and that the
+// actual apply (which writes files) is surfaced as explicitly not wired.
+func TestWorkbenchUILockboxApplyMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"approvalForAggregate",    // lockbox/approval state
+		"approvalReadiness",       // approval readiness gating
+		"renderApproval",          // approval display
+		"previewReadiness",        // apply preview readiness gating
+		"renderPreview",           // apply preview display
+		"requestAggregateLockbox", // request-approval action
+		"createApplyPreview",      // preview action
+		"not wired",               // explicit apply surfaced as not wired
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
@@ -4955,6 +4983,40 @@ func TestWorkbenchCortexAggregateLockboxCreatesRequest(t *testing.T) {
 	wb.mux.ServeHTTP(getRec, getReq)
 	if getRec.Code != http.StatusOK {
 		t.Errorf("GET lockbox/request: expected 200, got %d", getRec.Code)
+	}
+}
+
+func TestWorkbenchCortexAggregateLockboxReusesExisting(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"ship it","mode":"multi"}`)
+	seedLaneProposal(t, wb, task.ID, "2", []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "A"}})
+	postJSON(t, wb, "/api/workbench/cortex/aggregate", `{}`)
+
+	first := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: expected 201, got %d: %s", first.Code, first.Body.String())
+	}
+	var r1 LockboxApprovalRequest
+	json.Unmarshal(first.Body.Bytes(), &r1)
+
+	// A repeat for the same aggregate reuses the existing pending request (200,
+	// same id) instead of creating a duplicate approval.
+	second := postJSON(t, wb, "/api/workbench/cortex/aggregate/lockbox", `{}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("repeat: expected 200 (reuse), got %d: %s", second.Code, second.Body.String())
+	}
+	var r2 LockboxApprovalRequest
+	json.Unmarshal(second.Body.Bytes(), &r2)
+	if r2.ID != r1.ID {
+		t.Errorf("repeat returned request #%s, want existing #%s", r2.ID, r1.ID)
+	}
+
+	rec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/workbench/lockbox/requests", nil))
+	var list []LockboxApprovalRequest
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 {
+		t.Errorf("expected exactly 1 lockbox request after a repeat, got %d", len(list))
 	}
 }
 

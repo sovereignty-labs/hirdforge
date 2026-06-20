@@ -183,6 +183,7 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .review-panel:empty { display: none; }
 .review-panel { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
 .rev-head h2 { margin: 0 0 8px; }
+.rev-sec { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
 .rev-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
 .rev-btn { font-size: 12px; }
 .agg-head, .rev-r-head { font-size: 13px; margin-top: 8px; }

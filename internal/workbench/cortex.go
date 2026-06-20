@@ -1213,6 +1213,17 @@ func (wb *Server) handleCortexAggregateLockbox(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Reuse an existing active (pending or approved) Lockbox request for this
+	// aggregate instead of creating a duplicate approval. A rejected request does
+	// not block requesting a fresh one.
+	pid := "aggregate:" + agg.ID
+	for _, lr := range wb.lockbox.List() {
+		if lr.ProposalID == pid && (lr.Status == lockboxStatusPending || lr.Status == lockboxStatusApproved) {
+			writeJSON(w, http.StatusOK, lr)
+			return
+		}
+	}
+
 	goal := ""
 	if task := wb.cortex.Find(agg.TaskID); task != nil {
 		goal = task.Goal

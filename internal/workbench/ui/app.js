@@ -85,6 +85,15 @@ var api = {
     return request("POST", "/api/workbench/cortex/aggregate/review", { aggregate_id: aggregateId, lane_id: laneId });
   },
 
+  getLockboxRequests: function () { return request("GET", "/api/workbench/lockbox/requests"); },
+  requestAggregateLockbox: function (aggregateId) { return request("POST", "/api/workbench/cortex/aggregate/lockbox", { id: aggregateId }); },
+  approveLockbox: function (id, reason) { return request("POST", "/api/workbench/lockbox/approve", { id: id, reason: reason || "" }); },
+  rejectLockbox: function (id, reason) { return request("POST", "/api/workbench/lockbox/reject", { id: id, reason: reason || "" }); },
+  getApplyPreview: function () { return request("GET", "/api/workbench/cortex/apply/preview"); },
+  createApplyPreview: function (lockboxRequestId) {
+    return request("POST", "/api/workbench/cortex/apply/preview", { lockbox_request_id: lockboxRequestId });
+  },
+
   getLaneConversation: function () { return request("GET", "/api/workbench/lane-conversation"); },
   getLaneConversations: function () { return request("GET", "/api/workbench/lane-conversations"); },
   createLaneConversation: function (body) { return request("POST", "/api/workbench/lane-conversation", body); },
@@ -111,6 +120,8 @@ var state = {
   proposals: [],            // CortexLaneProposal list (builder lane proposals)
   aggregate: null,          // current CortexAggregateProposal
   review: null,             // current CortexAggregateReview
+  approvals: [],            // LockboxApprovalRequest list
+  applyPreview: null,       // current CortexApplyPreview
   events: [],
   error: "",
   loading: false,
@@ -604,7 +615,119 @@ function renderReviewPanel() {
   html += '<div class="hint">' + esc(ar.agg ? rr.hint : ar.hint) + "</div>";
   html += ar.agg ? renderAggregate(ar.agg) : '<div class="empty">No aggregate yet.</div>';
   if (rr.review) html += renderReview(rr.review);
+  html += renderLockboxApply();
   el.innerHTML = html;
+}
+
+// ---- lockbox approval + apply preview (the safe write boundary) -----------
+// approvalForAggregate finds the Lockbox request for an aggregate, preferring an
+// approved one, then pending, then most recent.
+function approvalForAggregate(aggId) {
+  if (!aggId) return null;
+  var pid = "aggregate:" + aggId;
+  var matches = state.approvals.filter(function (a) { return a.proposal_id === pid; });
+  if (!matches.length) return null;
+  matches.sort(function (a, b) {
+    var rank = function (s) { return s === "approved" ? 2 : (s === "pending" ? 1 : 0); };
+    var ra = rank(a.status), rb = rank(b.status);
+    if (ra !== rb) return rb - ra;
+    return (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0);
+  });
+  return matches[0];
+}
+
+// approvalReadiness gates "Request Lockbox Approval": a non-conflicted aggregate
+// with an "approve" Reviewer verdict, and no active request already.
+function approvalReadiness() {
+  var agg = currentAggregate();
+  var review = reviewReadiness().review;
+  var approval = agg ? approvalForAggregate(agg.id) : null;
+  var hasActive = !!(approval && (approval.status === "pending" || approval.status === "approved"));
+  var aggOK = !!(agg && agg.status === "aggregated");
+  var r = {
+    agg: agg,
+    approval: approval,
+    canRequest: aggOK && !!review && review.verdict === "approve" && !hasActive,
+    hint: "",
+  };
+  if (!agg) r.hint = "Aggregate proposals first.";
+  else if (!aggOK) r.hint = "Aggregate has conflicts — resolve before requesting approval.";
+  else if (!review) r.hint = "Run the Reviewer before requesting approval.";
+  else if (review.verdict !== "approve") r.hint = "Reviewer verdict is " + review.verdict + " — not approved for Lockbox.";
+  else if (hasActive) r.hint = "Lockbox request " + approval.status + ".";
+  else r.hint = "Request Lockbox approval for the reviewed aggregate.";
+  return r;
+}
+
+// previewReadiness gates "Preview Apply": an approved Lockbox request for the
+// current aggregate. The preview is read-only and never writes files.
+function previewReadiness() {
+  var agg = currentAggregate();
+  var approval = agg ? approvalForAggregate(agg.id) : null;
+  var approved = !!(approval && approval.status === "approved");
+  var preview = (state.applyPreview && approval && state.applyPreview.lockbox_request_id === approval.id) ? state.applyPreview : null;
+  var r = {
+    approval: approval,
+    preview: preview,
+    canPreview: !!agg && approved,
+    hint: "",
+  };
+  if (!agg) r.hint = "Aggregate proposals first.";
+  else if (!approval) r.hint = "Request Lockbox approval first.";
+  else if (approval.status !== "approved") r.hint = "Approve the Lockbox request to preview the apply.";
+  else if (preview) r.hint = "Apply preview ready — review changes, then apply explicitly.";
+  else r.hint = "Generate a read-only apply preview.";
+  return r;
+}
+
+function renderApproval(a) {
+  var statusCls = a.status === "approved" ? "ok" : (a.status === "rejected" ? "bad" : "warn");
+  var aggId = (a.proposal_id || "").indexOf("aggregate:") === 0 ? a.proposal_id.slice(10) : a.proposal_id;
+  var files = (a.files || []).length;
+  var html = '<div class="agg-head">lockbox <b>#' + esc(a.id) + '</b> · <span class="' + statusCls + '">' + esc(a.status) + "</span></div>";
+  html += '<div class="agg-sub">aggregate #' + esc(aggId) + (a.goal ? " · " + esc(a.goal) : "") + " · " + files + " file" + (files === 1 ? "" : "s") + "</div>";
+  if (a.decision_reason) html += '<div class="agg-summary">reason: ' + esc(a.decision_reason) + "</div>";
+  return html;
+}
+
+function renderPreview(p) {
+  var statusCls = p.status === "ready" ? "ok" : (p.status === "blocked" ? "warn" : (p.status === "failed" ? "bad" : "muted"));
+  var files = p.files || [];
+  var blocked = files.filter(function (f) { return f.status === "blocked" || f.error; }).length;
+  var html = '<div class="agg-head">apply preview <b>#' + esc(p.id) + '</b> · <span class="' + statusCls + '">' + esc(p.status) + "</span></div>";
+  html += '<div class="agg-sub">aggregate #' + esc(p.aggregate_id) + " · " + files.length + " file" + (files.length === 1 ? "" : "s") + " · " + blocked + " blocked</div>";
+  if (p.error) html += '<div class="bad agg-summary">' + esc(p.error) + "</div>";
+  if (files.length) {
+    html += '<ul class="agg-conf">' + files.map(function (f) {
+      var cls = (f.status === "blocked" || f.error) ? "bad" : "muted";
+      return '<li><span class="prop-action">' + esc(f.action) + '</span> <span class="mono">' + esc(truncPath(f.path)) +
+        '</span> · <span class="' + cls + '">' + esc(f.status) + (f.error ? " (" + esc(f.error) + ")" : "") + "</span></li>";
+    }).join("") + "</ul>";
+  }
+  return html;
+}
+
+// renderLockboxApply renders the Lockbox approval + apply-preview controls. The
+// actual apply (which writes files) is intentionally shown disabled in this
+// slice — the safe boundary is surfaced, writes are not rushed.
+function renderLockboxApply() {
+  var apr = approvalReadiness();
+  var pvr = previewReadiness();
+  if (!apr.agg) return "";
+  var html = '<div class="rev-sec"><div class="rev-actions">';
+  html += '<button class="rev-btn" data-action="request-approval"' + (apr.canRequest ? "" : " disabled") + ">Request Lockbox Approval</button>";
+  if (apr.approval && apr.approval.status === "pending") {
+    html += '<button class="rev-btn" data-action="approve">Approve</button>';
+    html += '<button class="rev-btn" data-action="reject">Reject</button>';
+  }
+  html += '<button class="rev-btn" data-action="preview"' + (pvr.canPreview ? "" : " disabled") + ">Preview Apply</button>";
+  html += '<button class="rev-btn" disabled title="Applying writes files to the project; not wired in this slice">Apply · explicit, not wired</button>';
+  html += "</div>";
+  html += '<div class="hint">' + esc(apr.approval ? pvr.hint : apr.hint) + "</div>";
+  if (apr.approval) html += renderApproval(apr.approval);
+  if (pvr.preview) html += renderPreview(pvr.preview);
+  html += "</div>";
+  return html;
 }
 
 // renderTaskSummary renders the compact Cortex task summary for the board head.
@@ -771,6 +894,16 @@ function renderDrawerScope() {
     parts.push(rvw
       ? "review #" + esc(rvw.id) + " · " + esc(rvw.status) + (rvw.verdict ? " · " + esc(rvw.verdict) : "")
       : '<span class="muted">no review</span>');
+  }
+  if (state.kind === "lockbox") {
+    var lagg = currentAggregate();
+    var ap = lagg ? approvalForAggregate(lagg.id) : null;
+    parts.push(ap ? "approval #" + esc(ap.id) + " · " + esc(ap.status) : '<span class="muted">no approval</span>');
+  }
+  if (state.kind === "apply") {
+    parts.push(state.applyPreview
+      ? "preview #" + esc(state.applyPreview.id) + " · " + esc(state.applyPreview.status)
+      : '<span class="muted">no preview</span>');
   }
   $("drawer-scope").innerHTML = parts.join(" · ");
 }
@@ -1017,6 +1150,52 @@ async function runReviewer() {
   renderReviewPanel(); renderInspector(); renderDrawer(); refreshEvents();
 }
 
+async function loadApprovals() {
+  var r = await api.getLockboxRequests();
+  if (r.ok && Array.isArray(r.data)) state.approvals = r.data;
+}
+
+async function loadPreview() {
+  var r = await api.getApplyPreview();
+  if (r.ok) state.applyPreview = r.data; else if (r.status === 404) state.applyPreview = null;
+}
+
+async function requestApproval() {
+  var agg = currentAggregate();
+  if (!agg) { showError("lockbox: aggregate proposals first"); return; }
+  var r = await api.requestAggregateLockbox(agg.id);
+  if (fail(r, "request approval")) return;
+  clearError();
+  await loadApprovals();
+  renderReviewPanel(); renderDrawer(); refreshEvents();
+}
+
+async function decideApproval(decision) {
+  var agg = currentAggregate();
+  var approval = agg ? approvalForAggregate(agg.id) : null;
+  if (!approval) { showError("lockbox: no approval request"); return; }
+  var r = decision === "approve" ? await api.approveLockbox(approval.id) : await api.rejectLockbox(approval.id);
+  if (fail(r, decision + " approval")) return;
+  clearError();
+  await loadApprovals();
+  renderReviewPanel(); renderDrawer(); refreshEvents();
+}
+
+async function generatePreview() {
+  var agg = currentAggregate();
+  var approval = agg ? approvalForAggregate(agg.id) : null;
+  if (!approval || approval.status !== "approved") { showError("preview: approve the Lockbox request first"); return; }
+  var r = await api.createApplyPreview(approval.id);
+  // ready/blocked/failed previews all carry an id (200/409/502); gate failures
+  // return plain text instead.
+  if (r.data && typeof r.data === "object" && r.data.id) {
+    state.applyPreview = r.data; clearError();
+  } else if (fail(r, "preview apply")) {
+    renderReviewPanel(); refreshEvents(); return;
+  }
+  renderReviewPanel(); renderDrawer(); refreshEvents();
+}
+
 // ---- Lane Console resize --------------------------------------------------
 var CONSOLE = { key: "hf.consoleHeight.v1", def: 320, min: 180, max: 560 };
 
@@ -1193,6 +1372,10 @@ function wire() {
   $("review-panel").addEventListener("click", function (e) {
     if (e.target.closest('[data-action="aggregate"]')) aggregateProposals();
     else if (e.target.closest('[data-action="review"]')) runReviewer();
+    else if (e.target.closest('[data-action="request-approval"]')) requestApproval();
+    else if (e.target.closest('[data-action="approve"]')) decideApproval("approve");
+    else if (e.target.closest('[data-action="reject"]')) decideApproval("reject");
+    else if (e.target.closest('[data-action="preview"]')) generatePreview();
   });
 
   function onEnter(id, fn) {
@@ -1230,9 +1413,12 @@ async function boot() {
     api.getLaneProposals(),
     api.getAggregate(),
     api.getReview(),
+    api.getLockboxRequests(),
+    api.getApplyPreview(),
   ]);
   var proj = r[0], prov = r[1], sess = r[2], sessions = r[3],
-    task = r[4], conv = r[5], convs = r[6], events = r[7], props = r[8], agg = r[9], review = r[10];
+    task = r[4], conv = r[5], convs = r[6], events = r[7], props = r[8], agg = r[9], review = r[10],
+    approvals = r[11], preview = r[12];
 
   if (proj.ok) state.project = proj.data;
   if (prov.ok) state.provider = prov.data;
@@ -1248,6 +1434,8 @@ async function boot() {
   if (props.ok && Array.isArray(props.data)) state.proposals = props.data;
   if (agg.ok) state.aggregate = agg.data;
   if (review.ok) state.review = review.data;
+  if (approvals.ok && Array.isArray(approvals.data)) state.approvals = approvals.data;
+  if (preview.ok) state.applyPreview = preview.data;
 
   // Re-apply the operator's last selection against the hydrated lanes.
   restoreSelection();
