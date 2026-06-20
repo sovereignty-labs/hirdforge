@@ -179,6 +179,20 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .role-reviewer { border-top: 2px solid var(--reviewer); }
 .role-validator { border-top: 2px solid var(--validator); }
 
+/* Task-level Aggregate & Review panel below the lane board. */
+.review-panel:empty { display: none; }
+.review-panel { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.rev-head h2 { margin: 0 0 8px; }
+.rev-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.rev-btn { font-size: 12px; }
+.agg-head, .rev-r-head { font-size: 13px; margin-top: 8px; }
+.agg-sub, .rev-r-sub { color: var(--muted); font-size: 11px; margin: 2px 0; }
+.agg-summary, .rev-r-summary { font-size: 12px; margin: 4px 0; white-space: pre-wrap; }
+.agg-conf-h, .rev-list-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+.rev-list-h { color: var(--muted); }
+.agg-conf, .rev-list { margin: 2px 0 0; padding-left: 16px; font-size: 11px; }
+.agg-conf li, .rev-list li { margin: 1px 0; }
+
 .inspector { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
 .ins-row { padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .ins-row b { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; margin-right: 6px; }

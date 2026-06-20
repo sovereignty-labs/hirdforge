@@ -245,6 +245,32 @@ func TestWorkbenchUIProposalMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUIAggregateReviewMarkers checks the served app.js carries the
+// aggregate/review UX logic by stable identifier: aggregate state/gating/display
+// and review state/gating/display.
+func TestWorkbenchUIAggregateReviewMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"aggregateReadiness", // aggregate state + readiness gating
+		"renderAggregate",    // aggregate display
+		"createAggregate",    // aggregate generate action
+		"reviewReadiness",    // review state + readiness gating
+		"renderReview",       // review display
+		"createReview",       // review generate action
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
@@ -5027,6 +5053,38 @@ func cortexReviewSetup(t *testing.T, handler http.HandlerFunc) (*Server, CortexT
 		t.Fatalf("decode aggregate: %v", err)
 	}
 	return wb, task, agg
+}
+
+func TestWorkbenchCortexAggregateReviewReusesExisting(t *testing.T) {
+	wb, task, agg := cortexReviewSetup(t, reviewResponse("approve", "ok", nil, nil))
+	rv := cortexFirstReviewerLane(t, task)
+
+	first := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"aggregate_id":"`+agg.ID+`","lane_id":"`+rv.ID+`"}`)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: expected 201, got %d: %s", first.Code, first.Body.String())
+	}
+	var r1 CortexAggregateReview
+	json.Unmarshal(first.Body.Bytes(), &r1)
+
+	// A repeat for the same aggregate + reviewer lane reuses the existing review
+	// (200, same id) and does not create a duplicate.
+	second := postJSON(t, wb, "/api/workbench/cortex/aggregate/review", `{"aggregate_id":"`+agg.ID+`","lane_id":"`+rv.ID+`"}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("repeat: expected 200 (reuse), got %d: %s", second.Code, second.Body.String())
+	}
+	var r2 CortexAggregateReview
+	json.Unmarshal(second.Body.Bytes(), &r2)
+	if r2.ID != r1.ID {
+		t.Errorf("repeat returned review #%s, want existing #%s", r2.ID, r1.ID)
+	}
+
+	rec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/aggregate/reviews?aggregate_id="+agg.ID, nil))
+	var list []CortexAggregateReview
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 {
+		t.Errorf("expected exactly 1 review for the aggregate after a repeat, got %d", len(list))
+	}
 }
 
 func TestWorkbenchCortexAggregateReviewRequiresLaneID(t *testing.T) {

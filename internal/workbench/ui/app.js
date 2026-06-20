@@ -78,6 +78,13 @@ var api = {
     return request("POST", "/api/workbench/cortex/lane/propose", { task_id: taskId, lane_id: laneId });
   },
 
+  getAggregate: function () { return request("GET", "/api/workbench/cortex/aggregate"); },
+  createAggregate: function (taskId) { return request("POST", "/api/workbench/cortex/aggregate", { task_id: taskId }); },
+  getReview: function () { return request("GET", "/api/workbench/cortex/aggregate/review"); },
+  createReview: function (aggregateId, laneId) {
+    return request("POST", "/api/workbench/cortex/aggregate/review", { aggregate_id: aggregateId, lane_id: laneId });
+  },
+
   getLaneConversation: function () { return request("GET", "/api/workbench/lane-conversation"); },
   getLaneConversations: function () { return request("GET", "/api/workbench/lane-conversations"); },
   createLaneConversation: function (body) { return request("POST", "/api/workbench/lane-conversation", body); },
@@ -102,6 +109,8 @@ var state = {
   selectedLane: null,
   laneConversation: null,   // current LaneConversation
   proposals: [],            // CortexLaneProposal list (builder lane proposals)
+  aggregate: null,          // current CortexAggregateProposal
+  review: null,             // current CortexAggregateReview
   events: [],
   error: "",
   loading: false,
@@ -472,6 +481,132 @@ function renderProposal(p) {
   return html;
 }
 
+// ---- aggregate + review helpers -------------------------------------------
+function proposedProposalsForTask() {
+  if (!state.cortexTask) return [];
+  return state.proposals.filter(function (p) {
+    return p.task_id === state.cortexTask.id && p.status === "proposed";
+  });
+}
+
+// sameIdSet compares two id lists as sets (order-independent).
+function sameIdSet(a, b) {
+  a = (a || []).slice().sort();
+  b = (b || []).slice().sort();
+  if (a.length !== b.length) return false;
+  for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+  return true;
+}
+
+function reviewerLane() {
+  return state.lanes.find(function (x) { return x.role === "reviewer"; }) || null;
+}
+
+// currentAggregate returns the current aggregate when it belongs to the current
+// task, else null.
+function currentAggregate() {
+  if (!state.aggregate || !state.cortexTask) return null;
+  return state.aggregate.task_id === state.cortexTask.id ? state.aggregate : null;
+}
+
+// aggregateReadiness gates "Aggregate Proposals": an aggregate that already
+// covers the exact current proposed set disables it (no duplicate); a changed
+// proposed set re-enables it.
+function aggregateReadiness() {
+  var proposed = proposedProposalsForTask();
+  var agg = currentAggregate();
+  var covered = !!agg && sameIdSet(agg.source_proposal_ids, proposed.map(function (p) { return p.id; }));
+  var r = {
+    proposedCount: proposed.length,
+    agg: agg,
+    canAggregate: !!state.cortexTask && proposed.length > 0 && !covered,
+    hint: "",
+  };
+  if (!state.cortexTask) r.hint = "Create a Cortex task first.";
+  else if (proposed.length === 0) r.hint = "Generate at least one Builder proposal to aggregate.";
+  else if (covered) r.hint = "Proposals already aggregated.";
+  else if (agg) r.hint = "New proposals — re-aggregate to include them.";
+  else r.hint = "Aggregate the Builder proposals for review.";
+  return r;
+}
+
+// reviewReadiness gates "Run Reviewer".
+function reviewReadiness() {
+  var agg = currentAggregate();
+  var lane = reviewerLane();
+  var review = (state.review && agg && state.review.aggregate_id === agg.id) ? state.review : null;
+  var r = {
+    agg: agg,
+    lane: lane,
+    review: review,
+    canReview: !!agg && !!lane && !!state.provider && !review,
+    hint: "",
+  };
+  if (!agg) r.hint = "Aggregate proposals before running the Reviewer.";
+  else if (!lane) r.hint = "No reviewer lane in this task.";
+  else if (!state.provider) r.hint = "Configure a provider to run the Reviewer.";
+  else if (review) r.hint = "Reviewer has reviewed this aggregate.";
+  else r.hint = "Run the Reviewer on the aggregate.";
+  return r;
+}
+
+// renderAggregate renders a compact aggregate: id, task, counts, status, and the
+// conflict list when present (no full diffs).
+function renderAggregate(a) {
+  var statusCls = a.status === "aggregated" ? "ok" : (a.status === "conflicted" ? "warn" : (a.status === "failed" ? "bad" : "muted"));
+  var src = (a.source_proposal_ids || []).length, files = (a.files || []).length, conf = (a.conflicts || []).length;
+  var html = '<div class="agg-head">aggregate <b>#' + esc(a.id) + '</b> · <span class="' + statusCls + '">' + esc(a.status) + "</span></div>";
+  html += '<div class="agg-sub">task #' + esc(a.task_id) + " · " + src + " proposal" + (src === 1 ? "" : "s") +
+    " · " + files + " file" + (files === 1 ? "" : "s") + " · " + conf + " conflict" + (conf === 1 ? "" : "s") + "</div>";
+  if (a.summary) html += '<div class="agg-summary">' + esc(a.summary) + "</div>";
+  if (conf) {
+    html += '<div class="agg-conf-h bad">conflicts</div><ul class="agg-conf">' +
+      a.conflicts.map(function (c) {
+        return '<li><span class="mono">' + esc(truncPath(c.path)) + "</span> — " + esc(c.reason) + "</li>";
+      }).join("") + "</ul>";
+  }
+  return html;
+}
+
+// renderReview renders a compact review: id, aggregate/task, status, verdict,
+// summary, risks (warnings), and recommendations.
+function renderReview(rv) {
+  var verdictCls = rv.verdict === "approve" ? "ok" : (rv.verdict === "reject" ? "bad" : "warn");
+  var html = '<div class="rev-r-head">review <b>#' + esc(rv.id) + '</b> · <span class="' + (rv.status === "failed" ? "bad" : "muted") + '">' + esc(rv.status) + "</span>";
+  if (rv.verdict) html += ' · <span class="' + verdictCls + '">' + esc(rv.verdict) + "</span>";
+  html += "</div>";
+  html += '<div class="rev-r-sub">aggregate #' + esc(rv.aggregate_id) + (rv.task_id ? " · task #" + esc(rv.task_id) : "") + "</div>";
+  if (rv.summary) html += '<div class="rev-r-summary">' + esc(rv.summary) + "</div>";
+  if (rv.error) html += '<div class="bad rev-r-summary">' + esc(rv.error) + "</div>";
+  function list(label, arr) {
+    if (!arr || !arr.length) return "";
+    return '<div class="rev-list-h">' + label + '</div><ul class="rev-list">' +
+      arr.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>";
+  }
+  html += list("risks", rv.risks);
+  html += list("recommendations", rv.recommendations);
+  return html;
+}
+
+// renderReviewPanel renders the task-level Aggregate & Review controls below the
+// lane board.
+function renderReviewPanel() {
+  var el = $("review-panel");
+  if (!el) return;
+  if (!state.cortexTask) { el.innerHTML = ""; return; }
+  var ar = aggregateReadiness();
+  var rr = reviewReadiness();
+  var html = '<div class="rev-head"><h2>Aggregate &amp; Review</h2></div>';
+  html += '<div class="rev-actions">' +
+    '<button class="rev-btn" data-action="aggregate"' + (ar.canAggregate ? "" : " disabled") + ">Aggregate Proposals</button>" +
+    '<button class="rev-btn" data-action="review"' + (rr.canReview ? "" : " disabled") + ">Run Reviewer</button>" +
+    "</div>";
+  html += '<div class="hint">' + esc(ar.agg ? rr.hint : ar.hint) + "</div>";
+  html += ar.agg ? renderAggregate(ar.agg) : '<div class="empty">No aggregate yet.</div>';
+  if (rr.review) html += renderReview(rr.review);
+  el.innerHTML = html;
+}
+
 // renderTaskSummary renders the compact Cortex task summary for the board head.
 function renderTaskSummary() {
   var t = state.cortexTask;
@@ -542,6 +677,13 @@ function renderInspector() {
       '<button class="prop-btn" data-action="gen-proposal"' + (pr.canGenerate ? "" : " disabled") + ">Generate Builder Proposal</button></div>" +
       (pr.existing ? renderProposal(pr.existing) : '<div class="empty">No proposal yet.</div>') +
       (pr.hint ? '<div class="hint">' + esc(pr.hint) + "</div>" : "") +
+      "</div>";
+  }
+
+  if (l.role === "reviewer") {
+    var rr = reviewReadiness();
+    rows += '<div class="ins-prop"><div class="ins-prop-head"><b>reviewer</b></div>' +
+      (rr.review ? renderReview(rr.review) : '<div class="empty">No review yet. Aggregate proposals, then Run Reviewer.</div>') +
       "</div>";
   }
   b.innerHTML = rows;
@@ -623,6 +765,13 @@ function renderDrawerScope() {
     var prop = proposalForLane(state.selectedLane.id);
     parts.push(prop ? "proposal #" + esc(prop.id) + " · " + esc(prop.status) : '<span class="muted">no proposal</span>');
   }
+  if (state.selectedLane && state.selectedLane.role === "reviewer") {
+    var agg = currentAggregate();
+    var rvw = (state.review && agg && state.review.aggregate_id === agg.id) ? state.review : null;
+    parts.push(rvw
+      ? "review #" + esc(rvw.id) + " · " + esc(rvw.status) + (rvw.verdict ? " · " + esc(rvw.verdict) : "")
+      : '<span class="muted">no review</span>');
+  }
   $("drawer-scope").innerHTML = parts.join(" · ");
 }
 
@@ -660,7 +809,7 @@ function renderEvents() {
 
 function renderAll() {
   renderHeader(); renderProject(); renderProvider(); renderArchitect();
-  renderBoard(); renderInspector(); renderDrawer(); renderEvents();
+  renderBoard(); renderReviewPanel(); renderInspector(); renderDrawer(); renderEvents();
 }
 
 // ---- actions --------------------------------------------------------------
@@ -833,7 +982,39 @@ async function generateProposal() {
   await loadProposals();
   if (fail(r, "generate proposal")) { renderInspector(); renderDrawer(); refreshEvents(); return; }
   clearError();
-  renderInspector(); renderDrawer(); refreshEvents();
+  renderInspector(); renderDrawer(); renderReviewPanel(); refreshEvents();
+}
+
+async function loadAggregate() {
+  var r = await api.getAggregate();
+  if (r.ok) state.aggregate = r.data; else if (r.status === 404) state.aggregate = null;
+}
+
+async function loadReview() {
+  var r = await api.getReview();
+  if (r.ok) state.review = r.data; else if (r.status === 404) state.review = null;
+}
+
+async function aggregateProposals() {
+  if (!state.cortexTask) { showError("aggregate: create a Cortex task first"); return; }
+  var r = await api.createAggregate(state.cortexTask.id);
+  if (fail(r, "aggregate proposals")) return;
+  clearError(); state.aggregate = r.data;
+  renderReviewPanel(); renderBoard(); renderInspector(); renderDrawer(); refreshEvents();
+}
+
+async function runReviewer() {
+  var agg = currentAggregate();
+  if (!agg) { showError("review: aggregate proposals first"); return; }
+  var lane = reviewerLane();
+  if (!lane) { showError("review: no reviewer lane in this task"); return; }
+  var r = await api.createReview(agg.id, lane.id);
+  // Failure returns 502 {review, error}; success / reuse returns the review.
+  if (r.data && r.data.review) state.review = r.data.review;
+  else if (r.data && typeof r.data === "object") state.review = r.data;
+  if (fail(r, "run reviewer")) { renderReviewPanel(); renderInspector(); renderDrawer(); refreshEvents(); return; }
+  clearError();
+  renderReviewPanel(); renderInspector(); renderDrawer(); refreshEvents();
 }
 
 // ---- Lane Console resize --------------------------------------------------
@@ -1009,6 +1190,10 @@ function wire() {
   $("inspector-body").addEventListener("click", function (e) {
     if (e.target.closest('[data-action="gen-proposal"]')) generateProposal();
   });
+  $("review-panel").addEventListener("click", function (e) {
+    if (e.target.closest('[data-action="aggregate"]')) aggregateProposals();
+    else if (e.target.closest('[data-action="review"]')) runReviewer();
+  });
 
   function onEnter(id, fn) {
     $(id).addEventListener("keydown", function (e) { if (e.key === "Enter") fn(); });
@@ -1043,9 +1228,11 @@ async function boot() {
     api.getLaneConversations(),
     api.getEvents(),
     api.getLaneProposals(),
+    api.getAggregate(),
+    api.getReview(),
   ]);
   var proj = r[0], prov = r[1], sess = r[2], sessions = r[3],
-    task = r[4], conv = r[5], convs = r[6], events = r[7], props = r[8];
+    task = r[4], conv = r[5], convs = r[6], events = r[7], props = r[8], agg = r[9], review = r[10];
 
   if (proj.ok) state.project = proj.data;
   if (prov.ok) state.provider = prov.data;
@@ -1059,6 +1246,8 @@ async function boot() {
   if (convs.ok && Array.isArray(convs.data)) state.conversations = convs.data;
   if (events.ok && Array.isArray(events.data)) state.events = events.data;
   if (props.ok && Array.isArray(props.data)) state.proposals = props.data;
+  if (agg.ok) state.aggregate = agg.data;
+  if (review.ok) state.review = review.data;
 
   // Re-apply the operator's last selection against the hydrated lanes.
   restoreSelection();

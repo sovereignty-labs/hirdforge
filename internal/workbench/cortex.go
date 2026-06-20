@@ -1566,6 +1566,17 @@ func (wb *Server) handleCortexAggregateReview(w http.ResponseWriter, r *http.Req
 			return
 		}
 
+		// Reuse an existing successful review for this aggregate + reviewer lane
+		// instead of generating a duplicate. A failed review stays retryable. This
+		// runs before the provider check so an existing review is returned
+		// regardless of provider state.
+		for _, rv := range wb.cortexReviews.ListByAggregate(agg.ID) {
+			if rv.LaneID == lane.ID && rv.Status == cortexReviewStatusReviewed {
+				writeJSON(w, http.StatusOK, rv)
+				return
+			}
+		}
+
 		cfg := wb.provider.Config()
 		if cfg == nil {
 			http.Error(w, "provider must be configured", http.StatusConflict)
