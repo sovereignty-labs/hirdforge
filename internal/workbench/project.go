@@ -84,20 +84,20 @@ func (wb *Server) handleProjectOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !filepath.IsAbs(in.Path) {
-		http.Error(w, "path must be absolute", http.StatusBadRequest)
+		http.Error(w, `path must be an absolute path on this machine (e.g. /home/you/project or C:\Users\You\project)`, http.StatusBadRequest)
 		return
 	}
 	info, err := os.Stat(in.Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			http.Error(w, "path does not exist", http.StatusBadRequest)
+			http.Error(w, "path does not exist: "+in.Path, http.StatusBadRequest)
 			return
 		}
-		http.Error(w, "stat: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "cannot read path "+in.Path+": "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	if !info.IsDir() {
-		http.Error(w, "path must be a directory", http.StatusBadRequest)
+		http.Error(w, "path is not a directory: "+in.Path, http.StatusBadRequest)
 		return
 	}
 

@@ -116,6 +116,37 @@ func TestWorkbenchUIResumeMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUISetupMarkers checks the served UI carries the setup-hardening
+// logic: the operator progress strip, API key input clearing, and the provider
+// configured/test states. Markers are stable identifiers, not full content.
+func TestWorkbenchUISetupMarkers(t *testing.T) {
+	mux := New().mux
+	getBody := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	js := getBody("/app.js")
+	for _, marker := range []string{
+		"renderProgress",   // operator progress strip logic
+		"renderNextHint",   // next-step guidance
+		"clearApiKeyInput", // API key input cleared after save
+		"untested",         // configured-but-untested provider state
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+	if html := getBody("/"); !strings.Contains(html, "progress-strip") {
+		t.Error("expected index to contain the progress strip")
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
@@ -420,6 +451,9 @@ func TestWorkbenchProjectOpenRelative(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), "absolute") {
+		t.Errorf("expected an 'absolute' hint in the error, got: %q", w.Body.String())
+	}
 }
 
 func TestWorkbenchProjectOpenMissing(t *testing.T) {
@@ -429,6 +463,9 @@ func TestWorkbenchProjectOpenMissing(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "does not exist") {
+		t.Errorf("expected 'does not exist' in the error, got: %q", w.Body.String())
 	}
 }
 
@@ -444,6 +481,9 @@ func TestWorkbenchProjectOpenFile(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not a directory") {
+		t.Errorf("expected 'not a directory' in the error, got: %q", w.Body.String())
 	}
 }
 

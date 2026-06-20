@@ -139,6 +139,13 @@ function fmtTs(ts) {
 function showError(msg) { state.error = msg; var e = $("error"); e.textContent = msg; e.classList.remove("hidden"); }
 function clearError() { state.error = ""; var e = $("error"); e.textContent = ""; e.classList.add("hidden"); }
 
+// clearApiKeyInput wipes the API key field so the secret is not left visible in
+// the browser after it has been sent to the local backend.
+function clearApiKeyInput() {
+  var el = $("provider-key");
+  if (el) el.value = "";
+}
+
 // fail surfaces a failed call and returns true so callers can early-return.
 function fail(r, ctx) {
   if (!r.ok) { showError(ctx + ": " + (r.error || ("HTTP " + r.status))); return true; }
@@ -155,6 +162,49 @@ function renderChips() {
     chip("task", state.cortexTask ? ("#" + state.cortexTask.id + " " + state.cortexTask.status) : "—");
 }
 
+// progressSteps describes the first operator loop, each step "done" once its
+// state exists. The strip derives done/current/not-started from these.
+function progressSteps() {
+  return [
+    { label: "Project", done: !!state.project },
+    { label: "Provider", done: !!state.provider },
+    { label: "Architect", done: !!state.architectSession },
+    { label: "Cortex Task", done: !!state.cortexTask },
+    { label: "Lane Console", done: !!state.laneConversation },
+  ];
+}
+
+function renderProgress() {
+  var el = $("progress");
+  if (!el) return;
+  var currentSet = false;
+  el.innerHTML = progressSteps().map(function (s) {
+    var cls = "step";
+    if (s.done) cls += " done";
+    else if (!currentSet) { cls += " current"; currentSet = true; } // first not-done = current
+    else cls += " todo";
+    return '<span class="' + cls + '">' + esc(s.label) + "</span>";
+  }).join('<span class="step-sep">→</span>');
+}
+
+// renderNextHint gives the operator a single, obvious next action.
+function renderNextHint() {
+  var el = $("next-hint");
+  if (!el) return;
+  var msg;
+  if (!state.project) msg = "Open a local project to begin.";
+  else if (!state.provider) msg = "Configure a provider next.";
+  else if (!state.architectSession) msg = "Start an Architect session.";
+  else if (!state.cortexTask) msg = "Refine the spec, accept it, then create a Cortex task.";
+  else if (!state.laneConversation) msg = "Select a lane and open the Lane Console.";
+  else msg = "Setup complete — the operator loop is live.";
+  el.textContent = "Next: " + msg;
+}
+
+// renderHeader keeps the chips, progress strip, and next hint in sync; call it
+// wherever a setup-affecting state field changes.
+function renderHeader() { renderChips(); renderProgress(); renderNextHint(); }
+
 function renderProject() {
   var m = $("project-meta");
   if (!state.project) { m.textContent = "No project open."; return; }
@@ -166,17 +216,23 @@ function renderProject() {
 
 function renderProvider() {
   var m = $("provider-meta");
-  var s = "";
-  if (state.provider) {
-    s += "<div>model <b>" + esc(state.provider.model) + "</b> · key " + (state.provider.api_key_set ? "set" : "unset") + "</div>";
-    s += '<div class="mono">' + esc(state.provider.base_url) + "</div>";
+  if (!state.provider) { m.innerHTML = '<div class="empty">No provider configured.</div>'; return; }
+  var p = state.provider;
+  var s = "<div>model <b>" + esc(p.model) + "</b></div>";
+  s += '<div class="mono">' + esc(p.base_url) + "</div>";
+  s += "<div>api key: " + (p.api_key_set
+    ? '<span class="ok">set</span> <span class="muted">(stored on the local backend; not shown again)</span>'
+    : '<span class="bad">unset</span>') + "</div>";
+
+  // Test state: configured-but-untested, test ok, or test failed.
+  var t = state.providerTest;
+  if (!t) {
+    s += '<div class="warn">configured · untested — run Test</div>';
+  } else if (t.ok) {
+    s += '<div class="ok">test ok · status ' + esc(t.status != null ? t.status : "") +
+      (t.model ? " · model " + esc(t.model) : "") + "</div>";
   } else {
-    s = "No provider configured.";
-  }
-  if (state.providerTest) {
-    var t = state.providerTest;
-    s += '<div class="' + (t.ok ? "ok" : "bad") + '">test: ' +
-      (t.ok ? "ok (" + esc(t.model || "") + ")" : "failed — " + esc(t.error || t.status)) + "</div>";
+    s += '<div class="bad">test failed — ' + esc(t.error || ("HTTP " + (t.status != null ? t.status : "?"))) + "</div>";
   }
   m.innerHTML = s;
 }
@@ -298,7 +354,7 @@ function renderEvents() {
 }
 
 function renderAll() {
-  renderChips(); renderProject(); renderProvider(); renderArchitect();
+  renderHeader(); renderProject(); renderProvider(); renderArchitect();
   renderBoard(); renderInspector(); renderDrawer(); renderEvents();
 }
 
@@ -313,7 +369,7 @@ async function openProject() {
   if (!path) { showError("project: path is required"); return; }
   var r = await api.openProject(path);
   if (fail(r, "open project")) return;
-  clearError(); state.project = r.data; renderProject(); renderChips(); refreshEvents();
+  clearError(); state.project = r.data; renderProject(); renderHeader(); refreshEvents();
 }
 
 async function saveProvider() {
@@ -324,7 +380,11 @@ async function saveProvider() {
   };
   var r = await api.saveProvider(config);
   if (fail(r, "save provider")) return;
-  clearError(); state.provider = r.data; state.providerTest = null; renderProvider(); renderChips(); refreshEvents();
+  clearError();
+  state.provider = r.data;
+  state.providerTest = null;   // freshly saved -> configured but untested
+  clearApiKeyInput();          // never leave the key visible in the browser
+  renderProvider(); renderHeader(); refreshEvents();
 }
 
 async function testProvider() {
@@ -344,7 +404,7 @@ async function startSession() {
   if (!goal) { showError("architect: goal is required"); return; }
   var r = await api.createArchitectSession(goal);
   if (fail(r, "start session")) return;
-  clearError(); setArchitectSession(r.data); await loadSessions(); renderArchitect(); renderChips(); refreshEvents();
+  clearError(); setArchitectSession(r.data); await loadSessions(); renderArchitect(); renderHeader(); refreshEvents();
 }
 
 async function loadSessions() {
@@ -376,7 +436,7 @@ async function createTask() {
   var r = await api.createCortexTask(state.architectSession.id);
   if (fail(r, "create cortex task")) return;
   clearError(); setCortexTask(r.data); state.selectedLane = null; persistSelection();
-  renderBoard(); renderInspector(); renderChips(); refreshEvents();
+  renderBoard(); renderInspector(); renderHeader(); refreshEvents();
 }
 
 function selectLane(id) {
@@ -409,7 +469,7 @@ async function newConversation() {
   }
   var r = await api.createLaneConversation(body);
   if (fail(r, "new conversation")) return;
-  clearError(); state.laneConversation = r.data; renderDrawer(); refreshEvents(); loadConversations();
+  clearError(); state.laneConversation = r.data; renderDrawer(); renderHeader(); refreshEvents(); loadConversations();
 }
 
 async function sendConversation() {
@@ -426,7 +486,7 @@ async function closeConversation() {
   if (!state.laneConversation) return;
   var r = await api.closeLaneConversation(state.laneConversation.id);
   if (fail(r, "close conversation")) return;
-  clearError(); state.laneConversation = r.data; renderDrawer(); refreshEvents(); loadConversations();
+  clearError(); state.laneConversation = r.data; renderDrawer(); renderHeader(); refreshEvents(); loadConversations();
 }
 
 async function loadConversations() {

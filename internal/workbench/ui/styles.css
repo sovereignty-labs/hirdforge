@@ -43,6 +43,8 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .field { display: flex; gap: 6px; margin-bottom: 8px; }
 .field input { flex: 1; }
 .meta { color: var(--muted); font-size: 12px; }
+.muted { color: var(--muted); }
+.warn { color: var(--accent); }
 .hint { color: var(--muted); font-size: 11px; margin-top: -2px; margin-bottom: 8px; }
 .hint code, code { font-family: ui-monospace, "SF Mono", Menlo, monospace; background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 11px; }
 .empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 6px 0; }
@@ -68,6 +70,24 @@ input:focus { outline: none; border-color: var(--accent-2); }
   margin: 10px 16px 0; padding: 8px 12px; border-radius: 6px; flex: none;
   background: #3a2422; border: 1px solid var(--bad); color: #f0c4bd; font-size: 13px;
 }
+
+/* Operator progress strip: Project -> Provider -> Architect -> Cortex Task ->
+   Lane Console, each step shown as done / current / not-started. */
+.progress-strip {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  flex: none; flex-wrap: wrap;
+}
+.progress { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.step {
+  font-size: 12px; padding: 3px 10px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted);
+}
+.step.done { color: var(--ok); border-color: var(--ok); }
+.step.current { color: #1a1408; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.step.todo { opacity: 0.55; }
+.step-sep { color: var(--muted); }
+.next-hint { font-size: 12px; color: var(--accent-2); }
 
 /* Resume cues: a compact line listing what boot recovered after a reload. */
 .resume {
