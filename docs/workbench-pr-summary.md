@@ -23,14 +23,19 @@ validation. All product logic lives in `internal/workbench`; the UI is embedded
 via `//go:embed` (`index.html` / `styles.css` / `app.js`) — vanilla JS, no
 framework, no Node build step.
 
-### Branch composition (note for the reviewer)
+### Branch composition
 
-The diff against `main` (`b8c19bd`) contains **37 commits**. The Workbench MVP is
-the top **33** (`0feb57e..HEAD`). The bottom **4** (`4523acc`, `0160266`,
-`dbdfffd`, `5a1d125`) are pre-existing Phase-4 staging-substrate commits that
-landed on this branch earlier (`.autonomy.yaml`, `.gitea/workflows/build.yaml`,
-`cmd/agent/staging_*`, `docs/phase4-staging-runbook.md`). If those should ship
-separately, rebase before merge.
+PR this clean branch: **`feat/hirdforge-workbench-local-clean`** (from `main`,
+`b8c19bd`). It contains exactly the **34** Workbench MVP commits
+(`0feb57e..HEAD`); `git diff --stat main...HEAD` is purely Workbench files
+(`internal/workbench/`, `cmd/hirdforge-workbench/`, `docs/workbench-*`,
+`docs/adr-hirdforge-workbench-local.md`).
+
+The 4 pre-existing Phase-4 staging-substrate commits (`4523acc`, `0160266`,
+`dbdfffd`, `5a1d125`) that rode along on the original `feat/hirdforge-workbench-local`
+branch have been **excluded** here; they belong to `feat/phase4-staging-substrate`
+(`4523acc` + `0160266` are already on `origin/main`). The original branch is
+preserved, and a backup exists at `backup/workbench-mvp-d4e7c82`.
 
 ## Safety / idempotency guarantees
 
@@ -104,7 +109,6 @@ node --check internal/workbench/ui/app.js
 - Persistence durability (survive restarts).
 - Richer diffs in preview/apply.
 - Deeper validation configuration (multiple commands, per-project defaults).
-- Optionally split the Phase-4 staging-substrate commits out of this branch.
 
 See also: `docs/workbench-mvp-status.md`, `docs/workbench-api-routes.md`,
 `docs/workbench-operator-loop-smoke.md`.
