@@ -142,8 +142,15 @@ func TestWorkbenchUISetupMarkers(t *testing.T) {
 			t.Errorf("expected app.js to contain %q", marker)
 		}
 	}
-	if html := getBody("/"); !strings.Contains(html, "progress-strip") {
-		t.Error("expected index to contain the progress strip")
+	html := getBody("/")
+	for _, marker := range []string{
+		`id="project-path"`,   // project open input
+		`id="provider-key"`,   // provider key input (never displayed back)
+		`id="architect-goal"`, // architect goal → spec input
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("expected index to contain %q", marker)
+		}
 	}
 }
 
@@ -348,6 +355,62 @@ func TestWorkbenchUIRunSummaryMarkers(t *testing.T) {
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
+// TestWorkbenchUIShellMarkers checks the focused-shell navigation slice: the
+// served app.js carries the frontend-only view state + stage-rail switching +
+// event ticker + the split aggregate/lockbox/apply stage renderers, and the
+// served index carries the stage rail, the five stages, the lane-first default
+// view, the Log stage, and the always-on event ticker.
+func TestWorkbenchUIShellMarkers(t *testing.T) {
+	mux := New().mux
+	getBody := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	js := getBody("/app.js")
+	for _, marker := range []string{
+		"hf.workbenchView.v1", // view persistence key (separate from selection keys)
+		"state.view",          // frontend-only focused-stage state
+		"function setView",    // stage-rail switching
+		"function applyView",  // body[data-view] + active-nav reflection
+		"renderTicker",        // bottom event ticker (latest event)
+		"renderAggregateView", // aggregate stage split out of the old combined panel
+		"renderLockboxView",   // lockbox stage
+		"renderApplyView",     // apply (write-boundary) stage
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+
+	html := getBody("/")
+	for _, marker := range []string{
+		`class="navrail"`,          // stage rail
+		`data-view="lanes"`,        // lane-first default stage rail item
+		`data-view="aggregate"`,    // agg stage rail item
+		`data-view="lockbox"`,      // lock stage rail item
+		`data-view="apply"`,        // apply stage rail item
+		`data-view="log"`,          // log stage rail item
+		`<body data-view="lanes">`, // default focused stage is lanes
+		`class="view view-lanes"`,  // lane-first default workspace
+		`id="view-aggregate"`,      // aggregate stage container
+		`id="view-lockbox"`,        // lockbox stage container
+		`id="view-apply"`,          // apply stage container
+		`class="ticker"`,           // always-on event ticker
+		`id="ticker-msg"`,          // ticker latest-event slot
+		`id="btn-open-log"`,        // ticker "Open log" → Log stage
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("expected index to contain %q", marker)
 		}
 	}
 }

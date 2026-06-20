@@ -145,10 +145,41 @@ var state = {
   sessionCount: 0,
   kind: "architect",        // active Lane Console context kind
   conversations: [],
+  view: "lanes",            // focused-shell stage: lanes|aggregate|lockbox|apply|log
 };
 
 var KINDS = ["architect", "builder", "reviewer", "validator", "lockbox", "apply"];
 var LANE_KINDS = ["builder", "reviewer", "validator"];
+
+// Focused-shell stage rail. The active view is the only stage shown; switching
+// is purely frontend (CSS via body[data-view]) and persisted, independent of
+// the loop's backend state. VIEW_KEY is separate from the selection keys so it
+// can never disturb hf.selectedLaneId.v1 / hf.selectedConsoleKind.v1.
+var VIEWS = ["lanes", "aggregate", "lockbox", "apply", "log"];
+var VIEW_KEY = "hf.workbenchView.v1";
+
+function applyView() {
+  if (document.body) document.body.setAttribute("data-view", state.view);
+  var items = document.querySelectorAll(".nav-item");
+  for (var i = 0; i < items.length; i++) {
+    var v = items[i].getAttribute("data-view");
+    if (v === state.view) items[i].classList.add("active");
+    else items[i].classList.remove("active");
+  }
+}
+
+function setView(view) {
+  if (VIEWS.indexOf(view) < 0) view = "lanes";
+  state.view = view;
+  lsSet(VIEW_KEY, view);
+  applyView();
+}
+
+function restoreView() {
+  var v = lsGet(VIEW_KEY);
+  if (v && VIEWS.indexOf(v) >= 0) state.view = v;
+  applyView();
+}
 
 // Whenever the architect session changes, keep the message/spec mirrors in sync.
 function setArchitectSession(session) {
@@ -678,15 +709,31 @@ function renderReview(rv) {
   return html;
 }
 
-// renderReviewPanel renders the task-level Aggregate & Review controls below the
-// lane board.
+// renderReviewPanel refreshes the three focused stages that carry the back half
+// of the loop — Aggregate & Review, Lockbox approval, and the Apply write
+// boundary — each into its own stage container. Loop actions call this after a
+// mutation; the stage rail decides which one is actually on screen.
 function renderReviewPanel() {
-  var el = $("review-panel");
+  renderAggregateView();
+  renderLockboxView();
+  renderApplyView();
+  // Keep the loop-wide Next hint and Run Summary fresh after aggregate → apply
+  // actions (which re-render these stages but not the header).
+  renderNextHint(); renderRunSummary();
+}
+
+// renderAggregateView renders the Aggregate & Review stage (Agg).
+function renderAggregateView() {
+  var el = $("view-aggregate");
   if (!el) return;
-  if (!state.cortexTask) { el.innerHTML = ""; return; }
+  if (!state.cortexTask) {
+    el.innerHTML = '<div class="stage-head"><h2>Aggregate &amp; Review</h2></div>' +
+      '<div class="empty">Create a Cortex task (Lanes) before aggregating proposals.</div>';
+    return;
+  }
   var ar = aggregateReadiness();
   var rr = reviewReadiness();
-  var html = '<div class="rev-head"><h2>Aggregate &amp; Review</h2></div>';
+  var html = '<div class="stage-head"><h2>Aggregate &amp; Review</h2></div>';
   html += '<div class="rev-actions">' +
     '<button class="rev-btn" data-action="aggregate"' + (ar.canAggregate ? "" : " disabled") + ">Aggregate Proposals</button>" +
     '<button class="rev-btn" data-action="review"' + (rr.canReview ? "" : " disabled") + ">Run Reviewer</button>" +
@@ -694,11 +741,7 @@ function renderReviewPanel() {
   html += '<div class="hint">' + esc(ar.agg ? rr.hint : ar.hint) + "</div>";
   html += ar.agg ? renderAggregate(ar.agg) : '<div class="empty">No aggregate yet — aggregate the Builder proposals to review them together.</div>';
   if (rr.review) html += renderReview(rr.review);
-  html += renderLockboxApply();
   el.innerHTML = html;
-  // Keep the loop-wide Next hint and Run Summary fresh after aggregate → apply
-  // actions (which re-render this panel but not the header).
-  renderNextHint(); renderRunSummary();
 }
 
 // ---- lockbox approval + apply preview (the safe write boundary) -----------
@@ -872,16 +915,20 @@ function renderValidation(v) {
   return html;
 }
 
-// renderLockboxApply renders the Lockbox approval + read-only preview controls,
-// then the explicit write boundary (apply + post-apply validation). Apply is a
-// guarded, confirmed action — never automatic.
-function renderLockboxApply() {
+// renderLockboxView renders the Lockbox approval + read-only preview stage
+// (Lock). No writes happen here — preview is read-only and approval is the
+// human gate that unlocks the Apply stage.
+function renderLockboxView() {
+  var el = $("view-lockbox");
+  if (!el) return;
   var apr = approvalReadiness();
   var pvr = previewReadiness();
-  if (!apr.agg) return "";
-
-  // Lockbox approval + read-only preview (no writes).
-  var html = '<div class="rev-sec"><div class="rev-actions">';
+  var html = '<div class="stage-head"><h2>Lockbox Approval</h2></div>';
+  if (!apr.agg) {
+    el.innerHTML = html + '<div class="empty">Aggregate the Builder proposals (Agg) before requesting Lockbox approval.</div>';
+    return;
+  }
+  html += '<div class="rev-actions">';
   html += '<button class="rev-btn" data-action="request-approval"' + (apr.canRequest ? "" : " disabled") + ">Request Lockbox Approval</button>";
   if (apr.approval && apr.approval.status === "pending") {
     html += '<button class="rev-btn" data-action="approve">Approve</button>';
@@ -892,13 +939,24 @@ function renderLockboxApply() {
   html += '<div class="hint">' + esc(apr.approval ? pvr.hint : apr.hint) + "</div>";
   if (apr.approval) html += renderApproval(apr.approval);
   if (pvr.preview) html += renderPreview(pvr.preview);
-  html += "</div>";
+  el.innerHTML = html;
+}
 
-  // Explicit write boundary: Apply writes files (guarded + confirmed), then
-  // optional post-apply validation.
+// renderApplyView renders the explicit write boundary stage (Apply): the
+// guarded, confirmed apply, then optional post-apply validation. Apply is never
+// automatic.
+function renderApplyView() {
+  var el = $("view-apply");
+  if (!el) return;
+  var apr = approvalReadiness();
+  var html = '<div class="stage-head"><h2>Apply &amp; Validation</h2></div>';
+  if (!apr.agg) {
+    el.innerHTML = html + '<div class="empty">Approve a Lockbox request and preview it (Lock) before applying.</div>';
+    return;
+  }
   var ar = applyReadiness();
   var vr = validationReadiness();
-  html += '<div class="rev-sec write-boundary">';
+  html += '<div class="write-boundary">';
   html += '<div class="write-label">Write boundary — Apply writes files to your project</div>';
   html += '<div class="rev-actions">';
   html += '<button class="rev-btn apply-btn" data-action="apply"' + (ar.canApply ? "" : " disabled") + ' title="Writes the approved files to your project on disk">Apply Approved Preview</button>';
@@ -909,8 +967,7 @@ function renderLockboxApply() {
   if (ar.applied) html += renderApplyResult(ar.applied);
   if (vr.validation) html += renderValidation(vr.validation);
   html += "</div>";
-
-  return html;
+  el.innerHTML = html;
 }
 
 // renderTaskSummary renders the compact Cortex task summary for the board head.
@@ -1119,17 +1176,33 @@ function renderDrawer() {
 
 function renderEvents() {
   var list = $("event-list");
-  var evs = state.events.slice().reverse(); // newest first
-  list.innerHTML = evs.map(function (e) {
-    return '<div class="event"><span class="ev-type">' + esc(e.type) + "</span>" +
-      '<span class="ev-msg">' + esc(e.message || "") + "</span>" +
-      '<span class="ev-ts">' + esc(fmtTs(e.ts)) + "</span></div>";
-  }).join("") || '<div class="empty">No events.</div>';
+  if (list) {
+    var evs = state.events.slice().reverse(); // newest first
+    list.innerHTML = evs.map(function (e) {
+      return '<div class="event"><span class="ev-type">' + esc(e.type) + "</span>" +
+        '<span class="ev-msg">' + esc(e.message || "") + "</span>" +
+        '<span class="ev-ts">' + esc(fmtTs(e.ts)) + "</span></div>";
+    }).join("") || '<div class="empty">No events.</div>';
+  }
+  renderTicker();
+}
+
+// renderTicker keeps the thin bottom ticker showing the single latest event, so
+// the full event stream can stay tucked behind the Log stage without the
+// operator losing the live pulse of the run.
+function renderTicker() {
+  var el = $("ticker-msg");
+  if (!el) return;
+  var evs = state.events;
+  if (!evs || !evs.length) { el.textContent = "No events yet."; return; }
+  var e = evs[evs.length - 1]; // newest is last
+  el.textContent = (e.type ? e.type + " — " : "") + (e.message || "");
 }
 
 function renderAll() {
   renderHeader(); renderProject(); renderProvider(); renderArchitect();
   renderBoard(); renderReviewPanel(); renderInspector(); renderDrawer(); renderEvents();
+  applyView();
 }
 
 // ---- actions --------------------------------------------------------------
@@ -1585,6 +1658,16 @@ function wire() {
   $("btn-conv-close").onclick = closeConversation;
   $("btn-events-refresh").onclick = refreshEvents;
 
+  // Stage rail: each item switches the focused stage. The ticker's action jumps
+  // straight to the Log stage.
+  var rail = $("navrail");
+  if (rail) rail.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-view]");
+    if (b) setView(b.getAttribute("data-view"));
+  });
+  var openLog = $("btn-open-log");
+  if (openLog) openLog.onclick = function () { setView("log"); };
+
   $("lanes").addEventListener("click", function (e) {
     var b = e.target.closest("[data-lane]");
     if (b) selectLane(b.getAttribute("data-lane"));
@@ -1596,7 +1679,9 @@ function wire() {
   $("inspector-body").addEventListener("click", function (e) {
     if (e.target.closest('[data-action="gen-proposal"]')) generateProposal();
   });
-  $("review-panel").addEventListener("click", function (e) {
+  // Aggregate / Lockbox / Apply actions now live in three separate stage
+  // containers; delegate on the shared stage so one handler covers all of them.
+  $("stage").addEventListener("click", function (e) {
     if (e.target.closest('[data-action="aggregate"]')) aggregateProposals();
     else if (e.target.closest('[data-action="review"]')) runReviewer();
     else if (e.target.closest('[data-action="request-approval"]')) requestApproval();
@@ -1679,6 +1764,8 @@ async function boot() {
   }
   // Show the conversation that matches the restored / default selection.
   syncConversationForContext();
+  // Restore the operator's last focused stage (frontend-only; default lanes).
+  restoreView();
   showResumeCues();
 
   wire();

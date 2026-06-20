@@ -3,16 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hirdforge Workbench — Lane Console</title>
+<title>Hirdforge Workbench</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
-<body>
+<body data-view="lanes">
   <header class="topbar">
     <div class="brand">
       <span class="logo">⬡</span>
-      <div>
-        <div class="title">LANE CONSOLE</div>
-        <div class="subtitle">Hirdforge Workbench — local operator loop</div>
+      <div class="brand-text">
+        <div class="title">Hirdforge Workbench</div>
+        <div class="subtitle">local operator loop</div>
       </div>
     </div>
     <div class="topbar-right">
@@ -21,106 +21,145 @@
     </div>
   </header>
 
-  <div class="progress-strip">
-    <div id="progress" class="progress"></div>
-    <div id="next-hint" class="next-hint"></div>
-  </div>
-
   <div id="error" class="hidden"></div>
   <div id="resume" class="resume hidden"></div>
 
-  <main class="grid">
-    <aside class="rail">
-      <section class="panel">
-        <h2>1 · Project</h2>
-        <div class="field">
-          <input id="project-path" placeholder="absolute path to project">
-          <button id="btn-project-open">Open</button>
+  <div class="shell">
+    <!-- Stage rail: switches the focused stage. Each item sets state.view. -->
+    <nav class="navrail" id="navrail" aria-label="Stage rail">
+      <button class="nav-item" data-view="lanes"><span class="nav-ico">▣</span><span class="nav-label">Lanes</span></button>
+      <button class="nav-item" data-view="aggregate"><span class="nav-ico">≣</span><span class="nav-label">Agg</span></button>
+      <button class="nav-item" data-view="lockbox"><span class="nav-ico">⬚</span><span class="nav-label">Lock</span></button>
+      <button class="nav-item" data-view="apply"><span class="nav-ico">↧</span><span class="nav-label">Apply</span></button>
+      <button class="nav-item" data-view="log"><span class="nav-ico">≡</span><span class="nav-label">Log</span></button>
+    </nav>
+
+    <main class="stage" id="stage">
+      <div class="stage-status">
+        <div id="next-hint" class="next-hint"></div>
+      </div>
+
+      <!-- LANES VIEW — the lane-first default workspace. -->
+      <section class="view view-lanes">
+        <div class="lanes-grid">
+          <aside class="setup">
+            <section class="panel">
+              <h2>Project</h2>
+              <div class="field">
+                <input id="project-path" placeholder="absolute path to project">
+                <button id="btn-project-open">Open</button>
+              </div>
+              <div class="hint">Use an absolute path, e.g. <code>/home/you/project</code> (Linux/macOS) or <code>C:\Users\You\project</code> (Windows).</div>
+              <div class="meta" id="project-meta">No project open.</div>
+            </section>
+
+            <section class="panel">
+              <h2>Provider</h2>
+              <div class="field"><input id="provider-base" placeholder="https://api.example.com/v1"></div>
+              <div class="field"><input id="provider-key" type="password" placeholder="api key (never displayed)"></div>
+              <div class="field">
+                <input id="provider-model" placeholder="model">
+                <button id="btn-provider-save">Save</button>
+                <button id="btn-provider-test">Test</button>
+              </div>
+              <div class="hint">Your API key is sent to the local Workbench backend and stored there. It is cleared from this form after saving and is never shown again.</div>
+              <div class="meta" id="provider-meta">No provider configured.</div>
+            </section>
+
+            <section class="panel">
+              <h2>Architect spec</h2>
+              <div class="field">
+                <input id="architect-goal" placeholder="goal to refine into a spec">
+                <button id="btn-architect-start">Start</button>
+              </div>
+              <div class="meta" id="architect-meta">No session.</div>
+              <div class="hint hidden" id="architect-hint"></div>
+              <div class="messages" id="architect-messages"></div>
+              <div class="field">
+                <input id="architect-message" placeholder="message to architect">
+                <button id="btn-architect-send">Send</button>
+              </div>
+              <div class="spec" id="architect-spec"></div>
+              <div class="field">
+                <button id="btn-architect-accept">Accept spec</button>
+                <button id="btn-architect-task">Create Cortex task</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <h2>Run Summary</h2>
+              <div id="run-summary" class="run-summary"></div>
+            </section>
+          </aside>
+
+          <section class="board">
+            <div class="board-head">
+              <h2>Lanes</h2>
+              <div class="meta" id="board-meta">No Cortex task.</div>
+            </div>
+            <div class="lanes" id="lanes"></div>
+          </section>
+
+          <aside class="inspector">
+            <h2>Inspector</h2>
+            <div id="inspector-body" class="meta">Select a lane or context.</div>
+          </aside>
         </div>
-        <div class="hint">Use an absolute path, e.g. <code>/home/you/project</code> (Linux/macOS) or <code>C:\Users\You\project</code> (Windows).</div>
-        <div class="meta" id="project-meta">No project open.</div>
+
+        <section class="drawer">
+          <div class="drawer-grip" id="drawer-grip" title="Drag to resize · double-click to reset"></div>
+          <div class="drawer-head">
+            <h2>Lane Console</h2>
+            <div class="kinds" id="kind-chips"></div>
+          </div>
+          <div class="drawer-scope meta" id="drawer-scope"></div>
+          <div class="field">
+            <button id="btn-conv-new">Open Conversation</button>
+            <button id="btn-conv-close">Close</button>
+          </div>
+          <div class="hint hidden" id="console-hint"></div>
+          <div class="messages" id="conv-messages"></div>
+          <div class="field">
+            <input id="conv-message" placeholder="ask this lane / artifact…">
+            <button id="btn-conv-send">Send</button>
+          </div>
+        </section>
       </section>
 
-      <section class="panel">
-        <h2>2 · Provider</h2>
-        <div class="field"><input id="provider-base" placeholder="https://api.example.com/v1"></div>
-        <div class="field"><input id="provider-key" type="password" placeholder="api key (never displayed)"></div>
-        <div class="field">
-          <input id="provider-model" placeholder="model">
-          <button id="btn-provider-save">Save</button>
-          <button id="btn-provider-test">Test</button>
-        </div>
-        <div class="hint">Your API key is sent to the local Workbench backend and stored there. It is cleared from this form after saving and is never shown again.</div>
-        <div class="meta" id="provider-meta">No provider configured.</div>
+      <!-- AGGREGATE VIEW — aggregate the Builder proposals and review them. -->
+      <section class="view view-aggregate">
+        <div class="stage-panel" id="view-aggregate"></div>
       </section>
 
-      <section class="panel">
-        <h2>3 · Architect spec</h2>
-        <div class="field">
-          <input id="architect-goal" placeholder="goal to refine into a spec">
-          <button id="btn-architect-start">Start</button>
-        </div>
-        <div class="meta" id="architect-meta">No session.</div>
-        <div class="hint hidden" id="architect-hint"></div>
-        <div class="messages" id="architect-messages"></div>
-        <div class="field">
-          <input id="architect-message" placeholder="message to architect">
-          <button id="btn-architect-send">Send</button>
-        </div>
-        <div class="spec" id="architect-spec"></div>
-        <div class="field">
-          <button id="btn-architect-accept">Accept spec</button>
-          <button id="btn-architect-task">Create Cortex task</button>
-        </div>
+      <!-- LOCKBOX VIEW — human approval gate + read-only preview. -->
+      <section class="view view-lockbox">
+        <div class="stage-panel" id="view-lockbox"></div>
       </section>
 
-      <section class="panel">
-        <h2>Run Summary</h2>
-        <div id="run-summary" class="run-summary"></div>
+      <!-- APPLY VIEW — the write boundary: explicit apply + validation. -->
+      <section class="view view-apply">
+        <div class="stage-panel" id="view-apply"></div>
       </section>
-    </aside>
 
-    <section class="board">
-      <div class="board-head">
-        <h2>Lane board</h2>
-        <div class="meta" id="board-meta">No Cortex task.</div>
-      </div>
-      <div class="lanes" id="lanes"></div>
-      <div class="review-panel" id="review-panel"></div>
-    </section>
+      <!-- LOG VIEW — the full event stream. -->
+      <section class="view view-log">
+        <div class="stage-panel">
+          <div class="stage-head">
+            <h2>Event log</h2>
+            <button id="btn-events-refresh">Refresh</button>
+          </div>
+          <div class="event-list" id="event-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
 
-    <aside class="inspector">
-      <h2>Inspector</h2>
-      <div id="inspector-body" class="meta">Select a lane or context.</div>
-    </aside>
-
-    <section class="drawer">
-      <div class="drawer-grip" id="drawer-grip" title="Drag to resize · double-click to reset"></div>
-      <div class="drawer-head">
-        <h2>Lane Console</h2>
-        <div class="kinds" id="kind-chips"></div>
-      </div>
-      <div class="drawer-scope meta" id="drawer-scope"></div>
-      <div class="field">
-        <button id="btn-conv-new">Open Conversation</button>
-        <button id="btn-conv-close">Close</button>
-      </div>
-      <div class="hint hidden" id="console-hint"></div>
-      <div class="messages" id="conv-messages"></div>
-      <div class="field">
-        <input id="conv-message" placeholder="ask this lane / artifact…">
-        <button id="btn-conv-send">Send</button>
-      </div>
-    </section>
-
-    <section class="events">
-      <div class="events-head">
-        <h2>Event stream</h2>
-        <button id="btn-events-refresh">Refresh</button>
-      </div>
-      <div class="event-list" id="event-list"></div>
-    </section>
-  </main>
+  <!-- Event ticker: always shows the latest event; opens the Log view. -->
+  <footer class="ticker">
+    <span class="ticker-label">Latest</span>
+    <span id="ticker-msg" class="ticker-msg">No events yet.</span>
+    <button id="btn-open-log" class="ticker-action">Open log →</button>
+  </footer>
 
   <script src="/app.js"></script>
 </body>
