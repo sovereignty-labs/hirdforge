@@ -1,0 +1,645 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hirdforge Workbench — Lane Console</title>
+<style>
+  :root {
+    --bg: #14171c;
+    --panel: #1b1f26;
+    --panel-2: #222732;
+    --line: #2c333f;
+    --ink: #e6e9ef;
+    --muted: #9aa4b2;
+    --accent: #d6a35c;
+    --accent-2: #6fb0d6;
+    --ok: #6fcf97;
+    --bad: #e07a6f;
+    --architect: #b48ce0;
+    --builder: #6fb0d6;
+    --reviewer: #d6a35c;
+    --validator: #6fcf97;
+    --lockbox: #e0a96f;
+    --apply: #e07a9f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 8px; }
+  button {
+    background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 13px;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  input {
+    background: #0f1216; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; font-size: 13px; width: 100%; min-width: 0;
+  }
+  input:focus { outline: none; border-color: var(--accent-2); }
+  .field { display: flex; gap: 6px; margin-bottom: 8px; }
+  .field input { flex: 1; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); font-style: italic; font-size: 12px; padding: 6px 0; }
+  .hidden { display: none; }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); }
+
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 22px; color: var(--accent); }
+  .title { font-weight: 700; letter-spacing: 0.14em; }
+  .subtitle { color: var(--muted); font-size: 12px; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--muted); }
+  .chip b { color: var(--ink); font-weight: 600; }
+
+  #error {
+    margin: 10px 16px 0; padding: 8px 12px; border-radius: 6px;
+    background: #3a2422; border: 1px solid var(--bad); color: #f0c4bd; font-size: 13px;
+  }
+
+  .grid {
+    display: grid; gap: 12px; padding: 12px 16px;
+    grid-template-columns: 360px minmax(0, 1fr) 320px;
+    grid-template-areas:
+      "rail board inspector"
+      "drawer drawer drawer"
+      "events events events";
+  }
+  .rail { grid-area: rail; display: flex; flex-direction: column; gap: 12px; }
+  .board { grid-area: board; }
+  .inspector { grid-area: inspector; }
+  .drawer { grid-area: drawer; }
+  .events { grid-area: events; }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+
+  .messages { max-height: 220px; overflow: auto; display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+  .msg { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  .msg .role { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 2px; }
+  .msg .content { white-space: pre-wrap; }
+  .msg-user { border-left: 2px solid var(--accent-2); }
+  .msg-assistant, .msg-architect { border-left: 2px solid var(--architect); }
+  .msg-system { border-left: 2px solid var(--bad); }
+
+  .spec { margin-top: 8px; font-size: 12px; }
+  .spec-goal { margin-bottom: 6px; }
+  .spec-row b { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
+  .spec-row ul { margin: 2px 0 6px; padding-left: 18px; }
+
+  .status-active { color: var(--accent-2); }
+  .status-accepted { color: var(--ok); }
+  .status-closed { color: var(--muted); }
+
+  .board-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  .lanes { display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
+  .lane {
+    text-align: left; width: 190px; min-height: 84px; border-radius: 8px; padding: 10px;
+    background: var(--panel); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px;
+  }
+  .lane:hover { border-color: var(--accent); }
+  .lane.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .lane-role { font-weight: 600; font-size: 12px; text-transform: capitalize; }
+  .lane-task { font-size: 12px; color: var(--muted); flex: 1; }
+  .lane-status { font-size: 11px; color: var(--muted); }
+  .role-architect { border-top: 2px solid var(--architect); }
+  .role-builder { border-top: 2px solid var(--builder); }
+  .role-reviewer { border-top: 2px solid var(--reviewer); }
+  .role-validator { border-top: 2px solid var(--validator); }
+
+  .inspector { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .ins-row { padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+  .ins-row b { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; margin-right: 6px; }
+
+  .drawer { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .drawer-head { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; }
+  .kinds { display: flex; gap: 6px; flex-wrap: wrap; }
+  .kind { text-transform: capitalize; padding: 4px 12px; border-radius: 999px; }
+  .kind.active { background: var(--accent); color: #1a1408; border-color: var(--accent); font-weight: 600; }
+  .drawer-scope { margin-bottom: 8px; }
+
+  .events { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .events-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .event-list { max-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+  .event { display: grid; grid-template-columns: 230px 1fr auto; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+  .ev-type { font-family: ui-monospace, Menlo, monospace; color: var(--accent); }
+  .ev-msg { color: var(--ink); }
+  .ev-ts { color: var(--muted); }
+
+  @media (max-width: 1100px) {
+    .grid { grid-template-columns: 1fr; grid-template-areas: "rail" "board" "inspector" "drawer" "events"; }
+  }
+</style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⬡</span>
+      <div>
+        <div class="title">LANE CONSOLE</div>
+        <div class="subtitle">Hirdforge Workbench — local operator loop</div>
+      </div>
+    </div>
+    <div class="chips" id="status-chips"></div>
+  </header>
+
+  <div id="error" class="hidden"></div>
+
+  <main class="grid">
+    <aside class="rail">
+      <section class="panel">
+        <h2>1 · Project</h2>
+        <div class="field">
+          <input id="project-path" placeholder="/absolute/path/to/project">
+          <button id="btn-project-open">Open</button>
+        </div>
+        <div class="meta" id="project-meta">No project open.</div>
+      </section>
+
+      <section class="panel">
+        <h2>2 · Provider</h2>
+        <div class="field"><input id="provider-base" placeholder="https://api.example.com/v1"></div>
+        <div class="field"><input id="provider-key" type="password" placeholder="api key (never displayed)"></div>
+        <div class="field">
+          <input id="provider-model" placeholder="model">
+          <button id="btn-provider-save">Save</button>
+          <button id="btn-provider-test">Test</button>
+        </div>
+        <div class="meta" id="provider-meta">No provider configured.</div>
+      </section>
+
+      <section class="panel">
+        <h2>3 · Architect spec</h2>
+        <div class="field">
+          <input id="architect-goal" placeholder="goal to refine into a spec">
+          <button id="btn-architect-start">Start</button>
+        </div>
+        <div class="meta" id="architect-meta">No session.</div>
+        <div class="messages" id="architect-messages"></div>
+        <div class="field">
+          <input id="architect-message" placeholder="message to architect">
+          <button id="btn-architect-send">Send</button>
+        </div>
+        <div class="spec" id="architect-spec"></div>
+        <div class="field">
+          <button id="btn-architect-accept">Accept spec</button>
+          <button id="btn-architect-task">Create Cortex task</button>
+        </div>
+      </section>
+    </aside>
+
+    <section class="board">
+      <div class="board-head">
+        <h2>Lane board</h2>
+        <div class="meta" id="board-meta">No Cortex task.</div>
+      </div>
+      <div class="lanes" id="lanes"></div>
+    </section>
+
+    <aside class="inspector">
+      <h2>Inspector</h2>
+      <div id="inspector-body" class="meta">Select a lane or context.</div>
+    </aside>
+
+    <section class="drawer">
+      <div class="drawer-head">
+        <h2>Lane Console</h2>
+        <div class="kinds" id="kind-chips"></div>
+      </div>
+      <div class="drawer-scope meta" id="drawer-scope"></div>
+      <div class="field">
+        <button id="btn-conv-new">New conversation</button>
+        <button id="btn-conv-close">Close</button>
+      </div>
+      <div class="messages" id="conv-messages"></div>
+      <div class="field">
+        <input id="conv-message" placeholder="ask this lane / artifact…">
+        <button id="btn-conv-send">Send</button>
+      </div>
+    </section>
+
+    <section class="events">
+      <div class="events-head">
+        <h2>Event stream</h2>
+        <button id="btn-events-refresh">Refresh</button>
+      </div>
+      <div class="event-list" id="event-list"></div>
+    </section>
+  </main>
+
+<script>
+"use strict";
+
+// --- state -----------------------------------------------------------------
+var state = {
+  project: null,
+  provider: null,
+  providerTest: null,
+  session: null,        // current ArchitectSession
+  sessionCount: 0,
+  task: null,           // current CortexTask
+  selectedLane: null,
+  kind: "architect",    // active Lane Console context kind
+  conversation: null,   // current LaneConversation
+  conversations: [],
+  events: [],
+};
+
+var KINDS = ["architect", "builder", "reviewer", "validator", "lockbox", "apply"];
+var LANE_KINDS = ["builder", "reviewer", "validator"];
+
+// --- helpers ---------------------------------------------------------------
+function $(id) { return document.getElementById(id); }
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+
+function fmtTs(ts) {
+  if (!ts) return "";
+  try { return new Date(ts).toLocaleTimeString(); } catch (e) { return ts; }
+}
+
+// api wraps fetch and never throws: it returns {ok, status, data, error}. The
+// backend returns plain-text errors for most handlers and JSON for some, so we
+// surface whichever is present.
+async function api(method, path, body) {
+  var opts = { method: method, headers: {} };
+  if (body !== undefined) {
+    opts.headers["Content-Type"] = "application/json";
+    opts.body = JSON.stringify(body);
+  }
+  var res, text;
+  try {
+    res = await fetch(path, opts);
+    text = await res.text();
+  } catch (e) {
+    return { ok: false, status: 0, data: null, error: "network error: " + e.message };
+  }
+  var data = null;
+  if (text) { try { data = JSON.parse(text); } catch (e) { data = text; } }
+  var error = "";
+  if (!res.ok) {
+    error = (data && data.error) || (typeof data === "string" ? data.trim() : "") || res.statusText;
+  }
+  return { ok: res.ok, status: res.status, data: data, error: error };
+}
+
+function showError(msg) { var e = $("error"); e.textContent = msg; e.classList.remove("hidden"); }
+function clearError() { var e = $("error"); e.textContent = ""; e.classList.add("hidden"); }
+
+// fail surfaces a failed call and returns true so callers can early-return.
+function fail(r, ctx) {
+  if (!r.ok) { showError(ctx + ": " + (r.error || ("HTTP " + r.status))); return true; }
+  return false;
+}
+
+// --- render ----------------------------------------------------------------
+function chip(label, val) { return '<span class="chip"><b>' + esc(label) + "</b> " + esc(val) + "</span>"; }
+
+function renderChips() {
+  $("status-chips").innerHTML =
+    chip("project", state.project ? state.project.name : "—") +
+    chip("provider", state.provider ? state.provider.model : "—") +
+    chip("task", state.task ? ("#" + state.task.id + " " + state.task.status) : "—");
+}
+
+function renderProject() {
+  var m = $("project-meta");
+  if (!state.project) { m.textContent = "No project open."; return; }
+  var p = state.project;
+  m.innerHTML = "<div><b>" + esc(p.name) + "</b></div>" +
+    '<div class="mono">' + esc(p.path) + "</div>" +
+    "<div>git: " + (p.git ? "yes" : "no") + (p.current_branch ? " · " + esc(p.current_branch) : "") + "</div>";
+}
+
+function renderProvider() {
+  var m = $("provider-meta");
+  var s = "";
+  if (state.provider) {
+    s += "<div>model <b>" + esc(state.provider.model) + "</b> · key " + (state.provider.api_key_set ? "set" : "unset") + "</div>";
+    s += '<div class="mono">' + esc(state.provider.base_url) + "</div>";
+  } else {
+    s = "No provider configured.";
+  }
+  if (state.providerTest) {
+    var t = state.providerTest;
+    s += '<div class="' + (t.ok ? "ok" : "bad") + '">test: ' +
+      (t.ok ? "ok (" + esc(t.model || "") + ")" : "failed — " + esc(t.error || t.status)) + "</div>";
+  }
+  m.innerHTML = s;
+}
+
+function renderMsg(m) {
+  return '<div class="msg msg-' + esc(m.role) + '"><span class="role">' + esc(m.role) +
+    '</span><span class="content">' + esc(m.content) + "</span></div>";
+}
+
+function renderSpec(spec) {
+  function list(label, arr) {
+    if (!arr || !arr.length) return "";
+    return '<div class="spec-row"><b>' + label + "</b><ul>" +
+      arr.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul></div>";
+  }
+  return '<div class="spec-goal"><b>goal</b> ' + esc(spec.goal) + "</div>" +
+    list("constraints", spec.constraints) +
+    list("affected areas", spec.affected_areas) +
+    list("acceptance", spec.acceptance_criteria) +
+    list("risks", spec.risks) +
+    list("open questions", spec.open_questions) +
+    list("suggested lanes", spec.suggested_lanes);
+}
+
+function renderArchitect() {
+  var meta = $("architect-meta");
+  if (!state.session) {
+    meta.textContent = state.sessionCount ? ("No active session (" + state.sessionCount + " total).") : "No session.";
+  } else {
+    meta.innerHTML = "session <b>" + esc(state.session.id) + "</b> · " +
+      '<span class="status-' + esc(state.session.status) + '">' + esc(state.session.status) + "</span>" +
+      " · " + state.sessionCount + " total";
+  }
+  var msgs = (state.session && state.session.messages) || [];
+  var mm = $("architect-messages");
+  mm.innerHTML = msgs.map(renderMsg).join("") || '<div class="empty">No messages.</div>';
+  mm.scrollTop = mm.scrollHeight;
+
+  $("architect-spec").innerHTML = (state.session && state.session.spec) ? renderSpec(state.session.spec) : "";
+
+  var active = !!(state.session && state.session.status === "active");
+  var accepted = !!(state.session && state.session.status === "accepted");
+  $("btn-architect-send").disabled = !active;
+  $("btn-architect-accept").disabled = !active;
+  $("btn-architect-task").disabled = !accepted;
+}
+
+function renderBoard() {
+  var meta = $("board-meta");
+  var wrap = $("lanes");
+  if (!state.task) {
+    meta.textContent = "No Cortex task. Accept an Architect spec, then create a task.";
+    wrap.innerHTML = "";
+    return;
+  }
+  meta.innerHTML = "task <b>#" + esc(state.task.id) + "</b> · " + esc(state.task.status) + " · " + esc(state.task.goal);
+  var lanes = state.task.lanes || [];
+  wrap.innerHTML = lanes.map(function (l) {
+    var sel = state.selectedLane && state.selectedLane.id === l.id ? " selected" : "";
+    return '<button class="lane role-' + esc(l.role) + sel + '" data-lane="' + esc(l.id) + '">' +
+      '<div class="lane-role">' + esc(l.role) + " " + l.index + "</div>" +
+      '<div class="lane-task">' + esc(l.task) + "</div>" +
+      '<div class="lane-status">' + esc(l.status) + "</div>" +
+      "</button>";
+  }).join("") || '<div class="empty">No lanes.</div>';
+}
+
+function renderInspector() {
+  var b = $("inspector-body");
+  if (state.selectedLane) {
+    var l = state.selectedLane;
+    b.innerHTML =
+      '<div class="ins-row"><b>lane</b> ' + esc(l.id) + "</div>" +
+      '<div class="ins-row"><b>role</b> ' + esc(l.role) + "</div>" +
+      '<div class="ins-row"><b>index</b> ' + esc(l.index) + "</div>" +
+      '<div class="ins-row"><b>status</b> ' + esc(l.status) + "</div>" +
+      '<div class="ins-row"><b>task</b> ' + esc(l.task) + "</div>" +
+      (l.workspace_path ? '<div class="ins-row"><b>workspace</b> <span class="mono">' + esc(l.workspace_path) + "</span></div>" : "") +
+      (l.worktree_branch ? '<div class="ins-row"><b>branch</b> ' + esc(l.worktree_branch) + "</div>" : "");
+  } else {
+    b.innerHTML = '<div class="ins-row"><b>context</b> ' + esc(state.kind) + "</div>" +
+      '<div class="empty">No lane selected. Pick a lane on the board, or a context chip below.</div>';
+  }
+}
+
+function renderDrawer() {
+  $("kind-chips").innerHTML = KINDS.map(function (k) {
+    return '<button class="kind' + (k === state.kind ? " active" : "") + '" data-kind="' + k + '">' + k + "</button>";
+  }).join("");
+
+  var scope = ["kind <b>" + esc(state.kind) + "</b>"];
+  if (state.selectedLane && LANE_KINDS.indexOf(state.kind) >= 0) {
+    scope.push("lane " + esc(state.selectedLane.id) + " (" + esc(state.selectedLane.role) + ")");
+  }
+  if (state.conversation) {
+    scope.push("conversation #" + esc(state.conversation.id) + " · " +
+      '<span class="status-' + esc(state.conversation.status) + '">' + esc(state.conversation.status) + "</span>");
+  }
+  $("drawer-scope").innerHTML = scope.join(" · ");
+
+  var msgs = (state.conversation && state.conversation.messages) || [];
+  var cm = $("conv-messages");
+  cm.innerHTML = msgs.map(renderMsg).join("") ||
+    '<div class="empty">No conversation. Start one for the selected lane / context.</div>';
+  cm.scrollTop = cm.scrollHeight;
+
+  var closed = !!(state.conversation && state.conversation.status === "closed");
+  $("btn-conv-send").disabled = !state.conversation || closed;
+  $("btn-conv-close").disabled = !state.conversation || closed;
+}
+
+function renderEvents() {
+  var list = $("event-list");
+  var evs = state.events.slice().reverse(); // newest first
+  list.innerHTML = evs.map(function (e) {
+    return '<div class="event"><span class="ev-type">' + esc(e.type) + "</span>" +
+      '<span class="ev-msg">' + esc(e.message || "") + "</span>" +
+      '<span class="ev-ts">' + esc(fmtTs(e.ts)) + "</span></div>";
+  }).join("") || '<div class="empty">No events.</div>';
+}
+
+function renderAll() {
+  renderChips(); renderProject(); renderProvider(); renderArchitect();
+  renderBoard(); renderInspector(); renderDrawer(); renderEvents();
+}
+
+// --- actions ---------------------------------------------------------------
+async function refreshEvents() {
+  var r = await api("GET", "/api/workbench/events");
+  if (r.ok && Array.isArray(r.data)) { state.events = r.data; renderEvents(); }
+}
+
+async function openProject() {
+  var path = $("project-path").value.trim();
+  if (!path) { showError("project: path is required"); return; }
+  var r = await api("POST", "/api/workbench/project/open", { path: path });
+  if (fail(r, "open project")) return;
+  clearError(); state.project = r.data; renderProject(); renderChips(); refreshEvents();
+}
+
+async function saveProvider() {
+  var base_url = $("provider-base").value.trim();
+  var api_key = $("provider-key").value;
+  var model = $("provider-model").value.trim();
+  var r = await api("POST", "/api/workbench/provider", { base_url: base_url, api_key: api_key, model: model });
+  if (fail(r, "save provider")) return;
+  clearError(); state.provider = r.data; state.providerTest = null; renderProvider(); renderChips(); refreshEvents();
+}
+
+async function testProvider() {
+  var r = await api("POST", "/api/workbench/provider/test");
+  if (r.data && typeof r.data === "object") {
+    state.providerTest = r.data;
+    clearError();
+  } else {
+    state.providerTest = { ok: r.ok, error: r.error || ("HTTP " + r.status) };
+    if (!r.ok) showError("test provider: " + (r.error || r.status));
+  }
+  renderProvider(); refreshEvents();
+}
+
+async function startSession() {
+  var goal = $("architect-goal").value.trim();
+  if (!goal) { showError("architect: goal is required"); return; }
+  var r = await api("POST", "/api/workbench/architect/session", { goal: goal });
+  if (fail(r, "start session")) return;
+  clearError(); state.session = r.data; await loadSessions(); renderArchitect(); renderChips(); refreshEvents();
+}
+
+async function loadSessions() {
+  var r = await api("GET", "/api/workbench/architect/sessions");
+  if (r.ok && Array.isArray(r.data)) state.sessionCount = r.data.length;
+}
+
+async function sendArchitect() {
+  if (!state.session) { showError("architect: start a session first"); return; }
+  var msg = $("architect-message").value.trim();
+  if (!msg) { showError("architect: message is required"); return; }
+  var r = await api("POST", "/api/workbench/architect/message", { session_id: state.session.id, message: msg });
+  // On provider failure the backend still returns the updated session (with a
+  // system error turn) as JSON; reflect it either way.
+  if (r.data && typeof r.data === "object") state.session = r.data;
+  if (fail(r, "architect message")) { renderArchitect(); refreshEvents(); return; }
+  clearError(); $("architect-message").value = ""; renderArchitect(); refreshEvents();
+}
+
+async function acceptSpec() {
+  if (!state.session) { showError("architect: no session"); return; }
+  var r = await api("POST", "/api/workbench/architect/accept", { session_id: state.session.id });
+  if (fail(r, "accept spec")) return;
+  clearError(); state.session = r.data; renderArchitect(); refreshEvents();
+}
+
+async function createTask() {
+  if (!state.session) { showError("architect: no session"); return; }
+  var r = await api("POST", "/api/workbench/architect/cortex-task", { session_id: state.session.id });
+  if (fail(r, "create cortex task")) return;
+  clearError(); state.task = r.data; state.selectedLane = null;
+  renderBoard(); renderInspector(); renderChips(); refreshEvents();
+}
+
+function selectLane(id) {
+  if (!state.task) return;
+  var l = (state.task.lanes || []).find(function (x) { return x.id === id; });
+  if (!l) return;
+  state.selectedLane = l; state.kind = l.role;
+  renderBoard(); renderInspector(); renderDrawer();
+}
+
+function setKind(k) {
+  state.kind = k;
+  if (LANE_KINDS.indexOf(k) >= 0) {
+    if (!(state.selectedLane && state.selectedLane.role === k)) {
+      state.selectedLane = (state.task && (state.task.lanes || []).find(function (x) { return x.role === k; })) || null;
+    }
+  } else {
+    state.selectedLane = null;
+  }
+  renderBoard(); renderInspector(); renderDrawer();
+}
+
+async function newConversation() {
+  var body = { kind: state.kind };
+  if (LANE_KINDS.indexOf(state.kind) >= 0) {
+    if (!state.selectedLane) { showError("lane console: select a " + state.kind + " lane first"); return; }
+    body.lane_id = state.selectedLane.id;
+    if (state.task) body.task_id = state.task.id;
+  }
+  var r = await api("POST", "/api/workbench/lane-conversation", body);
+  if (fail(r, "new conversation")) return;
+  clearError(); state.conversation = r.data; renderDrawer(); refreshEvents(); loadConversations();
+}
+
+async function sendConversation() {
+  if (!state.conversation) { showError("lane console: start a conversation first"); return; }
+  var msg = $("conv-message").value.trim();
+  if (!msg) { showError("lane console: message is required"); return; }
+  var r = await api("POST", "/api/workbench/lane-conversation/message",
+    { conversation_id: state.conversation.id, message: msg });
+  if (r.data && typeof r.data === "object") state.conversation = r.data;
+  if (fail(r, "lane message")) { renderDrawer(); refreshEvents(); return; }
+  clearError(); $("conv-message").value = ""; renderDrawer(); refreshEvents();
+}
+
+async function closeConversation() {
+  if (!state.conversation) return;
+  var r = await api("POST", "/api/workbench/lane-conversation/close", { conversation_id: state.conversation.id });
+  if (fail(r, "close conversation")) return;
+  clearError(); state.conversation = r.data; renderDrawer(); refreshEvents(); loadConversations();
+}
+
+async function loadConversations() {
+  var r = await api("GET", "/api/workbench/lane-conversations");
+  if (r.ok && Array.isArray(r.data)) state.conversations = r.data;
+}
+
+// --- boot ------------------------------------------------------------------
+function wire() {
+  $("btn-project-open").onclick = openProject;
+  $("btn-provider-save").onclick = saveProvider;
+  $("btn-provider-test").onclick = testProvider;
+  $("btn-architect-start").onclick = startSession;
+  $("btn-architect-send").onclick = sendArchitect;
+  $("btn-architect-accept").onclick = acceptSpec;
+  $("btn-architect-task").onclick = createTask;
+  $("btn-conv-new").onclick = newConversation;
+  $("btn-conv-send").onclick = sendConversation;
+  $("btn-conv-close").onclick = closeConversation;
+  $("btn-events-refresh").onclick = refreshEvents;
+
+  $("lanes").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-lane]");
+    if (b) selectLane(b.getAttribute("data-lane"));
+  });
+  $("kind-chips").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-kind]");
+    if (b) setKind(b.getAttribute("data-kind"));
+  });
+
+  function onEnter(id, fn) {
+    $(id).addEventListener("keydown", function (e) { if (e.key === "Enter") fn(); });
+  }
+  onEnter("project-path", openProject);
+  onEnter("architect-goal", startSession);
+  onEnter("architect-message", sendArchitect);
+  onEnter("conv-message", sendConversation);
+}
+
+async function boot() {
+  // Reflect any existing server-side state; 404s simply mean "nothing yet".
+  var proj = await api("GET", "/api/workbench/project"); if (proj.ok) state.project = proj.data;
+  var prov = await api("GET", "/api/workbench/provider"); if (prov.ok) state.provider = prov.data;
+  var sess = await api("GET", "/api/workbench/architect/session"); if (sess.ok) state.session = sess.data;
+  await loadSessions();
+  var task = await api("GET", "/api/workbench/cortex/task"); if (task.ok) state.task = task.data;
+  var conv = await api("GET", "/api/workbench/lane-conversation");
+  if (conv.ok && conv.data) { state.conversation = conv.data; if (conv.data.context) state.kind = conv.data.context.kind; }
+  await loadConversations();
+  await refreshEvents();
+  wire();
+  renderAll();
+}
+
+document.addEventListener("DOMContentLoaded", boot);
+</script>
+</body>
+</html>

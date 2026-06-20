@@ -5,69 +5,18 @@
 package workbench
 
 import (
+	_ "embed"
 	"net/http"
 )
 
 const modeName = "workbench"
 
-const indexHTML = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Hirdforge Workbench</title>
-<style>
-  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; color: #222; }
-  h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
-  h2 { font-size: 1.1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
-  p  { color: #555; }
-  code { background: #f4f4f4; padding: 0.1rem 0.35rem; border-radius: 3px; }
-  ul { list-style: none; padding: 0; }
-  li { margin: 0.25rem 0; }
-</style>
-</head>
-<body>
-  <h1>Hirdforge Workbench</h1>
-  <p>Local-first workbench skeleton. The event stream and builder loop are not wired yet.</p>
-  <h2>Endpoints</h2>
-  <ul>
-    <li><code>GET /api/workbench/events</code></li>
-    <li><code>GET /api/workbench/project</code></li>
-    <li><code>GET /api/workbench/project/inspect</code></li>
-    <li><code>GET /api/workbench/project/inspection</code></li>
-    <li><code>GET /api/workbench/provider</code></li>
-    <li><code>GET /api/workbench/build/session</code></li>
-    <li><code>GET /api/workbench/build/sessions</code></li>
-    <li><code>GET /api/workbench/build/prompt</code></li>
-    <li><code>GET /api/workbench/build/proposal</code></li>
-    <li><code>GET /api/workbench/build/proposals</code></li>
-    <li><code>GET /api/workbench/lockbox/request</code></li>
-    <li><code>GET /api/workbench/lockbox/requests</code></li>
-    <li><code>GET /api/workbench/architect/session</code></li>
-    <li><code>GET /api/workbench/architect/sessions</code></li>
-    <li><code>GET /api/workbench/lane-conversation</code></li>
-    <li><code>GET /api/workbench/lane-conversations</code></li>
-    <li><code>GET /api/workbench/cortex/task</code></li>
-    <li><code>GET /api/workbench/cortex/tasks</code></li>
-    <li><code>GET /api/workbench/cortex/lanes</code></li>
-    <li><code>GET /api/workbench/cortex/worktrees</code></li>
-    <li><code>GET /api/workbench/cortex/lane/proposal</code></li>
-    <li><code>GET /api/workbench/cortex/lane/proposals</code></li>
-    <li><code>GET /api/workbench/cortex/aggregate</code></li>
-    <li><code>GET /api/workbench/cortex/aggregates</code></li>
-    <li><code>GET /api/workbench/cortex/aggregate/review</code></li>
-    <li><code>GET /api/workbench/cortex/aggregate/reviews</code></li>
-    <li><code>GET /api/workbench/cortex/apply</code></li>
-    <li><code>GET /api/workbench/cortex/applies</code></li>
-    <li><code>GET /api/workbench/cortex/apply/preview</code></li>
-    <li><code>GET /api/workbench/cortex/apply/previews</code></li>
-    <li><code>GET /api/workbench/cortex/apply/validation</code></li>
-    <li><code>GET /api/workbench/cortex/apply/validations</code></li>
-    <li><code>GET /api/workbench/validation</code></li>
-    <li><code>GET /api/workbench/diff</code></li>
-  </ul>
-</body>
-</html>
-`
+// indexHTML is the embedded Lane Console operator UI served at "/". It is a
+// single self-contained page (HTML/CSS/vanilla JS) that calls the live
+// Workbench APIs; see internal/workbench/ui/index.html.
+//
+//go:embed ui/index.html
+var indexHTML string
 
 // Server is the Workbench runtime: it ties the event store and project,
 // provider, session, inspection, proposal, and Lockbox state to a small HTTP
