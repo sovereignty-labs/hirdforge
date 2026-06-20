@@ -170,7 +170,7 @@ function progressSteps() {
     { label: "Provider", done: !!state.provider },
     { label: "Architect", done: !!state.architectSession },
     { label: "Cortex Task", done: !!state.cortexTask },
-    { label: "Lane Console", done: !!state.laneConversation },
+    { label: "Lane Console", done: state.conversations.length > 0 || !!state.laneConversation },
   ];
 }
 
@@ -345,20 +345,107 @@ function renderArchitect() {
   updateArchitectControls();
 }
 
+// ---- lane + conversation helpers ------------------------------------------
+function laneRoleCounts(lanes) {
+  var c = {};
+  (lanes || []).forEach(function (l) { c[l.role] = (c[l.role] || 0) + 1; });
+  return c;
+}
+
+// truncPath shortens a long path, keeping the more informative tail.
+function truncPath(p, max) {
+  max = max || 42;
+  if (!p || p.length <= max) return p || "";
+  return "…" + p.slice(p.length - (max - 1));
+}
+
+// defaultLaneFor returns the lane to select by default: the first builder lane,
+// else the first lane, else null.
+function defaultLaneFor(lanes) {
+  if (!lanes || !lanes.length) return null;
+  return lanes.find(function (x) { return x.role === "builder"; }) || lanes[0];
+}
+
+// selectDefaultLane selects the default lane (used for a freshly created task).
+function selectDefaultLane() {
+  var l = defaultLaneFor(state.lanes);
+  state.selectedLane = l || null;
+  if (l) state.kind = l.role;
+  syncConversationForContext();
+  persistSelection();
+}
+
+// byActiveThenRecent sorts active conversations first, then most-recent id.
+function byActiveThenRecent(a, b) {
+  var an = a.status === "active" ? 1 : 0, bn = b.status === "active" ? 1 : 0;
+  if (an !== bn) return bn - an;
+  return (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0);
+}
+
+// conversationForLane returns the best existing conversation bound to a lane
+// (any kind), or null — used for the lane-card and inspector indicators.
+function conversationForLane(laneId) {
+  if (!laneId) return null;
+  return state.conversations.filter(function (c) {
+    return c.context && c.context.lane_id === laneId;
+  }).sort(byActiveThenRecent)[0] || null;
+}
+
+// currentContextConversation returns the existing conversation matching the
+// active console kind and (for lane kinds) the selected lane, or null. It lets
+// the Lane Console reuse an existing conversation instead of always creating one.
+function currentContextConversation() {
+  return state.conversations.filter(function (c) {
+    if (!c.context || c.context.kind !== state.kind) return false;
+    if (LANE_KINDS.indexOf(state.kind) >= 0) {
+      return !!state.selectedLane && c.context.lane_id === state.selectedLane.id;
+    }
+    return !c.context.lane_id; // architect / lockbox / apply: not bound to a lane
+  }).sort(byActiveThenRecent)[0] || null;
+}
+
+// syncConversationForContext shows the conversation matching the current
+// selection so the drawer always reflects the selected lane / kind.
+function syncConversationForContext() {
+  state.laneConversation = currentContextConversation();
+}
+
+// renderTaskSummary renders the compact Cortex task summary for the board head.
+function renderTaskSummary() {
+  var t = state.cortexTask;
+  var counts = laneRoleCounts(state.lanes);
+  var rolesStr = Object.keys(counts).map(function (k) { return k + " " + counts[k]; }).join(" · ");
+  var head = '<span class="task-id">#' + esc(t.id) + "</span> " +
+    '<span class="badge badge-active">' + esc(t.status) + "</span>" +
+    ' · <span class="task-goal">' + esc(t.goal) + "</span>";
+  var sub = state.lanes.length + " lanes";
+  if (rolesStr) sub += " · " + esc(rolesStr);
+  if (t.ts) sub += " · created " + esc(fmtTs(t.ts));
+  if (state.architectSession && state.architectSession.id) sub += " · from session #" + esc(state.architectSession.id);
+  return head + '<div class="task-sub">' + sub + "</div>";
+}
+
 function renderBoard() {
   var meta = $("board-meta");
   var wrap = $("lanes");
   if (!state.cortexTask) {
-    meta.textContent = "No Cortex task. Accept an Architect spec, then create a task.";
+    meta.textContent = "Accept an Architect spec, then create a Cortex task.";
     wrap.innerHTML = "";
     return;
   }
-  meta.innerHTML = "task <b>#" + esc(state.cortexTask.id) + "</b> · " + esc(state.cortexTask.status) + " · " + esc(state.cortexTask.goal);
+  meta.innerHTML = renderTaskSummary();
   wrap.innerHTML = state.lanes.map(function (l) {
     var sel = state.selectedLane && state.selectedLane.id === l.id ? " selected" : "";
+    var conv = conversationForLane(l.id);
+    var convTag = conv
+      ? '<span class="lane-conv status-' + esc(conv.status) + '">conv · ' + esc(conv.status) + "</span>"
+      : "";
+    var path = l.workspace_path || l.worktree_branch || "";
+    var pathTag = path ? '<div class="lane-path mono">' + esc(truncPath(path)) + "</div>" : "";
     return '<button class="lane role-' + esc(l.role) + sel + '" data-lane="' + esc(l.id) + '">' +
-      '<div class="lane-role">' + esc(l.role) + " " + l.index + "</div>" +
+      '<div class="lane-head"><span class="lane-role">' + esc(l.role) + " " + l.index + "</span>" + convTag + "</div>" +
       '<div class="lane-task">' + esc(l.task) + "</div>" +
+      pathTag +
       '<div class="lane-status">' + esc(l.status) + "</div>" +
       "</button>";
   }).join("") || '<div class="empty">No lanes.</div>';
@@ -368,17 +455,22 @@ function renderInspector() {
   var b = $("inspector-body");
   if (state.selectedLane) {
     var l = state.selectedLane;
+    var conv = conversationForLane(l.id);
     b.innerHTML =
       '<div class="ins-row"><b>lane</b> ' + esc(l.id) + "</div>" +
       '<div class="ins-row"><b>role</b> ' + esc(l.role) + "</div>" +
       '<div class="ins-row"><b>index</b> ' + esc(l.index) + "</div>" +
       '<div class="ins-row"><b>status</b> ' + esc(l.status) + "</div>" +
       '<div class="ins-row"><b>task</b> ' + esc(l.task) + "</div>" +
+      (state.cortexTask ? '<div class="ins-row"><b>related task</b> #' + esc(state.cortexTask.id) + "</div>" : "") +
+      (l.worktree_branch ? '<div class="ins-row"><b>branch</b> ' + esc(l.worktree_branch) + "</div>" : "") +
       (l.workspace_path ? '<div class="ins-row"><b>workspace</b> <span class="mono">' + esc(l.workspace_path) + "</span></div>" : "") +
-      (l.worktree_branch ? '<div class="ins-row"><b>branch</b> ' + esc(l.worktree_branch) + "</div>" : "");
+      (conv
+        ? '<div class="ins-row"><b>conversation</b> #' + esc(conv.id) + ' · <span class="status-' + esc(conv.status) + '">' + esc(conv.status) + "</span></div>"
+        : '<div class="ins-row"><b>conversation</b> <span class="muted">none — start one in the Lane Console</span></div>');
   } else {
     b.innerHTML = '<div class="ins-row"><b>context</b> ' + esc(state.kind) + "</div>" +
-      '<div class="empty">No lane selected. Pick a lane on the board, or a context chip below.</div>';
+      '<div class="empty">No lane selected. Pick a lane on the board to see its role, status, branch, and conversation here.</div>';
   }
 }
 
@@ -501,19 +593,20 @@ async function createTask() {
   if (architectTaskId()) { showError("architect: a Cortex task already exists for this session"); return; }
   var r = await api.createCortexTask(state.architectSession.id);
   if (fail(r, "create cortex task")) return;
-  clearError(); setCortexTask(r.data); state.selectedLane = null; persistSelection();
+  clearError(); setCortexTask(r.data); selectDefaultLane(); // auto-select the first builder lane
   // Record the task on the session locally so the panel reflects it without a
   // reload (the backend already persisted cortex_task_id).
   if (state.architectSession && r.data) state.architectSession.cortex_task_id = r.data.id;
-  renderBoard(); renderInspector(); renderArchitect(); renderHeader(); refreshEvents();
+  renderBoard(); renderInspector(); renderDrawer(); renderArchitect(); renderHeader(); refreshEvents();
 }
 
 function selectLane(id) {
   var l = state.lanes.find(function (x) { return x.id === id; });
   if (!l) return;
   state.selectedLane = l; state.kind = l.role;
+  syncConversationForContext(); // show this lane's conversation if one exists
   persistSelection();
-  renderBoard(); renderInspector(); renderDrawer();
+  renderBoard(); renderInspector(); renderDrawer(); renderHeader();
 }
 
 function setKind(k) {
@@ -525,11 +618,19 @@ function setKind(k) {
   } else {
     state.selectedLane = null;
   }
+  syncConversationForContext();
   persistSelection();
-  renderBoard(); renderInspector(); renderDrawer();
+  renderBoard(); renderInspector(); renderDrawer(); renderHeader();
 }
 
 async function newConversation() {
+  // Prefer an existing open conversation for this lane / kind over creating a
+  // duplicate; this is the "reuse instead of always New" behavior.
+  var existing = currentContextConversation();
+  if (existing && existing.status !== "closed") {
+    clearError(); state.laneConversation = existing; renderDrawer(); renderHeader();
+    return;
+  }
   var body = { kind: state.kind };
   if (LANE_KINDS.indexOf(state.kind) >= 0) {
     if (!state.selectedLane) { showError("lane console: select a " + state.kind + " lane first"); return; }
@@ -538,7 +639,9 @@ async function newConversation() {
   }
   var r = await api.createLaneConversation(body);
   if (fail(r, "new conversation")) return;
-  clearError(); state.laneConversation = r.data; renderDrawer(); renderHeader(); refreshEvents(); loadConversations();
+  clearError(); state.laneConversation = r.data;
+  await loadConversations(); // refresh so lane cards / inspector show the new conversation
+  renderBoard(); renderInspector(); renderDrawer(); renderHeader(); refreshEvents();
 }
 
 async function sendConversation() {
@@ -555,7 +658,9 @@ async function closeConversation() {
   if (!state.laneConversation) return;
   var r = await api.closeLaneConversation(state.laneConversation.id);
   if (fail(r, "close conversation")) return;
-  clearError(); state.laneConversation = r.data; renderDrawer(); renderHeader(); refreshEvents(); loadConversations();
+  clearError(); state.laneConversation = r.data;
+  await loadConversations();
+  renderBoard(); renderInspector(); renderDrawer(); renderHeader(); refreshEvents();
 }
 
 async function loadConversations() {
@@ -781,9 +886,15 @@ async function boot() {
   if (convs.ok && Array.isArray(convs.data)) state.conversations = convs.data;
   if (events.ok && Array.isArray(events.data)) state.events = events.data;
 
-  // Re-apply the operator's last selection against the hydrated lanes, then
-  // announce what was recovered.
+  // Re-apply the operator's last selection against the hydrated lanes.
   restoreSelection();
+  // For a fresh task with no prior saved lane, default-select a lane (first
+  // builder, else first). This never overrides a valid restored selection.
+  if (!state.selectedLane && state.lanes.length && !lsGet(SEL.lane)) {
+    selectDefaultLane();
+  }
+  // Show the conversation that matches the restored / default selection.
+  syncConversationForContext();
   showResumeCues();
 
   wire();

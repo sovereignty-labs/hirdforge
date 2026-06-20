@@ -172,6 +172,31 @@ func TestWorkbenchUIArchitectMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUILaneBoardMarkers checks the served app.js carries the lane
+// board UX logic by stable identifier: task summary, default lane selection,
+// lane conversation lookup/reuse, and the lane inspector enhancement.
+func TestWorkbenchUILaneBoardMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"renderTaskSummary",          // Cortex task summary
+		"selectDefaultLane",          // default lane selection
+		"conversationForLane",        // lane conversation lookup
+		"currentContextConversation", // conversation reuse for selected lane/kind
+		"related task",               // lane inspector enhancement
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)

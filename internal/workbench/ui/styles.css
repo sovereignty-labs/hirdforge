@@ -148,7 +148,14 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .status-accepted { color: var(--ok); }
 .status-closed { color: var(--muted); }
 
-.board-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.board-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; margin-bottom: 10px; }
+#board-meta { text-align: right; }
+
+/* Compact Cortex task summary in the board head. */
+.task-id { font-family: ui-monospace, Menlo, monospace; color: var(--accent); font-weight: 600; }
+.task-goal { color: var(--ink); }
+.task-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
 .lanes { display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
 .lane {
   text-align: left; width: 190px; min-height: 84px; border-radius: 8px; padding: 10px;
@@ -156,9 +163,17 @@ input:focus { outline: none; border-color: var(--accent-2); }
 }
 .lane:hover { border-color: var(--accent); }
 .lane.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.lane-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .lane-role { font-weight: 600; font-size: 12px; text-transform: capitalize; }
 .lane-task { font-size: 12px; color: var(--muted); flex: 1; }
+.lane-path { font-size: 10px; color: var(--muted); opacity: 0.85; }
 .lane-status { font-size: 11px; color: var(--muted); }
+.lane-conv {
+  font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px;
+  border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap;
+}
+.lane-conv.status-active { color: var(--ok); border-color: var(--ok); }
+.lane-conv.status-closed { color: var(--muted); }
 .role-architect { border-top: 2px solid var(--architect); }
 .role-builder { border-top: 2px solid var(--builder); }
 .role-reviewer { border-top: 2px solid var(--reviewer); }
