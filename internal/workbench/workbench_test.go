@@ -117,7 +117,7 @@ func TestWorkbenchUIResumeMarkers(t *testing.T) {
 }
 
 // TestWorkbenchUISetupMarkers checks the served UI carries the setup-hardening
-// logic: the operator progress strip, API key input clearing, and the provider
+// logic: next-step guidance, API key input clearing, and the provider
 // configured/test states. Markers are stable identifiers, not full content.
 func TestWorkbenchUISetupMarkers(t *testing.T) {
 	mux := New().mux
@@ -133,7 +133,6 @@ func TestWorkbenchUISetupMarkers(t *testing.T) {
 
 	js := getBody("/app.js")
 	for _, marker := range []string{
-		"renderProgress",   // operator progress strip logic
 		"renderNextHint",   // next-step guidance
 		"clearApiKeyInput", // API key input cleared after save
 		"untested",         // configured-but-untested provider state
@@ -520,6 +519,81 @@ func TestWorkbenchUIFocusedShellPolishMarkers(t *testing.T) {
 	// The drawer resize grip is gone from the markup.
 	if strings.Contains(html, "drawer-grip") {
 		t.Error("expected index to no longer contain the removed drawer-grip")
+	}
+}
+
+// repoRoot walks up from the test's working directory to the module root (the
+// directory containing go.mod), so file checks don't hard-code a relative depth.
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find module root (go.mod) above %s", dir)
+		}
+		dir = parent
+	}
+}
+
+// TestWorkbenchUICleanupMarkers checks the final focused-shell cleanup slice:
+// the dead progress-strip code is gone, the Next hint carries an optional
+// frontend-only jump button to the relevant stage, and the stray root build
+// binary is gitignored (without ignoring the cmd/ source directory).
+func TestWorkbenchUICleanupMarkers(t *testing.T) {
+	mux := New().mux
+	getBody := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	js := getBody("/app.js")
+	// The progress strip was removed during the focused-shell migration; its
+	// renderer/helper must be gone (renderNextHint stays — it is still active).
+	for _, gone := range []string{"progressSteps", "renderProgress"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("expected app.js to no longer contain dead progress marker %q", gone)
+		}
+	}
+	if !strings.Contains(js, "renderNextHint") {
+		t.Error("expected app.js to still contain renderNextHint")
+	}
+	// Clickable, rail-aware Next hint: a target resolver + a frontend-only jump
+	// button that switches the stage (never auto-switches, never a backend call).
+	for _, marker := range []string{
+		"loopNextTarget",  // resolves the rail target for the next action
+		`data-next-view`,  // the jump button carries its target stage
+		`class="next-go"`, // the jump button itself
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+
+	// The stray root binary is gitignored; the source directory is not.
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), ".gitignore"))
+	if err != nil {
+		t.Fatalf("read .gitignore: %v", err)
+	}
+	gitignore := string(data)
+	if !strings.Contains(gitignore, "/hirdforge-workbench") {
+		t.Error("expected .gitignore to ignore the root /hirdforge-workbench binary")
+	}
+	for _, line := range strings.Split(gitignore, "\n") {
+		if strings.TrimSpace(line) == "cmd/hirdforge-workbench/" || strings.TrimSpace(line) == "/cmd/hirdforge-workbench" {
+			t.Errorf("must not ignore the source directory (offending line: %q)", line)
+		}
 	}
 }
 

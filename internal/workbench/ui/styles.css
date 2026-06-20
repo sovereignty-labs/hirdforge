@@ -70,7 +70,9 @@ input:focus { outline: none; border-color: var(--accent-2); }
   background: #3a2422; border: 1px solid var(--bad); color: #f0c4bd; font-size: 13px;
 }
 
-.next-hint { font-size: 12px; color: var(--accent-2); }
+.next-hint { font-size: 12px; color: var(--accent-2); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.next-go { font-size: 11px; padding: 2px 9px; border-color: var(--accent-2); color: var(--accent-2); }
+.next-go:hover:not(:disabled) { background: var(--accent-2); color: #0e1216; border-color: var(--accent-2); }
 
 /* Run Summary: one compact row per loop stage so the operator can see, at a
    glance and after a reload, exactly where the run stands. */

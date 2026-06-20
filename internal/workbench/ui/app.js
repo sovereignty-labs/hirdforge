@@ -178,6 +178,7 @@ function setView(view) {
   state.view = view;
   lsSet(VIEW_KEY, view);
   applyView();
+  renderNextHint(); // refresh the jump button now that the active stage changed
 }
 
 function restoreView() {
@@ -243,31 +244,6 @@ function renderChips() {
     chip("task", state.cortexTask ? ("#" + state.cortexTask.id + " " + state.cortexTask.status) : "—");
 }
 
-// progressSteps describes the first operator loop, each step "done" once its
-// state exists. The strip derives done/current/not-started from these.
-function progressSteps() {
-  return [
-    { label: "Project", done: !!state.project },
-    { label: "Provider", done: !!state.provider },
-    { label: "Architect", done: !!state.architectSession },
-    { label: "Cortex Task", done: !!state.cortexTask },
-    { label: "Lane Console", done: state.conversations.length > 0 || !!state.laneConversation },
-  ];
-}
-
-function renderProgress() {
-  var el = $("progress");
-  if (!el) return;
-  var currentSet = false;
-  el.innerHTML = progressSteps().map(function (s) {
-    var cls = "step";
-    if (s.done) cls += " done";
-    else if (!currentSet) { cls += " current"; currentSet = true; } // first not-done = current
-    else cls += " todo";
-    return '<span class="' + cls + '">' + esc(s.label) + "</span>";
-  }).join('<span class="step-sep">→</span>');
-}
-
 // loopStatus reads the whole operator-loop state from already-hydrated frontend
 // state, so the Run Summary and Next guidance share one source of truth. (The
 // readiness helpers it calls are hoisted function declarations defined below.)
@@ -310,10 +286,40 @@ function loopNext() {
   return "Loop complete — applied and validated.";
 }
 
-// renderNextHint gives the operator a single, obvious next action for the loop.
+// loopNextTarget returns the stage rail target the next action lives on, or null
+// for steps with no single rail destination (setup, "open a builder lane",
+// revise/rejected, loop complete). It mirrors loopNext() exactly so the optional
+// jump button always matches the hint text. Preview lives in the Lock stage, so
+// its target is lockbox — consistent with the hint.
+function loopNextTarget() {
+  var s = loopStatus();
+  if (!s.project || !s.provider || !s.session || s.session.status !== "accepted" || !s.task) return null;
+  if (s.proposedCount === 0) return null; // "open a builder lane" — text only
+  if (!s.aggregate) return { view: "aggregate", label: "Open Agg" };
+  if (!s.review) return { view: "aggregate", label: "Open Agg" };
+  if (s.review.verdict !== "approve") return null; // revise — no single target
+  if (!s.approval) return { view: "lockbox", label: "Open Lock" };
+  if (s.approval.status === "pending") return { view: "lockbox", label: "Open Lock" };
+  if (s.approval.status === "rejected") return null;
+  if (!s.preview || s.preview.status !== "ready") return { view: "lockbox", label: "Open Lock" };
+  if (!s.applied) return { view: "apply", label: "Open Apply" };
+  if (!s.validation) return { view: "apply", label: "Open Apply" };
+  return null; // loop complete
+}
+
+// renderNextHint gives the operator a single, obvious next action for the loop,
+// plus a small frontend-only jump button to the relevant stage (never an
+// auto-switch, never a backend action). The button is omitted when its target
+// stage is already on screen.
 function renderNextHint() {
   var el = $("next-hint");
-  if (el) el.textContent = "Next: " + loopNext();
+  if (!el) return;
+  var html = '<span class="next-text">Next: ' + esc(loopNext()) + "</span>";
+  var t = loopNextTarget();
+  if (t && t.view !== state.view) {
+    html += ' <button class="next-go" data-next-view="' + esc(t.view) + '">' + esc(t.label) + "</button>";
+  }
+  el.innerHTML = html;
 }
 
 // renderRunSummary lists every loop stage with a compact status, so the operator
@@ -345,10 +351,10 @@ function renderRunSummary() {
   el.innerHTML = html;
 }
 
-// renderHeader keeps the chips, progress strip, and next hint in sync; call it
-// wherever a setup-affecting state field changes.
+// renderHeader keeps the chips, Next hint, Run Summary, setup-collapse, and rail
+// badges in sync; call it wherever a setup-affecting state field changes.
 function renderHeader() {
-  renderChips(); renderProgress(); renderNextHint(); renderRunSummary();
+  renderChips(); renderNextHint(); renderRunSummary();
   applySetupCollapse(); renderRailBadges();
 }
 
@@ -1721,6 +1727,14 @@ function wire() {
   });
   var openLog = $("btn-open-log");
   if (openLog) openLog.onclick = function () { setView("log"); };
+  // Next hint's optional jump button switches to the stage the next action lives
+  // on (frontend-only; never triggers the action itself). Delegated because the
+  // hint's inner HTML is re-rendered on every header refresh.
+  var nextHint = $("next-hint");
+  if (nextHint) nextHint.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-next-view]");
+    if (b) setView(b.getAttribute("data-next-view"));
+  });
   // "← Lanes" leaves the focused lane-detail page for the grid (the lane stays
   // selected, so re-clicking it reopens the same page).
   var back = $("btn-lane-back");
