@@ -347,11 +347,11 @@ func TestWorkbenchUIRunSummaryMarkers(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, marker := range []string{
-		"renderRunSummary",  // run summary rendering
-		"loopStatus",        // single source of truth for loop state
-		"loopNext",          // full-loop Next guidance
-		"Run validation on", // a late-loop Next step (full loop covered)
-		"Loop complete",     // loop-complete state
+		"renderRunSummary",               // run summary rendering
+		"loopStatus",                     // single source of truth for loop state
+		"loopNext",                       // full-loop Next guidance
+		"Go to Apply and run validation", // a late-loop, rail-aware Next step
+		"Loop complete",                  // loop-complete state
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("expected app.js to contain %q", marker)
@@ -456,6 +456,70 @@ func TestWorkbenchUILaneDetailMarkers(t *testing.T) {
 		if !strings.Contains(html, marker) {
 			t.Errorf("expected index to contain %q", marker)
 		}
+	}
+}
+
+// TestWorkbenchUIFocusedShellPolishMarkers checks the third focused-shell slice:
+// rail-aware Next guidance, the frontend-only Setup-collapse affordance, quiet
+// rail badges, and the removal of the now-dead Lane Console resize machinery.
+func TestWorkbenchUIFocusedShellPolishMarkers(t *testing.T) {
+	mux := New().mux
+	getBody := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	js := getBody("/app.js")
+	for _, marker := range []string{
+		"Go to Agg and aggregate",     // rail-aware Next guidance names the rail target
+		"Go to Lock and request",      // rail-aware Next guidance (lockbox)
+		"Go to Apply and explicitly",  // rail-aware Next guidance (apply)
+		"hf.setupCollapsed.v1",        // setup-collapse persistence key
+		"function setupComplete",      // collapse gated on setup being ready
+		"function toggleSetup",        // setup-collapse toggle
+		"function applySetupCollapse", // applies body.setup-collapsed + toggle/summary
+		"renderRailBadges",            // quiet rail badges
+		"nav-badge-",                  // rail badge element id prefix
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+	// The Lane Console resize machinery is dead after the lane-detail slice and
+	// must be gone (no grip element to drive it).
+	for _, gone := range []string{
+		"initConsoleResize",
+		"loadConsoleHeight",
+		"setConsoleHeight",
+		"hf.consoleHeight.v1",
+		"--console-h",
+	} {
+		if strings.Contains(js, gone) {
+			t.Errorf("expected app.js to no longer contain dead console-resize marker %q", gone)
+		}
+	}
+
+	html := getBody("/")
+	for _, marker := range []string{
+		`id="btn-setup-toggle"`,           // visible Setup collapse/expand toggle
+		`id="setup-summary"`,              // compact status shown when collapsed
+		`class="panel run-summary-panel"`, // Run Summary hidden when collapsed
+		`class="nav-badge"`,               // rail badge spans
+		`id="nav-badge-aggregate"`,        // per-stage badge slot
+		`id="nav-badge-log"`,              // per-stage badge slot
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("expected index to contain %q", marker)
+		}
+	}
+	// The drawer resize grip is gone from the markup.
+	if strings.Contains(html, "drawer-grip") {
+		t.Error("expected index to no longer contain the removed drawer-grip")
 	}
 }
 

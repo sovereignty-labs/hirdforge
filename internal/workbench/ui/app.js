@@ -146,6 +146,7 @@ var state = {
   kind: "architect",        // active Lane Console context kind
   conversations: [],
   view: "lanes",            // focused-shell stage: lanes|aggregate|lockbox|apply|log
+  setupCollapsed: false,    // frontend-only: collapse the Lanes Setup column once setup is complete
 };
 
 var KINDS = ["architect", "builder", "reviewer", "validator", "lockbox", "apply"];
@@ -296,16 +297,16 @@ function loopNext() {
   if (!s.session) return "Start an Architect session.";
   if (s.session.status !== "accepted") return "Refine the spec, then Accept it.";
   if (!s.task) return "Create a Cortex task from the accepted spec.";
-  if (s.proposedCount === 0) return "Select a builder lane and generate a proposal.";
-  if (!s.aggregate) return "Aggregate the Builder proposals.";
-  if (!s.review) return "Run the Reviewer on the aggregate.";
+  if (s.proposedCount === 0) return "Open a builder lane and generate a proposal.";
+  if (!s.aggregate) return "Go to Agg and aggregate the Builder proposals.";
+  if (!s.review) return "Go to Agg and run the Reviewer.";
   if (s.review.verdict !== "approve") return "Reviewer verdict is " + s.review.verdict + " — revise before approval.";
-  if (!s.approval) return "Request Lockbox approval.";
-  if (s.approval.status === "pending") return "Approve (or reject) the Lockbox request.";
+  if (!s.approval) return "Go to Lock and request Lockbox approval.";
+  if (s.approval.status === "pending") return "Go to Lock and approve (or reject) the request.";
   if (s.approval.status === "rejected") return "Lockbox rejected — revise and request again.";
-  if (!s.preview || s.preview.status !== "ready") return "Generate an apply preview.";
-  if (!s.applied) return "Explicitly Apply the approved preview (writes files).";
-  if (!s.validation) return "Run validation on the applied changes.";
+  if (!s.preview || s.preview.status !== "ready") return "Go to Lock and preview the apply (read-only).";
+  if (!s.applied) return "Go to Apply and explicitly apply the approved preview (writes files).";
+  if (!s.validation) return "Go to Apply and run validation.";
   return "Loop complete — applied and validated.";
 }
 
@@ -346,7 +347,81 @@ function renderRunSummary() {
 
 // renderHeader keeps the chips, progress strip, and next hint in sync; call it
 // wherever a setup-affecting state field changes.
-function renderHeader() { renderChips(); renderProgress(); renderNextHint(); renderRunSummary(); }
+function renderHeader() {
+  renderChips(); renderProgress(); renderNextHint(); renderRunSummary();
+  applySetupCollapse(); renderRailBadges();
+}
+
+// ---- setup collapse (frontend-only) ---------------------------------------
+// The Lanes Setup column can be collapsed to a thin status strip once the early
+// setup is complete, giving the lane grid more room. Persisted, but never
+// honored before setup is ready, so a fresh operator can always reach the
+// project/provider/spec controls.
+var SETUP_KEY = "hf.setupCollapsed.v1";
+
+function setupComplete() {
+  return !!(state.project && state.provider && (state.cortexTask || state.acceptedSpec));
+}
+
+function setupSummaryText() {
+  var p = state.project ? esc(state.project.name) : "no project";
+  var pr = state.provider ? esc(state.provider.model || "provider") : "no provider";
+  var t = state.cortexTask ? "task #" + esc(state.cortexTask.id) : (state.acceptedSpec ? "spec accepted" : "no task");
+  return "✓ " + p + " · " + pr + " · " + t;
+}
+
+function applySetupCollapse() {
+  var allowed = setupComplete();
+  var collapsed = allowed && state.setupCollapsed;
+  if (document.body) document.body.classList.toggle("setup-collapsed", collapsed);
+  var btn = $("btn-setup-toggle");
+  if (btn) {
+    btn.textContent = collapsed ? "Show setup" : "Hide setup";
+    btn.disabled = !allowed;
+    btn.title = allowed ? "" : "Available once project, provider, and a spec/task exist.";
+  }
+  var sum = $("setup-summary");
+  if (sum) sum.innerHTML = setupSummaryText();
+}
+
+function toggleSetup() {
+  if (!setupComplete()) return; // never hide setup before it is ready
+  state.setupCollapsed = !state.setupCollapsed;
+  lsSet(SETUP_KEY, state.setupCollapsed ? "1" : "");
+  applySetupCollapse();
+}
+
+function restoreSetupCollapse() {
+  state.setupCollapsed = lsGet(SETUP_KEY) === "1";
+  applySetupCollapse();
+}
+
+// ---- rail badges (frontend-only) ------------------------------------------
+// Small, quiet counters/status dots on the stage rail so the operator can see
+// where attention is needed without opening each stage. All derived from the
+// already-hydrated loop state.
+function setBadge(view, text, cls) {
+  var el = $("nav-badge-" + view);
+  if (!el) return;
+  el.textContent = text || "";
+  el.className = "nav-badge" + (text ? " show" : "") + (cls ? " " + cls : "");
+}
+
+function renderRailBadges() {
+  var s = loopStatus();
+  // Agg: how many Builder proposals are in play.
+  setBadge("aggregate", s.proposedCount ? String(s.proposedCount) : "", "");
+  // Lock: approval status (pending amber / approved green / rejected red).
+  if (s.approval) {
+    var lc = s.approval.status === "approved" ? "badge-ok" : (s.approval.status === "rejected" ? "badge-bad" : "badge-warn");
+    setBadge("lockbox", "•", lc);
+  } else setBadge("lockbox", "", "");
+  // Apply: applied (amber) → applied + validated (green).
+  if (s.applied) setBadge("apply", "•", s.validation ? "badge-ok" : "badge-warn");
+  else setBadge("apply", "", "");
+  // Log: event count.
+  setBadge("log", state.events.length ? String(state.events.length) : "", "");
+}
 
 function renderProject() {
   var m = $("project-meta");
@@ -1222,6 +1297,7 @@ function renderEvents() {
     }).join("") || '<div class="empty">No events.</div>';
   }
   renderTicker();
+  renderRailBadges(); // keep the Log event-count badge fresh on each poll
 }
 
 // renderTicker keeps the thin bottom ticker showing the single latest event, so
@@ -1534,66 +1610,6 @@ async function runValidation() {
   renderReviewPanel(); renderDrawer(); refreshEvents();
 }
 
-// ---- Lane Console resize --------------------------------------------------
-var CONSOLE = { key: "hf.consoleHeight.v1", def: 320, min: 180, max: 560 };
-
-function clampConsole(h) { return Math.max(CONSOLE.min, Math.min(CONSOLE.max, h)); }
-
-function currentConsoleHeight() {
-  var v = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--console-h"), 10);
-  return isNaN(v) ? CONSOLE.def : v;
-}
-
-function setConsoleHeight(h, persist) {
-  h = clampConsole(Math.round(h));
-  document.documentElement.style.setProperty("--console-h", h + "px");
-  if (persist) { try { localStorage.setItem(CONSOLE.key, String(h)); } catch (e) { /* ignore */ } }
-}
-
-function loadConsoleHeight() {
-  var h = CONSOLE.def;
-  try { var v = parseInt(localStorage.getItem(CONSOLE.key), 10); if (!isNaN(v)) h = v; } catch (e) { /* ignore */ }
-  setConsoleHeight(h, false);
-}
-
-function initConsoleResize() {
-  loadConsoleHeight();
-  var grip = $("drawer-grip");
-  if (!grip) return;
-  var dragging = false, startY = 0, startH = 0;
-
-  function onMove(e) {
-    if (!dragging) return;
-    var y = (e.touches && e.touches[0]) ? e.touches[0].clientY : e.clientY;
-    // Dragging the grip upward (smaller clientY) grows the console; the extra
-    // height is taken from the board area above, never from the event stream.
-    setConsoleHeight(startH + (startY - y), false);
-    e.preventDefault();
-  }
-  function onUp() {
-    if (!dragging) return;
-    dragging = false;
-    document.body.style.userSelect = "";
-    setConsoleHeight(currentConsoleHeight(), true); // persist final height
-  }
-  function onDown(e) {
-    dragging = true;
-    startY = (e.touches && e.touches[0]) ? e.touches[0].clientY : e.clientY;
-    startH = currentConsoleHeight();
-    document.body.style.userSelect = "none";
-    e.preventDefault();
-  }
-
-  grip.addEventListener("mousedown", onDown);
-  grip.addEventListener("touchstart", onDown, { passive: false });
-  window.addEventListener("mousemove", onMove);
-  window.addEventListener("touchmove", onMove, { passive: false });
-  window.addEventListener("mouseup", onUp);
-  window.addEventListener("touchend", onUp);
-  // Double-click the grip to reset to the default height.
-  grip.addEventListener("dblclick", function () { setConsoleHeight(CONSOLE.def, true); });
-}
-
 // ---- selection persistence + resume cues ----------------------------------
 // Only lightweight, non-sensitive UI selection is persisted: the selected lane
 // id and the console kind. Provider keys and conversation messages are never
@@ -1709,6 +1725,9 @@ function wire() {
   // selected, so re-clicking it reopens the same page).
   var back = $("btn-lane-back");
   if (back) back.onclick = function () { setView("lanes"); };
+  // Collapse / expand the Lanes Setup column (only once setup is complete).
+  var setupToggle = $("btn-setup-toggle");
+  if (setupToggle) setupToggle.onclick = toggleSetup;
 
   $("lanes").addEventListener("click", function (e) {
     var b = e.target.closest("[data-lane]");
@@ -1746,13 +1765,9 @@ function wire() {
   $("architect-goal").addEventListener("input", updateArchitectControls);
   $("architect-message").addEventListener("input", updateArchitectControls);
   $("conv-message").addEventListener("input", updateConsoleControls);
-
-  initConsoleResize();
 }
 
 async function boot() {
-  loadConsoleHeight(); // apply the persisted drawer height before the first paint
-
   // Hydrate from the backend in parallel (fewer round-trips, less boot flicker).
   // A 404 / no-current-object is normal empty state, never an operator error; we
   // only ever set state from a successful read, so one optional 404 cannot wipe
@@ -1808,6 +1823,8 @@ async function boot() {
   syncConversationForContext();
   // Restore the operator's last focused stage (frontend-only; default lanes).
   restoreView();
+  // Restore the Setup-collapse preference (honored only once setup is complete).
+  restoreSetupCollapse();
   showResumeCues();
 
   wire();

@@ -16,10 +16,6 @@
   --validator: #6fcf97;
   --lockbox: #e0a96f;
   --apply: #e07a9f;
-
-  /* Lane Console drawer height; resized via the top grip, persisted to
-     localStorage (hf.consoleHeight.v1) and clamped to [180, 560] in app.js. */
-  --console-h: 320px;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -108,6 +104,7 @@ input:focus { outline: none; border-color: var(--accent-2); }
   display: flex; flex-direction: column; gap: 4px; padding: 12px 8px;
 }
 .nav-item {
+  position: relative;
   display: flex; flex-direction: column; align-items: center; gap: 4px;
   padding: 10px 4px; background: transparent; border: 1px solid transparent;
   border-radius: 10px; color: var(--muted); cursor: pointer;
@@ -116,6 +113,16 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .nav-item.active { background: var(--panel-2); border-color: var(--accent); color: var(--ink); }
 .nav-ico { font-size: 17px; line-height: 1; }
 .nav-label { font-size: 10px; letter-spacing: 0.02em; }
+/* Quiet rail badges: counts (Agg/Log) or a status dot (Lock/Apply). */
+.nav-badge {
+  position: absolute; top: 3px; right: 4px; display: none;
+  min-width: 15px; padding: 0 3px; border-radius: 999px; font-size: 9px; line-height: 15px;
+  text-align: center; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
+}
+.nav-badge.show { display: block; }
+.nav-badge.badge-ok { color: var(--ok); border-color: var(--ok); }
+.nav-badge.badge-warn { color: var(--accent); border-color: var(--accent); }
+.nav-badge.badge-bad { color: var(--bad); border-color: var(--bad); }
 
 /* Stage: a status line on top, one focused view filling the rest. */
 .stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -145,9 +152,20 @@ body[data-view="lane-detail"] .view-lane-detail { display: flex; }
 
 /* Compressed Setup panel: project / provider / architect as light sub-blocks. */
 .setup-panel { display: flex; flex-direction: column; gap: 12px; }
+.setup-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.setup-head h2 { margin: 0; }
+.setup-toggle { font-size: 11px; padding: 3px 8px; }
+.setup-summary { display: none; }
 .setup-block { border-top: 1px solid var(--line-soft); padding-top: 10px; }
 .setup-block:first-of-type { border-top: none; padding-top: 0; }
 .setup-label { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; margin-bottom: 6px; }
+
+/* Setup collapsed: the column becomes a thin status strip and the lane grid
+   takes the freed width. Honored only once setup is complete (gated in JS). */
+body.setup-collapsed .lanes-grid { grid-template-columns: 200px minmax(0, 1fr); }
+body.setup-collapsed .setup-block,
+body.setup-collapsed .run-summary-panel { display: none; }
+body.setup-collapsed .setup-summary { display: block; margin-top: 2px; }
 
 /* Lane detail view — one focused page: lane + artifact fused with the console. */
 .view-lane-detail { flex-direction: column; min-height: 0; overflow: hidden; }

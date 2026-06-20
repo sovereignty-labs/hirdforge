@@ -27,11 +27,11 @@
   <div class="shell">
     <!-- Stage rail: switches the focused stage. Each item sets state.view. -->
     <nav class="navrail" id="navrail" aria-label="Stage rail">
-      <button class="nav-item" data-view="lanes"><span class="nav-ico">▣</span><span class="nav-label">Lanes</span></button>
-      <button class="nav-item" data-view="aggregate"><span class="nav-ico">≣</span><span class="nav-label">Agg</span></button>
-      <button class="nav-item" data-view="lockbox"><span class="nav-ico">⬚</span><span class="nav-label">Lock</span></button>
-      <button class="nav-item" data-view="apply"><span class="nav-ico">↧</span><span class="nav-label">Apply</span></button>
-      <button class="nav-item" data-view="log"><span class="nav-ico">≡</span><span class="nav-label">Log</span></button>
+      <button class="nav-item" data-view="lanes"><span class="nav-ico">▣</span><span class="nav-label">Lanes</span><span class="nav-badge" id="nav-badge-lanes"></span></button>
+      <button class="nav-item" data-view="aggregate"><span class="nav-ico">≣</span><span class="nav-label">Agg</span><span class="nav-badge" id="nav-badge-aggregate"></span></button>
+      <button class="nav-item" data-view="lockbox"><span class="nav-ico">⬚</span><span class="nav-label">Lock</span><span class="nav-badge" id="nav-badge-lockbox"></span></button>
+      <button class="nav-item" data-view="apply"><span class="nav-ico">↧</span><span class="nav-label">Apply</span><span class="nav-badge" id="nav-badge-apply"></span></button>
+      <button class="nav-item" data-view="log"><span class="nav-ico">≡</span><span class="nav-label">Log</span><span class="nav-badge" id="nav-badge-log"></span></button>
     </nav>
 
     <main class="stage" id="stage">
@@ -46,7 +46,11 @@
         <div class="lanes-grid">
           <aside class="setup">
             <section class="panel setup-panel">
-              <h2>Setup</h2>
+              <div class="setup-head">
+                <h2>Setup</h2>
+                <button id="btn-setup-toggle" class="setup-toggle" disabled title="Available once project, provider, and a spec/task exist.">Hide setup</button>
+              </div>
+              <div class="setup-summary meta" id="setup-summary"></div>
               <div class="setup-block">
                 <div class="setup-label">Project</div>
                 <div class="field">
@@ -91,7 +95,7 @@
               </div>
             </section>
 
-            <section class="panel">
+            <section class="panel run-summary-panel">
               <h2>Run Summary</h2>
               <div id="run-summary" class="run-summary"></div>
             </section>
