@@ -474,30 +474,101 @@ function renderInspector() {
   }
 }
 
+// kindAvailable reports whether a context kind can be used now: non-lane kinds
+// always, lane kinds only when the task has a lane of that role.
+function kindAvailable(k) {
+  if (LANE_KINDS.indexOf(k) < 0) return true;
+  return state.lanes.some(function (x) { return x.role === k; });
+}
+
+// consoleReadiness centralizes the Lane Console gating: which controls are
+// enabled, the Open/Reuse label, and the single inline hint for the first
+// blocker.
+function consoleReadiness() {
+  var laneBound = LANE_KINDS.indexOf(state.kind) >= 0;
+  var laneOfKind = kindAvailable(state.kind);
+  var laneNeeded = laneBound && !state.selectedLane;
+  var conv = state.laneConversation;
+  var active = !!(conv && conv.status === "active");
+  var existing = currentContextConversation();
+  var hasReusable = !!(existing && existing.status !== "closed");
+  var msgEl = $("conv-message");
+  var msg = msgEl ? msgEl.value.trim() : "";
+
+  var r = {
+    laneBound: laneBound,
+    canOpen: !laneNeeded && laneOfKind,
+    canSend: active && msg.length > 0,
+    canClose: active,
+    openLabel: hasReusable ? "Reuse Conversation" : "Open Conversation",
+    hint: "",
+  };
+  if (laneBound && !laneOfKind) r.hint = "No " + state.kind + " lane in this task — pick another kind.";
+  else if (laneNeeded) r.hint = "Select a " + state.kind + " lane on the board to bind a conversation.";
+  else if (!conv) r.hint = hasReusable
+    ? "A conversation already exists — click Reuse Conversation to open it."
+    : "Open a conversation for this " + (laneBound ? "lane" : "context") + ".";
+  else if (conv.status === "closed") r.hint = "This conversation is closed — open a new one.";
+  else if (!msg) r.hint = "Type a message and press Enter to send.";
+  return r;
+}
+
+// updateConsoleControls applies consoleReadiness to the buttons and hint. It is
+// cheap and also runs on every keystroke in the message input.
+function updateConsoleControls() {
+  var r = consoleReadiness();
+  var openBtn = $("btn-conv-new");
+  if (openBtn) { openBtn.textContent = r.openLabel; openBtn.disabled = !r.canOpen; }
+  $("btn-conv-send").disabled = !r.canSend;
+  $("btn-conv-close").disabled = !r.canClose;
+  var hint = $("console-hint");
+  if (hint) { hint.textContent = r.hint; hint.classList.toggle("hidden", !r.hint); }
+}
+
+// renderDrawerScope renders the compact contextual header: kind, lane-bound vs
+// general, selected lane, task id, and conversation id/status.
+function renderDrawerScope() {
+  var laneBound = LANE_KINDS.indexOf(state.kind) >= 0;
+  var parts = ['kind <b>' + esc(state.kind) + "</b>"];
+  parts.push(laneBound
+    ? '<span class="scope-tag scope-lane">lane-bound</span>'
+    : '<span class="scope-tag scope-general">general</span>');
+  if (laneBound) {
+    if (state.selectedLane) {
+      var l = state.selectedLane;
+      parts.push("lane <b>#" + esc(l.id) + "</b> " + esc(l.role) + " · " + esc(l.status));
+    } else {
+      parts.push('<span class="muted">no ' + esc(state.kind) + " lane selected</span>");
+    }
+  }
+  if (state.cortexTask) parts.push("task #" + esc(state.cortexTask.id));
+  parts.push(state.laneConversation
+    ? "conversation #" + esc(state.laneConversation.id) + ' · <span class="status-' +
+      esc(state.laneConversation.status) + '">' + esc(state.laneConversation.status) + "</span>"
+    : '<span class="muted">no conversation</span>');
+  $("drawer-scope").innerHTML = parts.join(" · ");
+}
+
 function renderDrawer() {
   $("kind-chips").innerHTML = KINDS.map(function (k) {
-    return '<button class="kind' + (k === state.kind ? " active" : "") + '" data-kind="' + k + '">' + k + "</button>";
+    var cls = "kind" + (k === state.kind ? " active" : "") + (kindAvailable(k) ? "" : " unavailable");
+    var title = kindAvailable(k) ? "" : ' title="No ' + esc(k) + ' lane in this task"';
+    return '<button class="' + cls + '" data-kind="' + k + '"' + title + ">" + k + "</button>";
   }).join("");
 
-  var scope = ["kind <b>" + esc(state.kind) + "</b>"];
-  if (state.selectedLane && LANE_KINDS.indexOf(state.kind) >= 0) {
-    scope.push("lane " + esc(state.selectedLane.id) + " (" + esc(state.selectedLane.role) + ")");
-  }
-  if (state.laneConversation) {
-    scope.push("conversation #" + esc(state.laneConversation.id) + " · " +
-      '<span class="status-' + esc(state.laneConversation.status) + '">' + esc(state.laneConversation.status) + "</span>");
-  }
-  $("drawer-scope").innerHTML = scope.join(" · ");
+  renderDrawerScope();
 
+  var laneBound = LANE_KINDS.indexOf(state.kind) >= 0;
   var msgs = (state.laneConversation && state.laneConversation.messages) || [];
   var cm = $("conv-messages");
-  cm.innerHTML = msgs.map(renderMsg).join("") ||
-    '<div class="empty">No conversation. Start one for the selected lane / context.</div>';
+  cm.innerHTML = msgs.length
+    ? msgs.map(renderMsg).join("")
+    : (state.laneConversation
+      ? '<div class="empty">No messages yet. Type below to start.</div>'
+      : '<div class="empty">No conversation open for this ' + (laneBound ? "lane" : "context") + ".</div>");
   cm.scrollTop = cm.scrollHeight;
 
-  var closed = !!(state.laneConversation && state.laneConversation.status === "closed");
-  $("btn-conv-send").disabled = !state.laneConversation || closed;
-  $("btn-conv-close").disabled = !state.laneConversation || closed;
+  updateConsoleControls();
 }
 
 function renderEvents() {
@@ -850,6 +921,7 @@ function wire() {
   // Live-enable Start / Send as the operator types into the goal / message.
   $("architect-goal").addEventListener("input", updateArchitectControls);
   $("architect-message").addEventListener("input", updateArchitectControls);
+  $("conv-message").addEventListener("input", updateConsoleControls);
 
   initConsoleResize();
 }

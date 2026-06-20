@@ -200,7 +200,13 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .kinds { display: flex; gap: 6px; flex-wrap: wrap; }
 .kind { text-transform: capitalize; padding: 4px 12px; border-radius: 999px; }
 .kind.active { background: var(--accent); color: #1a1408; border-color: var(--accent); font-weight: 600; }
+/* A lane kind with no matching lane in the task: dimmed but still clickable so
+   it can explain itself via the inline hint. */
+.kind.unavailable { opacity: 0.45; }
 .drawer-scope { margin-bottom: 8px; flex: none; }
+.scope-tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
+.scope-lane { color: var(--accent-2); border-color: var(--accent-2); }
+.scope-general { color: var(--muted); }
 .drawer .field { flex: none; }
 #conv-messages { flex: 1 1 auto; min-height: 0; max-height: none; }
 
