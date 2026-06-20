@@ -183,6 +183,20 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .ins-row { padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .ins-row b { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; margin-right: 6px; }
 
+/* Builder proposal panel inside the inspector. */
+.ins-prop { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.ins-prop-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
+.ins-prop-head b { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
+.prop-btn { font-size: 11px; padding: 3px 8px; }
+.prop-head { font-size: 12px; }
+.prop-sub { color: var(--muted); font-size: 11px; margin: 2px 0; }
+.prop-summary { font-size: 12px; margin: 4px 0; white-space: pre-wrap; }
+.prop-error { font-size: 11px; margin: 4px 0; }
+.prop-files-h { color: var(--muted); font-size: 11px; margin-top: 4px; }
+.prop-files { margin: 2px 0 0; padding-left: 16px; font-size: 11px; }
+.prop-files li { margin: 1px 0; }
+.prop-action { color: var(--accent); text-transform: uppercase; font-size: 9px; letter-spacing: 0.04em; }
+
 /* Lane Console drawer: fixed (resizable) height, internal message scroll, and a
    top-edge grip for dragging the height up/down. */
 .drawer {

@@ -73,6 +73,10 @@ var api = {
 
   getCortexTask: function () { return request("GET", "/api/workbench/cortex/task"); },
   getLanes: function () { return request("GET", "/api/workbench/cortex/lanes"); },
+  getLaneProposals: function () { return request("GET", "/api/workbench/cortex/lane/proposals"); },
+  generateLaneProposal: function (taskId, laneId) {
+    return request("POST", "/api/workbench/cortex/lane/propose", { task_id: taskId, lane_id: laneId });
+  },
 
   getLaneConversation: function () { return request("GET", "/api/workbench/lane-conversation"); },
   getLaneConversations: function () { return request("GET", "/api/workbench/lane-conversations"); },
@@ -97,6 +101,7 @@ var state = {
   lanes: [],                // mirror of cortexTask.lanes
   selectedLane: null,
   laneConversation: null,   // current LaneConversation
+  proposals: [],            // CortexLaneProposal list (builder lane proposals)
   events: [],
   error: "",
   loading: false,
@@ -410,6 +415,63 @@ function syncConversationForContext() {
   state.laneConversation = currentContextConversation();
 }
 
+// ---- builder proposal helpers ---------------------------------------------
+// proposalForLane returns the most relevant builder proposal for a lane: a
+// "proposed" one if present, else the most recent (any status), else null.
+function proposalForLane(laneId) {
+  if (!laneId) return null;
+  return state.proposals.filter(function (p) { return p.lane_id === laneId; })
+    .sort(function (a, b) {
+      var ap = a.status === "proposed" ? 1 : 0, bp = b.status === "proposed" ? 1 : 0;
+      if (ap !== bp) return bp - ap;
+      return (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0);
+    })[0] || null;
+}
+
+// proposalReadiness gates "Generate Builder Proposal": a builder lane with
+// project + provider + task, and not when a proposed proposal already exists
+// (the backend also reuses, so this just avoids encouraging duplicates).
+function proposalReadiness() {
+  var l = state.selectedLane;
+  var isBuilder = !!(l && l.role === "builder");
+  var existing = isBuilder ? proposalForLane(l.id) : null;
+  var hasProposed = !!(existing && existing.status === "proposed");
+  var r = {
+    isBuilder: isBuilder,
+    existing: existing,
+    hasProposed: hasProposed,
+    canGenerate: isBuilder && !!state.project && !!state.provider && !!state.cortexTask && !hasProposed,
+    hint: "",
+  };
+  if (isBuilder) {
+    if (!state.project) r.hint = "Open a project to generate a proposal.";
+    else if (!state.provider) r.hint = "Configure a provider to generate a proposal.";
+    else if (!state.cortexTask) r.hint = "Create a Cortex task first.";
+    else if (hasProposed) r.hint = "Proposal already generated for this lane.";
+    else if (existing && existing.status === "failed") r.hint = "Previous attempt failed — generate again.";
+    else r.hint = "Generate a Builder proposal for this lane.";
+  }
+  return r;
+}
+
+// renderProposal renders a builder proposal compactly: id, lane/task, status,
+// summary, error, and a truncated changed-file list (no full diffs).
+function renderProposal(p) {
+  var statusCls = p.status === "proposed" ? "ok" : (p.status === "failed" ? "bad" : "muted");
+  var html = '<div class="prop-head">proposal <b>#' + esc(p.id) + '</b> · <span class="' + statusCls + '">' + esc(p.status) + "</span></div>";
+  html += '<div class="prop-sub">lane #' + esc(p.lane_id) + (p.task_id ? " · task #" + esc(p.task_id) : "") + (p.ts ? " · " + esc(fmtTs(p.ts)) : "") + "</div>";
+  if (p.summary) html += '<div class="prop-summary">' + esc(p.summary) + "</div>";
+  if (p.error) html += '<div class="bad prop-error">' + esc(p.error) + "</div>";
+  var files = p.files || [];
+  html += '<div class="prop-files-h">' + files.length + " changed file" + (files.length === 1 ? "" : "s") + "</div>";
+  if (files.length) {
+    html += '<ul class="prop-files">' + files.map(function (f) {
+      return '<li><span class="prop-action">' + esc(f.action) + '</span> <span class="mono">' + esc(truncPath(f.path)) + "</span></li>";
+    }).join("") + "</ul>";
+  }
+  return html;
+}
+
 // renderTaskSummary renders the compact Cortex task summary for the board head.
 function renderTaskSummary() {
   var t = state.cortexTask;
@@ -453,25 +515,36 @@ function renderBoard() {
 
 function renderInspector() {
   var b = $("inspector-body");
-  if (state.selectedLane) {
-    var l = state.selectedLane;
-    var conv = conversationForLane(l.id);
-    b.innerHTML =
-      '<div class="ins-row"><b>lane</b> ' + esc(l.id) + "</div>" +
-      '<div class="ins-row"><b>role</b> ' + esc(l.role) + "</div>" +
-      '<div class="ins-row"><b>index</b> ' + esc(l.index) + "</div>" +
-      '<div class="ins-row"><b>status</b> ' + esc(l.status) + "</div>" +
-      '<div class="ins-row"><b>task</b> ' + esc(l.task) + "</div>" +
-      (state.cortexTask ? '<div class="ins-row"><b>related task</b> #' + esc(state.cortexTask.id) + "</div>" : "") +
-      (l.worktree_branch ? '<div class="ins-row"><b>branch</b> ' + esc(l.worktree_branch) + "</div>" : "") +
-      (l.workspace_path ? '<div class="ins-row"><b>workspace</b> <span class="mono">' + esc(l.workspace_path) + "</span></div>" : "") +
-      (conv
-        ? '<div class="ins-row"><b>conversation</b> #' + esc(conv.id) + ' · <span class="status-' + esc(conv.status) + '">' + esc(conv.status) + "</span></div>"
-        : '<div class="ins-row"><b>conversation</b> <span class="muted">none — start one in the Lane Console</span></div>');
-  } else {
+  if (!state.selectedLane) {
     b.innerHTML = '<div class="ins-row"><b>context</b> ' + esc(state.kind) + "</div>" +
-      '<div class="empty">No lane selected. Pick a lane on the board to see its role, status, branch, and conversation here.</div>';
+      '<div class="empty">No lane selected. Pick a lane on the board to see its role, status, branch, conversation, and proposal here.</div>';
+    return;
   }
+  var l = state.selectedLane;
+  var conv = conversationForLane(l.id);
+  var rows =
+    '<div class="ins-row"><b>lane</b> ' + esc(l.id) + "</div>" +
+    '<div class="ins-row"><b>role</b> ' + esc(l.role) + "</div>" +
+    '<div class="ins-row"><b>index</b> ' + esc(l.index) + "</div>" +
+    '<div class="ins-row"><b>status</b> ' + esc(l.status) + "</div>" +
+    '<div class="ins-row"><b>task</b> ' + esc(l.task) + "</div>" +
+    (state.cortexTask ? '<div class="ins-row"><b>related task</b> #' + esc(state.cortexTask.id) + "</div>" : "") +
+    (l.worktree_branch ? '<div class="ins-row"><b>branch</b> ' + esc(l.worktree_branch) + "</div>" : "") +
+    (l.workspace_path ? '<div class="ins-row"><b>workspace</b> <span class="mono">' + esc(l.workspace_path) + "</span></div>" : "") +
+    (conv
+      ? '<div class="ins-row"><b>conversation</b> #' + esc(conv.id) + ' · <span class="status-' + esc(conv.status) + '">' + esc(conv.status) + "</span></div>"
+      : '<div class="ins-row"><b>conversation</b> <span class="muted">none — start one in the Lane Console</span></div>');
+
+  if (l.role === "builder") {
+    var pr = proposalReadiness();
+    rows += '<div class="ins-prop">' +
+      '<div class="ins-prop-head"><b>builder proposal</b>' +
+      '<button class="prop-btn" data-action="gen-proposal"' + (pr.canGenerate ? "" : " disabled") + ">Generate Builder Proposal</button></div>" +
+      (pr.existing ? renderProposal(pr.existing) : '<div class="empty">No proposal yet.</div>') +
+      (pr.hint ? '<div class="hint">' + esc(pr.hint) + "</div>" : "") +
+      "</div>";
+  }
+  b.innerHTML = rows;
 }
 
 // kindAvailable reports whether a context kind can be used now: non-lane kinds
@@ -546,6 +619,10 @@ function renderDrawerScope() {
     ? "conversation #" + esc(state.laneConversation.id) + ' · <span class="status-' +
       esc(state.laneConversation.status) + '">' + esc(state.laneConversation.status) + "</span>"
     : '<span class="muted">no conversation</span>');
+  if (state.selectedLane && state.selectedLane.role === "builder") {
+    var prop = proposalForLane(state.selectedLane.id);
+    parts.push(prop ? "proposal #" + esc(prop.id) + " · " + esc(prop.status) : '<span class="muted">no proposal</span>');
+  }
   $("drawer-scope").innerHTML = parts.join(" · ");
 }
 
@@ -739,6 +816,26 @@ async function loadConversations() {
   if (r.ok && Array.isArray(r.data)) state.conversations = r.data;
 }
 
+async function loadProposals() {
+  var r = await api.getLaneProposals();
+  if (r.ok && Array.isArray(r.data)) state.proposals = r.data;
+}
+
+async function generateProposal() {
+  var l = state.selectedLane;
+  if (!l || l.role !== "builder") { showError("proposal: select a builder lane first"); return; }
+  if (!state.cortexTask) { showError("proposal: create a Cortex task first"); return; }
+  var existing = proposalForLane(l.id);
+  if (existing && existing.status === "proposed") { showError("proposal: one already exists for this lane"); return; }
+  var r = await api.generateLaneProposal(state.cortexTask.id, l.id);
+  // On provider failure the backend returns 502 with the stored (failed)
+  // proposal; reload either way so the inspector reflects it.
+  await loadProposals();
+  if (fail(r, "generate proposal")) { renderInspector(); renderDrawer(); refreshEvents(); return; }
+  clearError();
+  renderInspector(); renderDrawer(); refreshEvents();
+}
+
 // ---- Lane Console resize --------------------------------------------------
 var CONSOLE = { key: "hf.consoleHeight.v1", def: 320, min: 180, max: 560 };
 
@@ -909,6 +1006,9 @@ function wire() {
     var b = e.target.closest("[data-kind]");
     if (b) setKind(b.getAttribute("data-kind"));
   });
+  $("inspector-body").addEventListener("click", function (e) {
+    if (e.target.closest('[data-action="gen-proposal"]')) generateProposal();
+  });
 
   function onEnter(id, fn) {
     $(id).addEventListener("keydown", function (e) { if (e.key === "Enter") fn(); });
@@ -942,9 +1042,10 @@ async function boot() {
     api.getLaneConversation(),
     api.getLaneConversations(),
     api.getEvents(),
+    api.getLaneProposals(),
   ]);
   var proj = r[0], prov = r[1], sess = r[2], sessions = r[3],
-    task = r[4], conv = r[5], convs = r[6], events = r[7];
+    task = r[4], conv = r[5], convs = r[6], events = r[7], props = r[8];
 
   if (proj.ok) state.project = proj.data;
   if (prov.ok) state.provider = prov.data;
@@ -957,6 +1058,7 @@ async function boot() {
   }
   if (convs.ok && Array.isArray(convs.data)) state.conversations = convs.data;
   if (events.ok && Array.isArray(events.data)) state.events = events.data;
+  if (props.ok && Array.isArray(props.data)) state.proposals = props.data;
 
   // Re-apply the operator's last selection against the hydrated lanes.
   restoreSelection();

@@ -785,6 +785,17 @@ func (wb *Server) handleCortexLanePropose(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Reuse an existing successful proposal for this lane instead of generating a
+	// duplicate (which would double-count files at aggregation). A failed
+	// proposal is retryable and does not block regeneration. This runs before the
+	// provider/project checks so an existing proposal is returned regardless.
+	for _, p := range wb.cortexLaneProposals.ListByLane(lane.ID) {
+		if p.TaskID == task.ID && p.Status == builderProposalStatusProposed {
+			writeJSON(w, http.StatusOK, p)
+			return
+		}
+	}
+
 	cfg := wb.provider.Config()
 	if cfg == nil {
 		http.Error(w, "provider must be configured", http.StatusConflict)

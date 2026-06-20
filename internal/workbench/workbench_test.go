@@ -221,6 +221,30 @@ func TestWorkbenchUIConsoleMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUIProposalMarkers checks the served app.js carries the builder
+// proposal UX logic by stable identifier: proposal state, generation/readiness
+// gating, proposal display, and the duplicate-proposal guard.
+func TestWorkbenchUIProposalMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"proposalForLane",      // proposal state / lookup
+		"proposalReadiness",    // generation readiness gating + duplicate guard
+		"renderProposal",       // proposal display
+		"generateLaneProposal", // generate action calling the backend
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
@@ -4184,6 +4208,40 @@ func TestWorkbenchCortexLaneProposeStores(t *testing.T) {
 	wb.mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET lane/proposal: expected 200, got %d", rec.Code)
+	}
+}
+
+func TestWorkbenchCortexLaneProposeReusesExisting(t *testing.T) {
+	files := []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "package a\n", Rationale: "x"}}
+	wb, _ := cortexLaneProposeSetup(t, proposalResponse("ok", files))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	b := cortexFirstBuilderLane(t, task)
+
+	first := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: expected 201, got %d: %s", first.Code, first.Body.String())
+	}
+	var p1 CortexLaneProposal
+	json.Unmarshal(first.Body.Bytes(), &p1)
+
+	// A repeat for the same lane reuses the existing proposal (200, same id) and
+	// does not create a duplicate that would later double-count at aggregation.
+	second := postJSON(t, wb, "/api/workbench/cortex/lane/propose", `{"lane_id":"`+b.ID+`"}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("repeat: expected 200 (reuse), got %d: %s", second.Code, second.Body.String())
+	}
+	var p2 CortexLaneProposal
+	json.Unmarshal(second.Body.Bytes(), &p2)
+	if p2.ID != p1.ID {
+		t.Errorf("repeat returned proposal #%s, want existing #%s", p2.ID, p1.ID)
+	}
+
+	rec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/lane/proposals?lane_id="+b.ID, nil))
+	var list []CortexLaneProposal
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 {
+		t.Errorf("expected exactly 1 proposal for the lane after a repeat, got %d", len(list))
 	}
 }
 
