@@ -44,6 +44,10 @@ type ArchitectSession struct {
 	Status   string             `json:"status"`
 	Messages []ArchitectMessage `json:"messages"`
 	Spec     ArchitectSpecDraft `json:"spec"`
+	// CortexTaskID is the id of the Cortex task created from this session's
+	// accepted spec, if any. It makes task creation idempotent (a repeat request
+	// returns the same task) and lets the UI show a task already exists.
+	CortexTaskID string `json:"cortex_task_id,omitempty"`
 }
 
 const (
@@ -562,6 +566,15 @@ func (wb *Server) handleArchitectCortexTask(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Idempotency: an accepted session yields exactly one Cortex task. A repeat
+	// request returns the existing task (200) instead of creating a duplicate.
+	if session.CortexTaskID != "" {
+		if existing := wb.cortex.Find(session.CortexTaskID); existing != nil {
+			writeJSON(w, http.StatusOK, *existing)
+			return
+		}
+	}
+
 	mode := in.Mode
 	if mode == "" {
 		mode = cortexModeMulti
@@ -578,6 +591,9 @@ func (wb *Server) handleArchitectCortexTask(w http.ResponseWriter, r *http.Reque
 		Status: cortexTaskStatusPlanned,
 		Lanes:  buildCortexLanes(counts, goal),
 	})
+	// Record the task on the session so subsequent requests are idempotent.
+	session.CortexTaskID = task.ID
+	wb.architect.Update(*session)
 	wb.appendArchitectEvent("architect.cortex_task.created", "Created Cortex task from Architect spec", map[string]any{
 		"architect_session_id": session.ID,
 		"task":                 task,

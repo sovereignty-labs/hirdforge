@@ -147,6 +147,31 @@ func TestWorkbenchUISetupMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUIArchitectMarkers checks the served app.js carries the Architect
+// flow UX logic by stable identifier: readiness gating, spec rendering with
+// empty sections, accepted-state rendering, and the create-task guard.
+func TestWorkbenchUIArchitectMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"architectReadiness",      // start/send/accept gating
+		"updateArchitectControls", // disabled-state logic
+		"canCreateTask",           // create-task guard
+		"spec-none",               // empty spec sections render "none"
+		"spec-accepted",           // accepted-state rendering
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
@@ -7003,6 +7028,45 @@ func TestWorkbenchArchitectCortexTaskCreatesTask(t *testing.T) {
 	}
 	if len(task.Lanes) == 0 {
 		t.Error("expected lanes to be created")
+	}
+}
+
+func TestWorkbenchArchitectCortexTaskIdempotent(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "ship the thing")
+	postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+
+	first := postJSON(t, wb, "/api/workbench/architect/cortex-task", `{}`)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first: expected 201, got %d: %s", first.Code, first.Body.String())
+	}
+	var t1 CortexTask
+	json.Unmarshal(first.Body.Bytes(), &t1)
+
+	// A repeat request must be idempotent: same task id, 200, one task total.
+	second := postJSON(t, wb, "/api/workbench/architect/cortex-task", `{}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("repeat: expected 200 (idempotent), got %d: %s", second.Code, second.Body.String())
+	}
+	var t2 CortexTask
+	json.Unmarshal(second.Body.Bytes(), &t2)
+	if t2.ID != t1.ID {
+		t.Errorf("repeat returned task #%s, want existing #%s", t2.ID, t1.ID)
+	}
+
+	listW := architectGET(t, wb, "/api/workbench/cortex/tasks")
+	var tasks []CortexTask
+	json.Unmarshal(listW.Body.Bytes(), &tasks)
+	if len(tasks) != 1 {
+		t.Errorf("expected exactly 1 cortex task after a duplicate request, got %d", len(tasks))
+	}
+
+	// The session records the task id, so the UI knows one already exists.
+	sessW := architectGET(t, wb, "/api/workbench/architect/session")
+	var sess ArchitectSession
+	json.Unmarshal(sessW.Body.Bytes(), &sess)
+	if sess.CortexTaskID != t1.ID {
+		t.Errorf("session cortex_task_id=%q, want %q", sess.CortexTaskID, t1.ID)
 	}
 }
 

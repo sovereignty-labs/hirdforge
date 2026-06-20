@@ -127,10 +127,22 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .msg-assistant, .msg-architect { border-left: 2px solid var(--architect); }
 .msg-system { border-left: 2px solid var(--bad); }
 
+/* Architect status badges. */
+.badge { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+.badge-idle { color: var(--muted); }
+.badge-active { color: var(--accent-2); border-color: var(--accent-2); }
+.badge-ok { color: var(--ok); border-color: var(--ok); }
+
+/* Structured spec: compact cards, every section always shown. */
 .spec { margin-top: 8px; font-size: 12px; }
-.spec-goal { margin-bottom: 6px; }
-.spec-row b { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; }
-.spec-row ul { margin: 2px 0 6px; padding-left: 18px; }
+.spec-accepted { color: var(--ok); font-weight: 600; margin-bottom: 6px; }
+.spec-goal { margin-bottom: 8px; }
+.spec-goal-label { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; margin-right: 6px; }
+.spec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.spec-card { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+.spec-card-h { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; margin-bottom: 3px; }
+.spec-card ul { margin: 0; padding-left: 16px; }
+.spec-none { color: var(--muted); font-style: italic; }
 
 .status-active { color: var(--accent-2); }
 .status-accepted { color: var(--ok); }

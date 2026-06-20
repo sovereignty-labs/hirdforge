@@ -242,42 +242,107 @@ function renderMsg(m) {
     '</span><span class="content">' + esc(m.content) + "</span></div>";
 }
 
-function renderSpec(spec) {
-  function list(label, arr) {
-    if (!arr || !arr.length) return "";
-    return '<div class="spec-row"><b>' + label + "</b><ul>" +
-      arr.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul></div>";
+function renderSpec(spec, accepted) {
+  // Every section is always shown; an empty one says "none" rather than
+  // vanishing silently.
+  function card(label, arr) {
+    var body = (arr && arr.length)
+      ? "<ul>" + arr.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>"
+      : '<span class="spec-none">none</span>';
+    return '<div class="spec-card"><div class="spec-card-h">' + label + "</div>" + body + "</div>";
   }
-  return '<div class="spec-goal"><b>goal</b> ' + esc(spec.goal) + "</div>" +
-    list("constraints", spec.constraints) +
-    list("affected areas", spec.affected_areas) +
-    list("acceptance", spec.acceptance_criteria) +
-    list("risks", spec.risks) +
-    list("open questions", spec.open_questions) +
-    list("suggested lanes", spec.suggested_lanes);
+  var head = "";
+  if (accepted) head += '<div class="spec-accepted">✓ Accepted spec</div>';
+  head += '<div class="spec-goal"><span class="spec-goal-label">goal</span> ' + esc(spec.goal || "—") + "</div>";
+  return head +
+    '<div class="spec-grid">' +
+    card("constraints", spec.constraints) +
+    card("affected areas", spec.affected_areas) +
+    card("acceptance criteria", spec.acceptance_criteria) +
+    card("risks", spec.risks) +
+    card("open questions", spec.open_questions) +
+    card("suggested lanes", spec.suggested_lanes) +
+    "</div>";
+}
+
+// architectTaskId returns the Cortex task already created from this session, if
+// the backend recorded one (cortex_task_id), else "".
+function architectTaskId() {
+  var s = state.architectSession;
+  if (s && s.cortex_task_id) return s.cortex_task_id;
+  if (s && s.status === "accepted" && state.cortexTask) return state.cortexTask.id;
+  return "";
+}
+
+// architectReadiness centralizes the can-start / can-send / can-accept /
+// can-create-task gating plus a single inline hint explaining the first blocker.
+function architectReadiness() {
+  var s = state.architectSession;
+  var hasProject = !!state.project;
+  var hasProvider = !!state.provider;
+  var active = !!(s && s.status === "active");
+  var accepted = !!(s && s.status === "accepted");
+  var hasSpec = !!(s && s.spec && s.spec.goal);
+  var hasTask = !!architectTaskId();
+  var goalEl = $("architect-goal"), msgEl = $("architect-message");
+  var goal = goalEl ? goalEl.value.trim() : "";
+  var msg = msgEl ? msgEl.value.trim() : "";
+
+  var r = {
+    canStart: hasProject && hasProvider && goal.length > 0,
+    canSend: hasProject && hasProvider && active && msg.length > 0,
+    canAccept: active && hasSpec,
+    canCreateTask: accepted && !hasTask,
+    hint: "",
+  };
+  if (!hasProject) r.hint = "Open a project before using the Architect.";
+  else if (!hasProvider) r.hint = "Configure a provider before using the Architect.";
+  else if (!s) r.hint = "Enter a goal and click Start to open an Architect session.";
+  else if (active) r.hint = hasSpec ? "Refine with messages, then Accept the spec." : "Send a message so the Architect drafts a spec.";
+  else if (accepted && !hasTask) r.hint = "Spec accepted — create a Cortex task.";
+  else if (hasTask) r.hint = "Cortex task #" + architectTaskId() + " created — continue in the Lane Console.";
+  return r;
+}
+
+// updateArchitectControls recomputes button-disabled state and the inline hint.
+// It is cheap and runs on every keystroke in the goal / message inputs.
+function updateArchitectControls() {
+  var r = architectReadiness();
+  $("btn-architect-start").disabled = !r.canStart;
+  $("btn-architect-send").disabled = !r.canSend;
+  $("btn-architect-accept").disabled = !r.canAccept;
+  $("btn-architect-task").disabled = !r.canCreateTask;
+  var hint = $("architect-hint");
+  if (hint) { hint.textContent = r.hint; hint.classList.toggle("hidden", !r.hint); }
 }
 
 function renderArchitect() {
   var session = state.architectSession;
   var meta = $("architect-meta");
   if (!session) {
-    meta.textContent = state.sessionCount ? ("No active session (" + state.sessionCount + " total).") : "No session.";
+    meta.innerHTML = state.sessionCount
+      ? '<span class="badge badge-idle">no active session</span> · ' + state.sessionCount + " total"
+      : '<span class="badge badge-idle">no session</span>';
   } else {
-    meta.innerHTML = "session <b>" + esc(session.id) + "</b> · " +
-      '<span class="status-' + esc(session.status) + '">' + esc(session.status) + "</span>" +
-      " · " + state.sessionCount + " total";
+    var badge = session.status === "accepted"
+      ? '<span class="badge badge-ok">accepted ✓</span>'
+      : '<span class="badge badge-active">active</span>';
+    var line = badge + " · session <b>#" + esc(session.id) + "</b> · " + state.sessionCount + " total";
+    line += (session.spec && session.spec.goal) ? ' · <span class="muted">spec ready</span>' : ' · <span class="muted">no spec yet</span>';
+    var taskId = architectTaskId();
+    if (taskId) line += ' · <span class="ok">Cortex task #' + esc(taskId) + "</span>";
+    meta.innerHTML = line;
   }
+
   var mm = $("architect-messages");
-  mm.innerHTML = state.architectMessages.map(renderMsg).join("") || '<div class="empty">No messages.</div>';
+  mm.innerHTML = state.architectMessages.map(renderMsg).join("") || '<div class="empty">No messages yet.</div>';
   mm.scrollTop = mm.scrollHeight;
 
-  $("architect-spec").innerHTML = (session && session.spec) ? renderSpec(session.spec) : "";
+  $("architect-spec").innerHTML = (session && session.spec && session.spec.goal)
+    ? renderSpec(session.spec, session.status === "accepted")
+    : '<div class="empty">No structured spec yet.</div>';
 
-  var active = !!(session && session.status === "active");
-  var accepted = !!(session && session.status === "accepted");
-  $("btn-architect-send").disabled = !active;
-  $("btn-architect-accept").disabled = !active;
-  $("btn-architect-task").disabled = !accepted;
+  updateArchitectControls();
 }
 
 function renderBoard() {
@@ -433,10 +498,14 @@ async function acceptSpec() {
 
 async function createTask() {
   if (!state.architectSession) { showError("architect: no session"); return; }
+  if (architectTaskId()) { showError("architect: a Cortex task already exists for this session"); return; }
   var r = await api.createCortexTask(state.architectSession.id);
   if (fail(r, "create cortex task")) return;
   clearError(); setCortexTask(r.data); state.selectedLane = null; persistSelection();
-  renderBoard(); renderInspector(); renderHeader(); refreshEvents();
+  // Record the task on the session locally so the panel reflects it without a
+  // reload (the backend already persisted cortex_task_id).
+  if (state.architectSession && r.data) state.architectSession.cortex_task_id = r.data.id;
+  renderBoard(); renderInspector(); renderArchitect(); renderHeader(); refreshEvents();
 }
 
 function selectLane(id) {
@@ -672,6 +741,10 @@ function wire() {
   onEnter("architect-goal", startSession);
   onEnter("architect-message", sendArchitect);
   onEnter("conv-message", sendConversation);
+
+  // Live-enable Start / Send as the operator types into the goal / message.
+  $("architect-goal").addEventListener("input", updateArchitectControls);
+  $("architect-message").addEventListener("input", updateArchitectControls);
 
   initConsoleResize();
 }
