@@ -648,6 +648,48 @@ func TestWorkbenchUICurrentStepMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUIContextNormalizationMarkers checks that the served app.js
+// enforces a valid active chat context: the normalizer exists and is wired into
+// the restore/selection paths, lane-bound + lockbox/apply kinds are gated on a
+// task (so they can't be selected before one exists), and the setup-collapse
+// affordance is gated on task existence (no "Hide setup" before a task).
+func TestWorkbenchUIContextNormalizationMarkers(t *testing.T) {
+	mux := New().mux
+	getBody := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	js := getBody("/app.js")
+	for _, marker := range []string{
+		"function normalizeActiveContext",              // the invariant enforcer
+		"function kindAvailable",                       // kind gating
+		"if (!state.cortexTask) return false;",         // non-architect kinds gated on a task
+		"Available after you create a Cortex task",     // disabled lane-kind chip title before a task
+		"Setup required",                               // setup-collapse disabled before a task
+		"Setup stays open until a Cortex task exists.", // setup gating rationale
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+	// The normalizer must be wired into multiple paths (definition + restore +
+	// selection + task hydration), not merely defined.
+	if n := strings.Count(js, "normalizeActiveContext"); n < 4 {
+		t.Errorf("expected normalizeActiveContext to be wired into several paths, found %d occurrences", n)
+	}
+
+	html := getBody("/")
+	if !strings.Contains(html, "Setup required") {
+		t.Error(`expected index setup toggle to default to "Setup required" before a task`)
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)

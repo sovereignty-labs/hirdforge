@@ -198,6 +198,8 @@ function setArchitectSession(session) {
 function setCortexTask(task) {
   state.cortexTask = task;
   state.lanes = (task && task.lanes) || [];
+  // Lanes were just replaced — re-enforce the chat-kind invariant against them.
+  normalizeActiveContext();
 }
 
 // ---- helpers --------------------------------------------------------------
@@ -524,9 +526,16 @@ function applySetupCollapse() {
   if (document.body) document.body.classList.toggle("setup-collapsed", collapsed);
   var btn = $("btn-setup-toggle");
   if (btn) {
-    btn.textContent = collapsed ? "Edit setup" : "Hide setup";
-    btn.disabled = !collapsible;
-    btn.title = collapsible ? "" : "Setup stays open until a Cortex task exists.";
+    if (!collapsible) {
+      // Before a task, setup must stay open: don't offer "Hide setup".
+      btn.textContent = "Setup required";
+      btn.disabled = true;
+      btn.title = "Setup stays open until a Cortex task exists.";
+    } else {
+      btn.textContent = collapsed ? "Edit setup" : "Hide setup";
+      btn.disabled = false;
+      btn.title = "";
+    }
   }
   var sum = $("setup-summary");
   if (sum) sum.innerHTML = setupSummaryText();
@@ -761,6 +770,33 @@ function currentContextConversation() {
 // selection so the drawer always reflects the selected lane / kind.
 function syncConversationForContext() {
   state.laneConversation = currentContextConversation();
+}
+
+// normalizeActiveContext enforces the chat-kind invariant so the operator can
+// never land in an impossible context (e.g. a Builder chat with no task/lane):
+//   - Before a Cortex task exists, the only valid context is the Architect.
+//   - A lane-bound kind (builder/reviewer/validator) is valid only with a
+//     selected lane of that role; otherwise adopt the selected lane's role if it
+//     is itself lane-bound, else fall back to the Architect.
+//   - lockbox/apply are task-level and valid only once a task exists.
+// It mutates runtime state ONLY (kind/selectedLane); it never rewrites persisted
+// selection — that updates only when the operator makes a valid new choice.
+// Returns true if it changed anything (callers re-sync the conversation).
+function normalizeActiveContext() {
+  var beforeKind = state.kind, beforeLane = state.selectedLane;
+  if (!state.cortexTask) {
+    state.kind = "architect";
+    state.selectedLane = null;
+  } else if (LANE_KINDS.indexOf(state.kind) >= 0 &&
+      !(state.selectedLane && state.selectedLane.role === state.kind)) {
+    if (state.selectedLane && LANE_KINDS.indexOf(state.selectedLane.role) >= 0) {
+      state.kind = state.selectedLane.role; // trust an actually-selected lane
+    } else {
+      state.kind = "architect";
+      state.selectedLane = null;
+    }
+  }
+  return state.kind !== beforeKind || state.selectedLane !== beforeLane;
 }
 
 // ---- builder proposal helpers ---------------------------------------------
@@ -1400,11 +1436,14 @@ async function openBuilderRevision() {
   if (box) box.focus();
 }
 
-// kindAvailable reports whether a context kind can be used now: non-lane kinds
-// always, lane kinds only when the task has a lane of that role.
+// kindAvailable reports whether a context kind can be used now: the Architect is
+// always reachable; before a Cortex task nothing else is; with a task, lane-bound
+// kinds need a lane of that role and lockbox/apply are task-level (available).
 function kindAvailable(k) {
-  if (LANE_KINDS.indexOf(k) < 0) return true;
-  return state.lanes.some(function (x) { return x.role === k; });
+  if (k === "architect") return true;
+  if (!state.cortexTask) return false;
+  if (LANE_KINDS.indexOf(k) >= 0) return state.lanes.some(function (x) { return x.role === k; });
+  return true; // lockbox / apply, with a task
 }
 
 // consoleReadiness centralizes the Lane Console gating: which controls are
@@ -1502,9 +1541,14 @@ function renderDrawerScope() {
 
 function renderDrawer() {
   $("kind-chips").innerHTML = KINDS.map(function (k) {
-    var cls = "kind" + (k === state.kind ? " active" : "") + (kindAvailable(k) ? "" : " unavailable");
-    var title = kindAvailable(k) ? "" : ' title="No ' + esc(k) + ' lane in this task"';
-    return '<button class="' + cls + '" data-kind="' + k + '"' + title + ">" + k + "</button>";
+    var avail = kindAvailable(k);
+    var cls = "kind" + (k === state.kind ? " active" : "") + (avail ? "" : " unavailable");
+    // Unavailable kinds are disabled so clicking them can never switch the chat
+    // into an impossible context (e.g. Builder before a task exists).
+    var title = avail ? "" : (!state.cortexTask
+      ? ' title="Available after you create a Cortex task"'
+      : ' title="No ' + esc(k) + ' lane in this task"');
+    return '<button class="' + cls + '" data-kind="' + k + '"' + (avail ? "" : " disabled") + title + ">" + k + "</button>";
   }).join("");
 
   renderDrawerScope();
@@ -1647,6 +1691,7 @@ function selectLane(id) {
   var l = state.lanes.find(function (x) { return x.id === id; });
   if (!l) return;
   state.selectedLane = l; state.kind = l.role;
+  normalizeActiveContext(); // selecting a lane is always valid, but stay defensive
   syncConversationForContext(); // show this lane's conversation if one exists
   persistSelection();
   setView("context"); // the right panel shows this lane's artifact; chat switches to it
@@ -1662,11 +1707,15 @@ function setKind(k) {
   } else {
     state.selectedLane = null;
   }
+  // Enforce the invariant: e.g. clicking "builder" before a task (or with no
+  // builder lane) does NOT switch into an impossible Builder chat — it stays on
+  // the Architect. Normalize before persisting so only a valid kind is saved.
+  normalizeActiveContext();
   syncConversationForContext();
   persistSelection();
-  // The right context panel follows the chat context: lockbox/apply have their
-  // own task-level panels; everything else shows the "context" artifact.
-  setView(k === "lockbox" ? "lockbox" : (k === "apply" ? "apply" : "context"));
+  // The right context panel follows the (normalized) chat context: lockbox/apply
+  // have their own task-level panels; everything else shows the "context" artifact.
+  setView(state.kind === "lockbox" ? "lockbox" : (state.kind === "apply" ? "apply" : "context"));
   renderBoard(); renderInspector(); renderDrawer(); renderChat(); renderHeader();
 }
 
@@ -2090,6 +2139,10 @@ async function boot() {
   // we do NOT auto-select a lane for a fresh task — the chat defaults to the
   // Architect until the operator clicks a lane.
   restoreSelection();
+  // Enforce the chat-kind invariant against the hydrated task/lanes so a stale
+  // saved kind or a persisted lane conversation can never strand the operator in
+  // an impossible context (e.g. Builder chat with no task/lane).
+  normalizeActiveContext();
   // Show the conversation that matches the restored selection.
   syncConversationForContext();
   // Restore the operator's last context-panel view (frontend-only; default context).
