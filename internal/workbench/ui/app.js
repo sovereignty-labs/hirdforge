@@ -228,23 +228,86 @@ function renderProgress() {
   }).join('<span class="step-sep">→</span>');
 }
 
-// renderNextHint gives the operator a single, obvious next action.
+// loopStatus reads the whole operator-loop state from already-hydrated frontend
+// state, so the Run Summary and Next guidance share one source of truth. (The
+// readiness helpers it calls are hoisted function declarations defined below.)
+function loopStatus() {
+  var agg = currentAggregate();
+  return {
+    project: state.project,
+    provider: state.provider,
+    providerTest: state.providerTest,
+    session: state.architectSession,
+    task: state.cortexTask,
+    proposedCount: proposedProposalsForTask().length,
+    aggregate: agg,
+    review: reviewReadiness().review,
+    approval: agg ? approvalForAggregate(agg.id) : null,
+    preview: previewReadiness().preview,
+    applied: appliedResultForAggregate(agg),
+    validation: validationReadiness().validation,
+  };
+}
+
+// loopNext returns the single concise next action across the FULL loop.
+function loopNext() {
+  var s = loopStatus();
+  if (!s.project) return "Open a local project.";
+  if (!s.provider) return "Configure a provider.";
+  if (!s.session) return "Start an Architect session.";
+  if (s.session.status !== "accepted") return "Refine the spec, then Accept it.";
+  if (!s.task) return "Create a Cortex task from the accepted spec.";
+  if (s.proposedCount === 0) return "Select a builder lane and generate a proposal.";
+  if (!s.aggregate) return "Aggregate the Builder proposals.";
+  if (!s.review) return "Run the Reviewer on the aggregate.";
+  if (s.review.verdict !== "approve") return "Reviewer verdict is " + s.review.verdict + " — revise before approval.";
+  if (!s.approval) return "Request Lockbox approval.";
+  if (s.approval.status === "pending") return "Approve (or reject) the Lockbox request.";
+  if (s.approval.status === "rejected") return "Lockbox rejected — revise and request again.";
+  if (!s.preview || s.preview.status !== "ready") return "Generate an apply preview.";
+  if (!s.applied) return "Explicitly Apply the approved preview (writes files).";
+  if (!s.validation) return "Run validation on the applied changes.";
+  return "Loop complete — applied and validated.";
+}
+
+// renderNextHint gives the operator a single, obvious next action for the loop.
 function renderNextHint() {
   var el = $("next-hint");
+  if (el) el.textContent = "Next: " + loopNext();
+}
+
+// renderRunSummary lists every loop stage with a compact status, so the operator
+// can see where the run stands at a glance — including right after a reload.
+function renderRunSummary() {
+  var el = $("run-summary");
   if (!el) return;
-  var msg;
-  if (!state.project) msg = "Open a local project to begin.";
-  else if (!state.provider) msg = "Configure a provider next.";
-  else if (!state.architectSession) msg = "Start an Architect session.";
-  else if (!state.cortexTask) msg = "Refine the spec, accept it, then create a Cortex task.";
-  else if (!state.laneConversation) msg = "Select a lane and open the Lane Console.";
-  else msg = "Setup complete — the operator loop is live.";
-  el.textContent = "Next: " + msg;
+  var s = loopStatus();
+  function row(label, done, val) {
+    return '<div class="rs-row ' + (done ? "rs-done" : "rs-todo") + '">' +
+      '<span class="rs-label">' + label + "</span>" +
+      '<span class="rs-val">' + esc(val) + "</span></div>";
+  }
+  var providerVal = s.provider
+    ? s.provider.model + (s.providerTest ? (s.providerTest.ok ? " · test ok" : " · test failed") : " · untested")
+    : "—";
+  var html = (s.applied && s.validation) ? '<div class="rs-complete">✓ Loop complete</div>' : "";
+  html += row("Project", !!s.project, s.project ? s.project.name : "—");
+  html += row("Provider", !!s.provider, providerVal);
+  html += row("Architect", !!s.session, s.session ? "#" + s.session.id + " · " + s.session.status : "—");
+  html += row("Cortex task", !!s.task, s.task ? "#" + s.task.id + " · " + s.task.status : "—");
+  html += row("Proposals", s.proposedCount > 0, s.proposedCount ? s.proposedCount + " proposed" : "—");
+  html += row("Aggregate", !!s.aggregate, s.aggregate ? "#" + s.aggregate.id + " · " + s.aggregate.status : "—");
+  html += row("Review", !!s.review, s.review ? "#" + s.review.id + " · " + (s.review.verdict || s.review.status) : "—");
+  html += row("Lockbox", !!s.approval, s.approval ? "#" + s.approval.id + " · " + s.approval.status : "—");
+  html += row("Apply preview", !!s.preview, s.preview ? "#" + s.preview.id + " · " + s.preview.status : "—");
+  html += row("Apply", !!s.applied, s.applied ? "#" + s.applied.id + " · " + s.applied.status : "—");
+  html += row("Validation", !!s.validation, s.validation ? "#" + s.validation.id + " · " + s.validation.status : "—");
+  el.innerHTML = html;
 }
 
 // renderHeader keeps the chips, progress strip, and next hint in sync; call it
 // wherever a setup-affecting state field changes.
-function renderHeader() { renderChips(); renderProgress(); renderNextHint(); }
+function renderHeader() { renderChips(); renderProgress(); renderNextHint(); renderRunSummary(); }
 
 function renderProject() {
   var m = $("project-meta");
@@ -376,12 +439,12 @@ function renderArchitect() {
   }
 
   var mm = $("architect-messages");
-  mm.innerHTML = state.architectMessages.map(renderMsg).join("") || '<div class="empty">No messages yet.</div>';
+  mm.innerHTML = state.architectMessages.map(renderMsg).join("") || '<div class="empty">No messages yet — describe your goal so the Architect can draft a spec.</div>';
   mm.scrollTop = mm.scrollHeight;
 
   $("architect-spec").innerHTML = (session && session.spec && session.spec.goal)
     ? renderSpec(session.spec, session.status === "accepted")
-    : '<div class="empty">No structured spec yet.</div>';
+    : '<div class="empty">No spec yet — send a message and the Architect will draft one.</div>';
 
   updateArchitectControls();
 }
@@ -629,10 +692,13 @@ function renderReviewPanel() {
     '<button class="rev-btn" data-action="review"' + (rr.canReview ? "" : " disabled") + ">Run Reviewer</button>" +
     "</div>";
   html += '<div class="hint">' + esc(ar.agg ? rr.hint : ar.hint) + "</div>";
-  html += ar.agg ? renderAggregate(ar.agg) : '<div class="empty">No aggregate yet.</div>';
+  html += ar.agg ? renderAggregate(ar.agg) : '<div class="empty">No aggregate yet — aggregate the Builder proposals to review them together.</div>';
   if (rr.review) html += renderReview(rr.review);
   html += renderLockboxApply();
   el.innerHTML = html;
+  // Keep the loop-wide Next hint and Run Summary fresh after aggregate → apply
+  // actions (which re-render this panel but not the header).
+  renderNextHint(); renderRunSummary();
 }
 
 // ---- lockbox approval + apply preview (the safe write boundary) -----------
@@ -915,7 +981,7 @@ function renderInspector() {
     rows += '<div class="ins-prop">' +
       '<div class="ins-prop-head"><b>builder proposal</b>' +
       '<button class="prop-btn" data-action="gen-proposal"' + (pr.canGenerate ? "" : " disabled") + ">Generate Builder Proposal</button></div>" +
-      (pr.existing ? renderProposal(pr.existing) : '<div class="empty">No proposal yet.</div>') +
+      (pr.existing ? renderProposal(pr.existing) : '<div class="empty">No proposal yet — generate one for this builder lane.</div>') +
       (pr.hint ? '<div class="hint">' + esc(pr.hint) + "</div>" : "") +
       "</div>";
   }

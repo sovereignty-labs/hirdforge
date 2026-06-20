@@ -328,6 +328,30 @@ func TestWorkbenchUIApplyValidationMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUIRunSummaryMarkers checks the served app.js carries the run
+// summary, the full-loop Next guidance, and the loop-complete state.
+func TestWorkbenchUIRunSummaryMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"renderRunSummary",  // run summary rendering
+		"loopStatus",        // single source of truth for loop state
+		"loopNext",          // full-loop Next guidance
+		"Run validation on", // a late-loop Next step (full loop covered)
+		"Loop complete",     // loop-complete state
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)

@@ -89,6 +89,17 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .step-sep { color: var(--muted); }
 .next-hint { font-size: 12px; color: var(--accent-2); }
 
+/* Run Summary: one compact row per loop stage so the operator can see, at a
+   glance and after a reload, exactly where the run stands. */
+.run-summary { display: flex; flex-direction: column; gap: 1px; font-size: 12px; }
+.rs-row { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--line); }
+.rs-label { color: var(--muted); }
+.rs-val { text-align: right; }
+.rs-done .rs-label { color: var(--ink); }
+.rs-done .rs-val { color: var(--ok); }
+.rs-todo .rs-val { color: var(--muted); }
+.rs-complete { color: var(--ok); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; margin-bottom: 6px; }
+
 /* Resume cues: a compact line listing what boot recovered after a reload. */
 .resume {
   margin: 10px 16px 0; padding: 6px 12px; border-radius: 6px; flex: none;
