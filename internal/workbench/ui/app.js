@@ -145,49 +145,45 @@ var state = {
   sessionCount: 0,
   kind: "architect",        // active Lane Console context kind
   conversations: [],
-  view: "lanes",            // focused-shell stage: lanes|aggregate|lockbox|apply|log
-  setupCollapsed: false,    // frontend-only: collapse the Lanes Setup column once setup is complete
+  view: "context",          // right context panel: context|aggregate|lockbox|apply|log
+  setupCollapsed: true,     // frontend-only: collapse setup into the rail once a task exists
 };
 
 var KINDS = ["architect", "builder", "reviewer", "validator", "lockbox", "apply"];
 var LANE_KINDS = ["builder", "reviewer", "validator"];
 
-// Focused-shell stage rail. The active view is the only stage shown; switching
-// is purely frontend (CSS via body[data-view]) and persisted, independent of
-// the loop's backend state. VIEW_KEY is separate from the selection keys so it
-// can never disturb hf.selectedLaneId.v1 / hf.selectedConsoleKind.v1.
-// lane-detail is a focused sub-view of Lanes: it has no rail item of its own and
-// is entered by clicking a lane (selectLane); the Lanes rail item stays active
-// for it and returns to the grid.
-var VIEWS = ["lanes", "aggregate", "lockbox", "apply", "log", "lane-detail"];
+// The right context panel switches between these views; the central chat is
+// always visible regardless. "context" shows the active context's artifact (the
+// Architect spec or the selected lane's detail). Switching is purely frontend
+// (CSS via body[data-view]) and persisted, independent of the loop's backend
+// state; VIEW_KEY is separate from the selection keys so it can never disturb
+// hf.selectedLaneId.v1 / hf.selectedConsoleKind.v1.
+var VIEWS = ["context", "aggregate", "lockbox", "apply", "log"];
 var VIEW_KEY = "hf.workbenchView.v1";
 
 function applyView() {
   if (document.body) document.body.setAttribute("data-view", state.view);
-  var railView = (state.view === "lane-detail") ? "lanes" : state.view;
   var items = document.querySelectorAll(".nav-item");
   for (var i = 0; i < items.length; i++) {
     var v = items[i].getAttribute("data-view");
-    if (v === railView) items[i].classList.add("active");
+    if (v === state.view) items[i].classList.add("active");
     else items[i].classList.remove("active");
   }
 }
 
 function setView(view) {
-  if (VIEWS.indexOf(view) < 0) view = "lanes";
+  if (VIEWS.indexOf(view) < 0) view = "context";
   state.view = view;
   lsSet(VIEW_KEY, view);
   applyView();
-  renderNextHint(); // refresh the jump button now that the active stage changed
+  renderNextHint(); // refresh the jump button now that the active panel changed
 }
 
 function restoreView() {
   var v = lsGet(VIEW_KEY);
+  // Old persisted values (lanes / lane-detail) are no longer views and simply
+  // fall back to the default "context".
   if (v && VIEWS.indexOf(v) >= 0) state.view = v;
-  // lane-detail only makes sense with a selected lane; otherwise fall back to
-  // the grid so a stale persisted view never strands the operator on an empty
-  // detail page.
-  if (state.view === "lane-detail" && !state.selectedLane) state.view = "lanes";
   applyView();
 }
 
@@ -276,6 +272,7 @@ function loopNext() {
   if (s.proposedCount === 0) return "Open a builder lane and generate a proposal.";
   if (!s.aggregate) return "Go to Agg and aggregate the Builder proposals.";
   if (!s.review) return "Go to Agg and run the Reviewer.";
+  if (s.review.verdict === "revise") return "Reviewer requested changes. Open the Builder revision chat, ask for a revised proposal, then aggregate and review again.";
   if (s.review.verdict !== "approve") return "Reviewer verdict is " + s.review.verdict + " — revise before approval.";
   if (!s.approval) return "Go to Lock and request Lockbox approval.";
   if (s.approval.status === "pending") return "Go to Lock and approve (or reject) the request.";
@@ -297,7 +294,8 @@ function loopNextTarget() {
   if (s.proposedCount === 0) return null; // "open a builder lane" — text only
   if (!s.aggregate) return { view: "aggregate", label: "Open Agg" };
   if (!s.review) return { view: "aggregate", label: "Open Agg" };
-  if (s.review.verdict !== "approve") return null; // revise — no single target
+  if (s.review.verdict === "revise") return { action: "revise", label: "Open Builder revision chat" };
+  if (s.review.verdict !== "approve") return null; // reject — no single target
   if (!s.approval) return { view: "lockbox", label: "Open Lock" };
   if (s.approval.status === "pending") return { view: "lockbox", label: "Open Lock" };
   if (s.approval.status === "rejected") return null;
@@ -316,7 +314,9 @@ function renderNextHint() {
   if (!el) return;
   var html = '<span class="next-text">Next: ' + esc(loopNext()) + "</span>";
   var t = loopNextTarget();
-  if (t && t.view !== state.view) {
+  if (t && t.action) {
+    html += ' <button class="next-go" data-next-action="' + esc(t.action) + '">' + esc(t.label) + "</button>";
+  } else if (t && t.view && t.view !== state.view) {
     html += ' <button class="next-go" data-next-view="' + esc(t.view) + '">' + esc(t.label) + "</button>";
   }
   el.innerHTML = html;
@@ -355,18 +355,30 @@ function renderRunSummary() {
 // badges in sync; call it wherever a setup-affecting state field changes.
 function renderHeader() {
   renderChips(); renderNextHint(); renderRunSummary();
-  applySetupCollapse(); renderRailBadges();
+  applySetupCollapse(); renderRailBadges(); renderTickerStatus();
+}
+
+// renderTickerStatus fills the compact bottom status: provider, git state, and
+// the safety posture (local, apply is always explicit).
+function renderTickerStatus() {
+  var el = $("ticker-status");
+  if (!el) return;
+  var parts = [];
+  parts.push(state.provider ? (state.provider.model || "provider") : "no provider");
+  if (state.project) parts.push(state.project.git ? ("git " + (state.project.current_branch || "?")) : "no git");
+  parts.push("local · explicit apply");
+  el.textContent = parts.join(" · ");
 }
 
 // ---- setup collapse (frontend-only) ---------------------------------------
-// The Lanes Setup column can be collapsed to a thin status strip once the early
-// setup is complete, giving the lane grid more room. Persisted, but never
-// honored before setup is ready, so a fresh operator can always reach the
-// project/provider/spec controls.
+// Setup (project + provider) demotes to a compact status line in the rail once a
+// Cortex task exists, giving the chat priority; "Edit setup" reveals the full
+// controls. Before a task it stays fully visible, so first-run setup is never
+// hidden. Persisted, but the collapse is only honored once a task exists.
 var SETUP_KEY = "hf.setupCollapsed.v1";
 
-function setupComplete() {
-  return !!(state.project && state.provider && (state.cortexTask || state.acceptedSpec));
+function setupCollapsible() {
+  return !!state.cortexTask; // setup demotes only after a task exists
 }
 
 function setupSummaryText() {
@@ -377,28 +389,31 @@ function setupSummaryText() {
 }
 
 function applySetupCollapse() {
-  var allowed = setupComplete();
-  var collapsed = allowed && state.setupCollapsed;
+  var collapsible = setupCollapsible();
+  var collapsed = collapsible && state.setupCollapsed;
   if (document.body) document.body.classList.toggle("setup-collapsed", collapsed);
   var btn = $("btn-setup-toggle");
   if (btn) {
-    btn.textContent = collapsed ? "Show setup" : "Hide setup";
-    btn.disabled = !allowed;
-    btn.title = allowed ? "" : "Available once project, provider, and a spec/task exist.";
+    btn.textContent = collapsed ? "Edit setup" : "Hide setup";
+    btn.disabled = !collapsible;
+    btn.title = collapsible ? "" : "Setup stays open until a Cortex task exists.";
   }
   var sum = $("setup-summary");
   if (sum) sum.innerHTML = setupSummaryText();
 }
 
 function toggleSetup() {
-  if (!setupComplete()) return; // never hide setup before it is ready
+  if (!setupCollapsible()) return; // never hide setup before a task exists
   state.setupCollapsed = !state.setupCollapsed;
-  lsSet(SETUP_KEY, state.setupCollapsed ? "1" : "");
+  lsSet(SETUP_KEY, state.setupCollapsed ? "1" : "0");
   applySetupCollapse();
 }
 
 function restoreSetupCollapse() {
-  state.setupCollapsed = lsGet(SETUP_KEY) === "1";
+  var v = lsGet(SETUP_KEY);
+  // Default: collapse setup once a task exists (chat-first). An explicit "0"
+  // (the operator opened "Edit setup") keeps it expanded.
+  state.setupCollapsed = (v === null) ? true : (v === "1");
   applySetupCollapse();
 }
 
@@ -581,22 +596,6 @@ function truncPath(p, max) {
   max = max || 42;
   if (!p || p.length <= max) return p || "";
   return "…" + p.slice(p.length - (max - 1));
-}
-
-// defaultLaneFor returns the lane to select by default: the first builder lane,
-// else the first lane, else null.
-function defaultLaneFor(lanes) {
-  if (!lanes || !lanes.length) return null;
-  return lanes.find(function (x) { return x.role === "builder"; }) || lanes[0];
-}
-
-// selectDefaultLane selects the default lane (used for a freshly created task).
-function selectDefaultLane() {
-  var l = defaultLaneFor(state.lanes);
-  state.selectedLane = l || null;
-  if (l) state.kind = l.role;
-  syncConversationForContext();
-  persistSelection();
 }
 
 // byActiveThenRecent sorts active conversations first, then most-recent id.
@@ -1157,17 +1156,113 @@ function renderInspector() {
   b.innerHTML = rows;
 }
 
-// renderLaneDetail fills the focused lane page header. The lane artifact area is
-// renderInspector (#inspector-body) and the conversation is renderDrawer; both
-// keep their stable ids, so this only owns the title/back row.
-function renderLaneDetail() {
-  var el = $("lane-detail-title");
+function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+// ---- chat surface ---------------------------------------------------------
+// Chat is the primary work surface. The center routes by the active context
+// kind: the "architect" kind shows the Architect spec session; every other kind
+// shows that lane / context conversation. body[data-chat] drives which composer
+// and stream are visible; body[data-arch] hides the Start row once a session
+// exists. The Architect spec artifact and lane artifacts live in the right
+// context panel, not in the chat.
+function renderChat() {
+  var architect = (state.kind === "architect");
+  if (document.body) {
+    document.body.setAttribute("data-chat", architect ? "architect" : "lane");
+    document.body.setAttribute("data-arch", state.architectSession ? "session" : "nosession");
+  }
+  renderChatHead();
+  renderReviseBanner();
+}
+
+function renderChatHead() {
+  var titleEl = $("chat-title"), subEl = $("chat-sub");
+  if (!titleEl || !subEl) return;
+  if (state.kind === "architect") {
+    titleEl.textContent = "Architect";
+    var s = state.architectSession;
+    subEl.textContent = s
+      ? ("session #" + s.id + " · " + s.status + (architectTaskId() ? " · task #" + architectTaskId() : ""))
+      : "describe a goal to draft a spec";
+  } else if (LANE_KINDS.indexOf(state.kind) >= 0) {
+    var l = state.selectedLane;
+    titleEl.textContent = cap(state.kind) + (l ? " lane #" + l.id : " lane");
+    subEl.textContent = l ? (l.role + " " + l.index + " · " + l.status) : ("select a " + state.kind + " lane");
+  } else { // lockbox / apply — task-level, not lane-bound
+    titleEl.textContent = cap(state.kind);
+    subEl.textContent = "task-level " + state.kind + " conversation";
+  }
+}
+
+// ---- reviewer "revise" forward path ---------------------------------------
+// reviseReview returns the current review only when its verdict is "revise" (a
+// dead end without a path forward), else null.
+function reviseReview() {
+  var agg = currentAggregate();
+  var rv = (state.review && agg && state.review.aggregate_id === agg.id) ? state.review : null;
+  return (rv && rv.verdict === "revise") ? rv : null;
+}
+
+// builderLaneForRevision picks the Builder lane to revise: a builder lane with a
+// proposed proposal (those are what the aggregate was built from), else any
+// builder lane with a proposal, else the first builder lane.
+function builderLaneForRevision() {
+  var builders = state.lanes.filter(function (x) { return x.role === "builder"; });
+  if (!builders.length) return null;
+  var proposed = builders.filter(function (l) { var p = proposalForLane(l.id); return p && p.status === "proposed"; });
+  var withAny = builders.filter(function (l) { return !!proposalForLane(l.id); });
+  return proposed[0] || withAny[0] || builders[0];
+}
+
+// revisionPrompt builds the prefilled revision request from the reviewer's
+// summary / risks / recommendations. It is only ever placed in the composer —
+// never auto-sent.
+function revisionPrompt(rv) {
+  function block(label, val) {
+    var body = (val && val.length)
+      ? (Array.isArray(val) ? val.map(function (x) { return "- " + x; }).join("\n") : String(val))
+      : "(none)";
+    return label + ":\n" + body;
+  }
+  return "Please revise your proposal based on the reviewer feedback:\n\n" +
+    block("Summary", rv.summary) + "\n\n" +
+    block("Risks", rv.risks) + "\n\n" +
+    block("Recommendations", rv.recommendations) + "\n\n" +
+    "Return a revised proposal focused on the reviewer's concerns.";
+}
+
+// renderReviseBanner shows the forward path near the composer when the reviewer
+// asked for changes. The button only selects / opens / prefills (handled in
+// openBuilderRevision) — it never approves, applies, or writes.
+function renderReviseBanner() {
+  var el = $("revise-banner");
   if (!el) return;
-  var l = state.selectedLane;
-  if (!l) { el.innerHTML = '<span class="muted">No lane selected</span>'; return; }
-  el.innerHTML = '<b>#' + esc(l.id) + '</b> · <span class="lane-role">' + esc(l.role) + " " + esc(l.index) +
-    '</span> · <span class="muted">' + esc(l.status) + "</span>" +
-    (state.cortexTask ? ' · <span class="muted">task #' + esc(state.cortexTask.id) + "</span>" : "");
+  var rv = reviseReview();
+  if (!rv) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  el.innerHTML = '<span class="revise-text">Reviewer requested changes — revise the Builder proposal, then aggregate and review again.</span>' +
+    ' <button class="revise-btn" data-action="open-revision">Open Builder revision chat</button>';
+}
+
+// openBuilderRevision is the reviewer-revise forward path: select a builder lane,
+// open/reuse its conversation, switch the central chat to it, and prefill the
+// composer with the reviewer feedback. No approval, no apply, no resolve.
+async function openBuilderRevision() {
+  var rv = reviseReview();
+  if (!rv) return;
+  var lane = builderLaneForRevision();
+  if (!lane) { showError("revision: no builder lane found"); return; }
+  state.selectedLane = lane;
+  state.kind = "builder";
+  persistSelection();
+  setView("context");          // right panel shows this builder lane's artifact
+  syncConversationForContext();
+  await newConversation();      // open or reuse the builder lane conversation
+  var box = $("conv-message");
+  if (box) { box.value = revisionPrompt(rv); }
+  updateConsoleControls();      // enable Send now that there is text + an open conversation
+  renderChat();
+  if (box) box.focus();
 }
 
 // kindAvailable reports whether a context kind can be used now: non-lane kinds
@@ -1320,7 +1415,7 @@ function renderTicker() {
 
 function renderAll() {
   renderHeader(); renderProject(); renderProvider(); renderArchitect();
-  renderBoard(); renderReviewPanel(); renderInspector(); renderDrawer(); renderLaneDetail(); renderEvents();
+  renderBoard(); renderReviewPanel(); renderInspector(); renderDrawer(); renderChat(); renderEvents();
   applyView();
 }
 
@@ -1402,11 +1497,13 @@ async function createTask() {
   if (architectTaskId()) { showError("architect: a Cortex task already exists for this session"); return; }
   var r = await api.createCortexTask(state.architectSession.id);
   if (fail(r, "create cortex task")) return;
-  clearError(); setCortexTask(r.data); selectDefaultLane(); // auto-select the first builder lane
+  clearError(); setCortexTask(r.data);
+  // Chat-first: stay in the Architect chat after creating the task; the operator
+  // picks a lane when ready, which switches the chat to that lane.
   // Record the task on the session locally so the panel reflects it without a
   // reload (the backend already persisted cortex_task_id).
   if (state.architectSession && r.data) state.architectSession.cortex_task_id = r.data.id;
-  renderBoard(); renderInspector(); renderDrawer(); renderArchitect(); renderHeader(); refreshEvents();
+  renderBoard(); renderInspector(); renderDrawer(); renderChat(); renderArchitect(); renderHeader(); refreshEvents();
 }
 
 function selectLane(id) {
@@ -1415,8 +1512,8 @@ function selectLane(id) {
   state.selectedLane = l; state.kind = l.role;
   syncConversationForContext(); // show this lane's conversation if one exists
   persistSelection();
-  setView("lane-detail"); // selecting a lane opens its focused detail page
-  renderBoard(); renderInspector(); renderDrawer(); renderLaneDetail(); renderHeader();
+  setView("context"); // the right panel shows this lane's artifact; chat switches to it
+  renderBoard(); renderInspector(); renderDrawer(); renderChat(); renderHeader();
 }
 
 function setKind(k) {
@@ -1430,7 +1527,10 @@ function setKind(k) {
   }
   syncConversationForContext();
   persistSelection();
-  renderBoard(); renderInspector(); renderDrawer(); renderLaneDetail(); renderHeader();
+  // The right context panel follows the chat context: lockbox/apply have their
+  // own task-level panels; everything else shows the "context" artifact.
+  setView(k === "lockbox" ? "lockbox" : (k === "apply" ? "apply" : "context"));
+  renderBoard(); renderInspector(); renderDrawer(); renderChat(); renderHeader();
 }
 
 async function newConversation() {
@@ -1718,8 +1818,8 @@ function wire() {
   $("btn-conv-close").onclick = closeConversation;
   $("btn-events-refresh").onclick = refreshEvents;
 
-  // Stage rail: each item switches the focused stage. The ticker's action jumps
-  // straight to the Log stage.
+  // Context-panel switcher: each rail item switches the right panel. The
+  // ticker's action jumps straight to the Log panel.
   var rail = $("navrail");
   if (rail) rail.addEventListener("click", function (e) {
     var b = e.target.closest("[data-view]");
@@ -1727,19 +1827,21 @@ function wire() {
   });
   var openLog = $("btn-open-log");
   if (openLog) openLog.onclick = function () { setView("log"); };
-  // Next hint's optional jump button switches to the stage the next action lives
-  // on (frontend-only; never triggers the action itself). Delegated because the
-  // hint's inner HTML is re-rendered on every header refresh.
+  // Next hint's optional jump button: switches the context panel (data-next-view)
+  // or runs the frontend-only revise forward path (data-next-action). It never
+  // triggers a backend action. Delegated because the hint re-renders.
   var nextHint = $("next-hint");
   if (nextHint) nextHint.addEventListener("click", function (e) {
-    var b = e.target.closest("[data-next-view]");
-    if (b) setView(b.getAttribute("data-next-view"));
+    var v = e.target.closest("[data-next-view]");
+    if (v) { setView(v.getAttribute("data-next-view")); return; }
+    if (e.target.closest('[data-next-action="revise"]')) openBuilderRevision();
   });
-  // "← Lanes" leaves the focused lane-detail page for the grid (the lane stays
-  // selected, so re-clicking it reopens the same page).
-  var back = $("btn-lane-back");
-  if (back) back.onclick = function () { setView("lanes"); };
-  // Collapse / expand the Lanes Setup column (only once setup is complete).
+  // Reviewer-revise forward path button (in the chat, near the composer).
+  var revise = $("revise-banner");
+  if (revise) revise.addEventListener("click", function (e) {
+    if (e.target.closest('[data-action="open-revision"]')) openBuilderRevision();
+  });
+  // "Edit setup" / "Hide setup": demote or reveal the setup controls in the rail.
   var setupToggle = $("btn-setup-toggle");
   if (setupToggle) setupToggle.onclick = toggleSetup;
 
@@ -1751,13 +1853,12 @@ function wire() {
     var b = e.target.closest("[data-kind]");
     if (b) setKind(b.getAttribute("data-kind"));
   });
-  $("inspector-body").addEventListener("click", function (e) {
+  // The lane artifact (gen-proposal) and the aggregate/lockbox/apply stage
+  // panels all live in the right context panel; one delegated handler covers
+  // every artifact action there.
+  $("contextpanel").addEventListener("click", function (e) {
     if (e.target.closest('[data-action="gen-proposal"]')) generateProposal();
-  });
-  // Aggregate / Lockbox / Apply actions now live in three separate stage
-  // containers; delegate on the shared stage so one handler covers all of them.
-  $("stage").addEventListener("click", function (e) {
-    if (e.target.closest('[data-action="aggregate"]')) aggregateProposals();
+    else if (e.target.closest('[data-action="aggregate"]')) aggregateProposals();
     else if (e.target.closest('[data-action="review"]')) runReviewer();
     else if (e.target.closest('[data-action="request-approval"]')) requestApproval();
     else if (e.target.closest('[data-action="approve"]')) decideApproval("approve");
@@ -1826,18 +1927,15 @@ async function boot() {
   if (applyRes.ok) state.apply = applyRes.data;
   if (validation.ok) state.validation = validation.data;
 
-  // Re-apply the operator's last selection against the hydrated lanes.
+  // Re-apply the operator's last selection against the hydrated lanes. Chat-first:
+  // we do NOT auto-select a lane for a fresh task — the chat defaults to the
+  // Architect until the operator clicks a lane.
   restoreSelection();
-  // For a fresh task with no prior saved lane, default-select a lane (first
-  // builder, else first). This never overrides a valid restored selection.
-  if (!state.selectedLane && state.lanes.length && !lsGet(SEL.lane)) {
-    selectDefaultLane();
-  }
-  // Show the conversation that matches the restored / default selection.
+  // Show the conversation that matches the restored selection.
   syncConversationForContext();
-  // Restore the operator's last focused stage (frontend-only; default lanes).
+  // Restore the operator's last context-panel view (frontend-only; default context).
   restoreView();
-  // Restore the Setup-collapse preference (honored only once setup is complete).
+  // Restore the Setup-collapse preference (honored only once a task exists).
   restoreSetupCollapse();
   showResumeCues();
 

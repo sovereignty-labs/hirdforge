@@ -94,30 +94,52 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .resume-label { color: var(--ok); font-weight: 600; letter-spacing: 0.04em; font-size: 10px; }
 .resume-pill { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--ink); }
 
-/* ---- Focused shell: stage rail | stage, with a bottom event ticker -------- */
+/* ---- Chat-first shell: context rail | chat | context panel + bottom status -- */
 .shell {
   flex: 1 1 auto; min-height: 0;
-  display: grid; grid-template-columns: 78px minmax(0, 1fr);
+  display: grid; grid-template-columns: 262px minmax(0, 1fr) 340px;
 }
 
-/* Stage rail: a calm vertical switcher. The active item carries the accent. */
-.navrail {
+/* LEFT — context rail: setup, run state, lanes, and the (secondary) context
+   panel switcher. Scrolls as one column; everything here is secondary. */
+.contextrail {
   background: var(--panel); border-right: 1px solid var(--line);
-  display: flex; flex-direction: column; gap: 4px; padding: 12px 8px;
+  min-height: 0; overflow: auto;
+  display: flex; flex-direction: column; gap: 16px; padding: 12px;
 }
+.rail-sec { display: flex; flex-direction: column; gap: 8px; }
+.rail-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.rail-head h2 { margin: 0; }
+.rail-hint { font-size: 11px; }
+.rail-lanes #board-meta { text-align: left; }
+.rail-lanes .lanes { flex-direction: column; flex-wrap: nowrap; gap: 8px; }
+.rail-lanes .lane { width: 100%; min-height: 0; }
+
+/* Setup demotes to a compact status line once a task exists; "Edit setup"
+   reveals the controls. Before a task it stays fully visible. */
+.setup-toggle { font-size: 11px; padding: 3px 8px; }
+.setup-summary { display: none; }
+.setup-controls { display: flex; flex-direction: column; gap: 10px; }
+.setup-block { border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.setup-block:first-child { border-top: none; padding-top: 0; }
+.setup-label { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; margin-bottom: 6px; }
+body.setup-collapsed .setup-controls { display: none; }
+body.setup-collapsed .setup-summary { display: block; }
+
+/* Context-panel switcher (secondary nav): a compact wrapped row. */
+.navrail { display: flex; flex-wrap: wrap; gap: 6px; }
 .nav-item {
-  position: relative;
-  display: flex; flex-direction: column; align-items: center; gap: 4px;
-  padding: 10px 4px; background: transparent; border: 1px solid transparent;
-  border-radius: 10px; color: var(--muted); cursor: pointer;
+  position: relative; flex: 1 1 auto;
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 7px 6px; background: transparent; border: 1px solid var(--line);
+  border-radius: 8px; color: var(--muted); cursor: pointer;
 }
-.nav-item:hover { background: var(--panel-2); border-color: var(--line); }
+.nav-item:hover { background: var(--panel-2); border-color: var(--accent); }
 .nav-item.active { background: var(--panel-2); border-color: var(--accent); color: var(--ink); }
-.nav-ico { font-size: 17px; line-height: 1; }
-.nav-label { font-size: 10px; letter-spacing: 0.02em; }
+.nav-label { font-size: 11px; letter-spacing: 0.02em; }
 /* Quiet rail badges: counts (Agg/Log) or a status dot (Lock/Apply). */
 .nav-badge {
-  position: absolute; top: 3px; right: 4px; display: none;
+  position: absolute; top: -5px; right: -5px; display: none;
   min-width: 15px; padding: 0 3px; border-radius: 999px; font-size: 9px; line-height: 15px;
   text-align: center; background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
 }
@@ -126,75 +148,51 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .nav-badge.badge-warn { color: var(--accent); border-color: var(--accent); }
 .nav-badge.badge-bad { color: var(--bad); border-color: var(--bad); }
 
-/* Stage: a status line on top, one focused view filling the rest. */
-.stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.stage-status { flex: none; padding: 9px 18px; border-bottom: 1px solid var(--line-soft); }
+/* CENTER — chat: the primary work surface, always visible. */
+.chat { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.chat-head { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 18px; border-bottom: 1px solid var(--line-soft); }
+.chat-title { font-size: 15px; font-weight: 600; }
+.chat-sub { font-size: 11px; margin-top: 2px; }
+.next-hint-bar { flex: none; padding: 8px 18px; border-bottom: 1px solid var(--line-soft); }
+.chat-stream { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 0 18px; }
+.chat-stream .messages { flex: 1 1 auto; min-height: 0; max-height: none; }
+.chat-composer { flex: none; padding: 10px 18px 14px; border-top: 1px solid var(--line-soft); }
+.chat-composer .field:last-child { margin-bottom: 0; }
+.scope-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.conv-actions { display: flex; gap: 6px; }
 
-/* Only the active view is shown; switching is driven by body[data-view].
-   lane-detail is a focused sub-view of Lanes (no rail item of its own). */
-.view { display: none; flex: 1 1 auto; min-height: 0; }
-body[data-view="lanes"] .view-lanes,
-body[data-view="aggregate"] .view-aggregate,
-body[data-view="lockbox"] .view-lockbox,
-body[data-view="apply"] .view-apply,
-body[data-view="log"] .view-log,
-body[data-view="lane-detail"] .view-lane-detail { display: flex; }
-
-/* Lanes view — lane-first: a compressed Setup column + the lane grid as the
-   main focus. The inspector + Lane Console moved to the lane-detail view. */
-.view-lanes { flex-direction: column; min-height: 0; }
-.lanes-grid {
-  flex: 1 1 auto; min-height: 0;
-  display: grid; gap: 14px; padding: 14px 18px;
-  grid-template-columns: 290px minmax(0, 1fr);
+/* Reviewer-revise forward path, shown near the composer. */
+.revise-banner {
+  flex: none; margin: 0 18px 8px; padding: 8px 12px; border-radius: 8px;
+  background: #2a2620; border: 1px solid var(--accent); font-size: 12px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
-.setup { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
-.board { min-height: 0; overflow: auto; }
-.board-foot { margin-top: 12px; font-size: 11px; }
+.revise-text { flex: 1 1 auto; color: var(--accent); }
+.revise-btn { font-size: 12px; border-color: var(--accent); color: var(--accent); }
+.revise-btn:hover:not(:disabled) { background: var(--accent); color: #1a1408; }
 
-/* Compressed Setup panel: project / provider / architect as light sub-blocks. */
-.setup-panel { display: flex; flex-direction: column; gap: 12px; }
-.setup-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.setup-head h2 { margin: 0; }
-.setup-toggle { font-size: 11px; padding: 3px 8px; }
-.setup-summary { display: none; }
-.setup-block { border-top: 1px solid var(--line-soft); padding-top: 10px; }
-.setup-block:first-of-type { border-top: none; padding-top: 0; }
-.setup-label { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; margin-bottom: 6px; }
+/* RIGHT — context panel: artifacts for the active context; switches by view,
+   and within the "context" view by chat kind (architect spec vs lane artifact). */
+.contextpanel { min-width: 0; min-height: 0; overflow: auto; border-left: 1px solid var(--line); padding: 14px; }
+.ctx-view { display: none; }
+body[data-view="context"] .ctx-context,
+body[data-view="aggregate"] .ctx-aggregate,
+body[data-view="lockbox"] .ctx-lockbox,
+body[data-view="apply"] .ctx-apply,
+body[data-view="log"] .ctx-log { display: block; }
+.ctx-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.ctx-head h2 { margin: 0; }
 
-/* Setup collapsed: the column becomes a thin status strip and the lane grid
-   takes the freed width. Honored only once setup is complete (gated in JS). */
-body.setup-collapsed .lanes-grid { grid-template-columns: 200px minmax(0, 1fr); }
-body.setup-collapsed .setup-block,
-body.setup-collapsed .run-summary-panel { display: none; }
-body.setup-collapsed .setup-summary { display: block; margin-top: 2px; }
+/* Chat / context routing by active kind. */
+body[data-chat="architect"] .chat-lane,
+body[data-chat="architect"] .ctx-lane { display: none; }
+body[data-chat="lane"] .chat-architect,
+body[data-chat="lane"] .ctx-architect { display: none; }
+body[data-arch="session"] .arch-start { display: none; }
+body[data-arch="nosession"] .arch-send { display: none; }
 
-/* Lane detail view — one focused page: lane + artifact fused with the console. */
-.view-lane-detail { flex-direction: column; min-height: 0; overflow: hidden; }
-.lane-detail { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 14px 18px; gap: 12px; }
-.lane-detail-head { display: flex; align-items: center; gap: 12px; flex: none; }
-.back-btn { background: var(--panel-2); border-color: var(--line); }
-.back-btn:hover:not(:disabled) { border-color: var(--accent); }
-.lane-detail-title { font-size: 13px; color: var(--ink); }
-.lane-detail-grid {
-  flex: 1 1 auto; min-height: 0;
-  display: grid; gap: 14px; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-}
-.lane-artifact {
-  min-height: 0; overflow: auto;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
-}
-.lane-console {
-  min-height: 0; display: flex; flex-direction: column;
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
-}
-
-/* Aggregate / Lockbox / Apply / Log views — a single focused, scrollable
-   stage panel each. */
-.view-aggregate, .view-lockbox, .view-apply, .view-log {
-  flex-direction: column; min-height: 0; overflow: auto; padding: 14px 18px;
-}
-.stage-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; max-width: 900px; }
+/* Aggregate / Lockbox / Apply / Log render into stage-panel cards. */
+.stage-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
 .stage-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .stage-head h2 { margin: 0; }
 
@@ -299,32 +297,28 @@ body.setup-collapsed .setup-summary { display: block; margin-top: 2px; }
 /* Lane Console (inside the focused lane-detail page): a fused header + scope +
    scrollable messages + composer. The messages area flexes to fill the column;
    the header, scope, and composer stay fixed. */
-.drawer-head { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; flex: none; }
-.drawer-head h2 { margin: 0; }
-.kinds { display: flex; gap: 6px; flex-wrap: wrap; }
-.kind { text-transform: capitalize; padding: 4px 12px; border-radius: 999px; }
+/* Context selector chips (kinds) live in the chat head. */
+.kinds { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.kind { text-transform: capitalize; padding: 4px 12px; border-radius: 999px; font-size: 12px; }
 .kind.active { background: var(--accent); color: #1a1408; border-color: var(--accent); font-weight: 600; }
 /* A lane kind with no matching lane in the task: dimmed but still clickable so
    it can explain itself via the inline hint. */
 .kind.unavailable { opacity: 0.45; }
-.drawer-scope { margin-bottom: 8px; flex: none; }
+.drawer-scope { flex: 1 1 auto; }
 .scope-tag { font-size: 10px; letter-spacing: 0.04em; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
 .scope-lane { color: var(--accent-2); border-color: var(--accent-2); }
 .scope-general { color: var(--muted); }
-.lane-console .field { flex: none; }
-.lane-console .hint { flex: none; }
-#conv-messages { flex: 1 1 auto; min-height: 0; max-height: none; }
 
-/* The builder proposal action is the primary CTA on a builder lane page. */
-.lane-artifact .ins-prop-head .prop-btn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-.lane-artifact .ins-prop-head .prop-btn:hover:not(:disabled) { background: var(--accent); color: #1a1408; }
+/* The builder proposal action is the primary CTA in the lane artifact. */
+.ctx-lane .ins-prop-head .prop-btn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.ctx-lane .ins-prop-head .prop-btn:hover:not(:disabled) { background: var(--accent); color: #1a1408; }
 
-/* Event log (Log view) + the always-on bottom ticker. */
+/* Event log (Log context view) + the always-on bottom status ticker. */
 .event-list { overflow: auto; display: flex; flex-direction: column; gap: 2px; }
-.event { display: grid; grid-template-columns: 230px 1fr auto; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
-.ev-type { font-family: ui-monospace, Menlo, monospace; color: var(--accent); }
-.ev-msg { color: var(--ink); }
-.ev-ts { color: var(--muted); }
+.event { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
+.ev-type { font-family: ui-monospace, Menlo, monospace; color: var(--accent); grid-column: 1; }
+.ev-msg { color: var(--ink); grid-column: 1 / -1; }
+.ev-ts { color: var(--muted); grid-column: 2; grid-row: 1; text-align: right; }
 
 .ticker {
   flex: none; display: flex; align-items: center; gap: 12px;
@@ -333,14 +327,12 @@ body.setup-collapsed .setup-summary { display: block; margin-top: 2px; }
 .ticker-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); flex: none; }
 .ticker-msg { flex: 1 1 auto; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ticker-action { font-size: 12px; padding: 3px 10px; flex: none; }
+.ticker-status { flex: none; white-space: nowrap; }
 
 @media (max-width: 1100px) {
   body { height: auto; overflow: auto; }
   .shell { grid-template-columns: 1fr; }
-  .navrail { flex-direction: row; border-right: none; border-bottom: 1px solid var(--line); overflow-x: auto; }
-  .nav-item { flex-direction: row; gap: 6px; }
-  .stage { overflow: visible; }
-  .view-aggregate, .view-lockbox, .view-apply, .view-log, .view-lane-detail { overflow: visible; }
-  .lanes-grid, .lane-detail-grid { grid-template-columns: 1fr; }
-  .setup, .board, .lane-artifact, .lane-console { overflow: visible; min-height: 0; }
+  .contextrail, .contextpanel { border-right: none; border-left: none; border-bottom: 1px solid var(--line); overflow: visible; }
+  .chat { overflow: visible; min-height: 60vh; }
+  .chat-stream .messages { max-height: 360px; }
 }

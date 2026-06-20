@@ -192,7 +192,6 @@ func TestWorkbenchUILaneBoardMarkers(t *testing.T) {
 	body := w.Body.String()
 	for _, marker := range []string{
 		"renderTaskSummary",          // Cortex task summary
-		"selectDefaultLane",          // default lane selection
 		"conversationForLane",        // lane conversation lookup
 		"currentContextConversation", // conversation reuse for selected lane/kind
 		"related task",               // lane inspector enhancement
@@ -393,20 +392,19 @@ func TestWorkbenchUIShellMarkers(t *testing.T) {
 
 	html := getBody("/")
 	for _, marker := range []string{
-		`class="navrail"`,          // stage rail
-		`data-view="lanes"`,        // lane-first default stage rail item
-		`data-view="aggregate"`,    // agg stage rail item
-		`data-view="lockbox"`,      // lock stage rail item
-		`data-view="apply"`,        // apply stage rail item
-		`data-view="log"`,          // log stage rail item
-		`<body data-view="lanes">`, // default focused stage is lanes
-		`class="view view-lanes"`,  // lane-first default workspace
-		`id="view-aggregate"`,      // aggregate stage container
-		`id="view-lockbox"`,        // lockbox stage container
-		`id="view-apply"`,          // apply stage container
-		`class="ticker"`,           // always-on event ticker
-		`id="ticker-msg"`,          // ticker latest-event slot
-		`id="btn-open-log"`,        // ticker "Open log" → Log stage
+		`class="navrail"`,           // context-panel switcher
+		`data-view="context"`,       // default context-panel item
+		`data-view="aggregate"`,     // agg context item
+		`data-view="lockbox"`,       // lock context item
+		`data-view="apply"`,         // apply context item
+		`data-view="log"`,           // log context item
+		`<body data-view="context"`, // default context-panel view
+		`id="view-aggregate"`,       // aggregate panel container
+		`id="view-lockbox"`,         // lockbox panel container
+		`id="view-apply"`,           // apply panel container
+		`class="ticker"`,            // always-on bottom status ticker
+		`id="ticker-msg"`,           // ticker latest-event slot
+		`id="btn-open-log"`,         // ticker "Open log" → Log panel
 	} {
 		if !strings.Contains(html, marker) {
 			t.Errorf("expected index to contain %q", marker)
@@ -414,12 +412,12 @@ func TestWorkbenchUIShellMarkers(t *testing.T) {
 	}
 }
 
-// TestWorkbenchUILaneDetailMarkers checks the focused lane-detail slice: the
-// served app.js carries the lane-detail view, the "selecting a lane opens its
-// detail page" wiring, the focused renderer, the back control, and the builder
-// proposal action; the served index carries the lane-detail view, the back
-// control, and the fused Lane Console conversation area.
-func TestWorkbenchUILaneDetailMarkers(t *testing.T) {
+// TestWorkbenchUIChatFirstMarkers checks the chat-first reframe: the served
+// app.js carries the central chat surface (kind-routed Architect/lane chat), the
+// active-context title, the reviewer "revise" forward path (select/open/prefill,
+// no writes), and setup demotion after a task; the served index carries the
+// three-column chat shell with the chat always present.
+func TestWorkbenchUIChatFirstMarkers(t *testing.T) {
 	mux := New().mux
 	getBody := func(path string) string {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -433,11 +431,15 @@ func TestWorkbenchUILaneDetailMarkers(t *testing.T) {
 
 	js := getBody("/app.js")
 	for _, marker := range []string{
-		`"lane-detail"`,             // lane-detail is a supported (frontend-only) view
-		`setView("lane-detail")`,    // clicking/selecting a lane opens the detail page
-		"renderLaneDetail",          // focused lane-detail renderer
-		"btn-lane-back",             // back-to-lanes control wiring
-		"Generate Builder Proposal", // builder proposal action lives in the lane artifact area
+		"function renderChat",          // central chat surface
+		"function renderChatHead",      // active-context title / who you're talking to
+		"data-chat",                    // chat routes by context kind (architect vs lane)
+		"function reviseReview",        // detects the reviewer revise dead-end
+		"function openBuilderRevision", // revise forward path: select/open/prefill
+		"function builderLaneForRevision",
+		"function revisionPrompt",                           // prefilled revision request
+		"Please revise your proposal based on the reviewer", // the prefill text (never auto-sent)
+		"setupCollapsible",                                  // setup demotes once a task exists
 	} {
 		if !strings.Contains(js, marker) {
 			t.Errorf("expected app.js to contain %q", marker)
@@ -446,11 +448,17 @@ func TestWorkbenchUILaneDetailMarkers(t *testing.T) {
 
 	html := getBody("/")
 	for _, marker := range []string{
-		`class="view view-lane-detail"`, // focused lane-detail view
-		`id="btn-lane-back"`,            // "← Lanes" back control
-		`id="lane-detail-title"`,        // lane-detail header
-		`class="lane-console"`,          // fused Lane Console conversation area
-		`id="inspector-body"`,           // lane metadata + role artifact area (now in detail)
+		`class="chat"`,           // the central chat work surface
+		`id="chat-title"`,        // active-context title
+		`id="kind-chips"`,        // context selector
+		`id="conv-message"`,      // lane composer (always present)
+		`id="architect-message"`, // architect composer (always present)
+		`id="revise-banner"`,     // reviewer-revise forward path near the composer
+		`class="contextrail"`,    // secondary left rail
+		`class="contextpanel"`,   // right context panel (artifacts)
+		`id="btn-setup-toggle"`,  // "Edit setup" demotion control
+		`id="setup-controls"`,    // collapsible setup controls
+		`<body data-view="context" data-chat="architect"`, // chat-first defaults
 	} {
 		if !strings.Contains(html, marker) {
 			t.Errorf("expected index to contain %q", marker)
@@ -479,7 +487,6 @@ func TestWorkbenchUIFocusedShellPolishMarkers(t *testing.T) {
 		"Go to Lock and request",      // rail-aware Next guidance (lockbox)
 		"Go to Apply and explicitly",  // rail-aware Next guidance (apply)
 		"hf.setupCollapsed.v1",        // setup-collapse persistence key
-		"function setupComplete",      // collapse gated on setup being ready
 		"function toggleSetup",        // setup-collapse toggle
 		"function applySetupCollapse", // applies body.setup-collapsed + toggle/summary
 		"renderRailBadges",            // quiet rail badges
@@ -505,12 +512,11 @@ func TestWorkbenchUIFocusedShellPolishMarkers(t *testing.T) {
 
 	html := getBody("/")
 	for _, marker := range []string{
-		`id="btn-setup-toggle"`,           // visible Setup collapse/expand toggle
-		`id="setup-summary"`,              // compact status shown when collapsed
-		`class="panel run-summary-panel"`, // Run Summary hidden when collapsed
-		`class="nav-badge"`,               // rail badge spans
-		`id="nav-badge-aggregate"`,        // per-stage badge slot
-		`id="nav-badge-log"`,              // per-stage badge slot
+		`id="btn-setup-toggle"`,    // visible Setup collapse/expand toggle
+		`id="setup-summary"`,       // compact status shown when collapsed
+		`class="nav-badge"`,        // rail badge spans
+		`id="nav-badge-aggregate"`, // per-stage badge slot
+		`id="nav-badge-log"`,       // per-stage badge slot
 	} {
 		if !strings.Contains(html, marker) {
 			t.Errorf("expected index to contain %q", marker)
