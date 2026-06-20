@@ -1,0 +1,110 @@
+# PR: Hirdforge Workbench — local operator loop (MVP)
+
+Draft summary for opening the PR for `feat/hirdforge-workbench-local`.
+
+## Title suggestion
+
+`feat: Hirdforge Workbench — local operator loop (MVP)`
+
+## Summary
+
+Adds the Hirdforge Workbench: a local-first, single Go binary
+(`cmd/hirdforge-workbench`) that serves an embedded browser UI and an in-memory
+HTTP API implementing the full first operator loop end to end:
+
+```
+Project → Provider → Architect → Cortex Task → Builder Proposal → Aggregate
+→ Review → Lockbox Approval → Apply Preview → Explicit Apply → Validation
+```
+
+The product differentiator is the **safe write boundary**: reviewed aggregate →
+human Lockbox approval → read-only preview → explicit, confirmed apply →
+validation. All product logic lives in `internal/workbench`; the UI is embedded
+via `//go:embed` (`index.html` / `styles.css` / `app.js`) — vanilla JS, no
+framework, no Node build step.
+
+### Branch composition (note for the reviewer)
+
+The diff against `main` (`b8c19bd`) contains **37 commits**. The Workbench MVP is
+the top **33** (`0feb57e..HEAD`). The bottom **4** (`4523acc`, `0160266`,
+`dbdfffd`, `5a1d125`) are pre-existing Phase-4 staging-substrate commits that
+landed on this branch earlier (`.autonomy.yaml`, `.gitea/workflows/build.yaml`,
+`cmd/agent/staging_*`, `docs/phase4-staging-runbook.md`). If those should ship
+separately, rebase before merge.
+
+## Safety / idempotency guarantees
+
+Safety gates:
+
+- **Lockbox approval** is a human gate; apply requires an *approved* request
+  whose `proposal_id` is `aggregate:<id>`.
+- **Preview is read-only** — never writes files.
+- **Apply is the only write path**, gated by approved Lockbox + non-conflicted
+  (`aggregated`) aggregate + open project.
+- **Path confinement** — writes resolve through the project-root resolver and
+  touch only the aggregate's listed files (path-escape/symlink tests included).
+- **Explicit apply** — in the UI, apply runs only from a click after a
+  `confirm()`; never on load, preview, or approval. No auto-apply.
+- **Provider key safety** — the API key is stored backend-side and never echoed
+  by any read/response/event (covered by no-secret tests on POST/GET/events).
+
+Idempotency / reuse:
+
+- Architect → Cortex task creation is idempotent per accepted session.
+- Builder proposal generation reuses an existing `proposed` proposal per lane.
+- Review generation reuses an existing `reviewed` review per aggregate+lane.
+- Lockbox request reuses an existing pending/approved request per aggregate.
+- Apply is idempotent — a repeat returns the existing applied result and does
+  **not** re-write files; a failed apply is retryable.
+- Aggregate generation is intentionally snapshot-based; the UI discourages
+  duplicate aggregation when the proposed set is unchanged.
+
+## UI / operator-loop coverage
+
+- Per-stage **Run Summary** + a full-loop **Next** hint; the whole run rehydrates
+  from read endpoints on boot (reload-safe), with resume cues and 5s event
+  polling (paused when hidden).
+- Lane board + right inspector + a resizable Lane Console drawer; lane-scoped
+  conversations with reuse.
+- Setup (project/provider) hardening, provider key cleared from the form after
+  save, and operator-safe empty/error copy across panels.
+- Frontend↔backend route audit: **0 mismatches** (every UI call resolves to a
+  registered route). See `docs/workbench-api-routes.md`.
+
+## Test plan
+
+```bash
+gofmt -l internal/workbench                 # clean (no noise)
+go test ./cmd/hirdforge-workbench/... ./internal/workbench/... -count=1
+go test ./... -count=1
+go build ./cmd/hirdforge-workbench/...
+node --check internal/workbench/ui/app.js
+```
+
+- ~270+ Go tests in `internal/workbench` cover every stage, the gates, the
+  idempotency/reuse guards, path confinement, and provider key safety; UI
+  asset-marker tests assert the served `app.js` carries each stage's logic.
+- Full-loop API smoke (mock provider, no external services):
+  `docs/workbench-operator-loop-smoke.md`. Verified: apply writes only the
+  approved file, repeat apply does not re-write, validation passes, no key leak.
+
+## Known non-goals (this MVP)
+
+- No persistence — state is in-memory and lost on restart.
+- No rollback/undo after apply.
+- No streaming; compact file/path diffs (not full unified diffs).
+- Validation runs a single bounded command (no shell); output is capped.
+- Legacy single-Builder `build/*` routes remain but are superseded/unused by the
+  UI.
+
+## Follow-up work
+
+- Packaging / cross-platform distribution (Linux + Windows).
+- UI design pass (current UI is functional, not final).
+- Persistence durability (survive restarts).
+- Richer diffs in preview/apply.
+- Deeper validation configuration (multiple commands, per-project defaults).
+- Optionally split the Phase-4 staging-substrate commits out of this branch.
+
+See also: `docs/workbench-mvp-status.md`, `docs/workbench-api-routes.md`,
+`docs/workbench-operator-loop-smoke.md`.
