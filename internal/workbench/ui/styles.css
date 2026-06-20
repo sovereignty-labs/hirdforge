@@ -184,7 +184,15 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .review-panel { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
 .rev-head h2 { margin: 0 0 8px; }
 .rev-sec { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 8px; }
-.rev-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.rev-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; align-items: center; }
+
+/* The write boundary is visually distinct: Apply writes files. */
+.write-boundary { border-top: 1px solid var(--bad); }
+.write-label { color: var(--bad); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+.apply-btn { border-color: var(--bad); color: var(--bad); font-weight: 600; }
+.apply-btn:hover:not(:disabled) { background: var(--bad); color: #1a0f0d; border-color: var(--bad); }
+.val-cmd { flex: 1; min-width: 140px; max-width: 280px; }
+.val-out { background: #0f1216; border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; margin: 2px 0 4px; font-size: 11px; white-space: pre-wrap; max-height: 120px; overflow: auto; }
 .rev-btn { font-size: 12px; }
 .agg-head, .rev-r-head { font-size: 13px; margin-top: 8px; }
 .agg-sub, .rev-r-sub { color: var(--muted); font-size: 11px; margin: 2px 0; }

@@ -321,6 +321,16 @@ func (wb *Server) handleCortexApply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Idempotency: an aggregate is applied at most once. A repeat request
+		// returns the existing applied result (200) without re-writing any files.
+		// A failed apply is retryable.
+		for _, existing := range wb.cortexApplies.ListByAggregate(agg.ID) {
+			if existing.Status == cortexApplyStatusApplied {
+				writeJSON(w, http.StatusOK, existing)
+				return
+			}
+		}
+
 		applied, applyErr := applyAggregateFiles(project.Path, agg.Files)
 		result := CortexApplyResult{
 			AggregateID:      agg.ID,

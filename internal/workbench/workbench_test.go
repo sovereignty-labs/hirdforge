@@ -284,14 +284,43 @@ func TestWorkbenchUILockboxApplyMarkers(t *testing.T) {
 	}
 	body := w.Body.String()
 	for _, marker := range []string{
-		"approvalForAggregate",    // lockbox/approval state
-		"approvalReadiness",       // approval readiness gating
-		"renderApproval",          // approval display
-		"previewReadiness",        // apply preview readiness gating
-		"renderPreview",           // apply preview display
-		"requestAggregateLockbox", // request-approval action
-		"createApplyPreview",      // preview action
-		"not wired",               // explicit apply surfaced as not wired
+		"approvalForAggregate",      // lockbox/approval state
+		"approvalReadiness",         // approval readiness gating
+		"renderApproval",            // approval display
+		"previewReadiness",          // apply preview readiness gating
+		"renderPreview",             // apply preview display
+		"requestAggregateLockbox",   // request-approval action
+		"createApplyPreview",        // preview action
+		"Preview Apply (read-only)", // preview is read-only and labelled so
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
+// TestWorkbenchUIApplyValidationMarkers checks the served app.js carries the
+// explicit apply + post-apply validation UX: gating, the strong write-boundary
+// action, the confirm() text, result/validation display, and that apply runs
+// only from an explicit confirmed click (never automatically).
+func TestWorkbenchUIApplyValidationMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"applyReadiness",                           // explicit apply readiness gating
+		"Apply Approved Preview",                   // strong write action label
+		"write the approved files to your project", // confirmation text mentions writes
+		"window.confirm",                           // confirmation step before POST
+		"renderApplyResult",                        // apply result display
+		"validationReadiness",                      // validation readiness gating
+		"renderValidation",                         // validation display
+		"never on load",                            // no auto-apply: explicit click + confirm only
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("expected app.js to contain %q", marker)
@@ -5635,6 +5664,51 @@ func cortexApplyApprovedSetup(t *testing.T, projectDir string, files []BuilderPr
 		t.Fatalf("approve: expected 200, got %d: %s", app.Code, app.Body.String())
 	}
 	return wb, agg
+}
+
+func TestWorkbenchCortexApplyIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	wb, agg := cortexApplyApprovedSetup(t, dir, []BuilderProposedFile{{Path: "a.go", Action: "create", Content: "ORIGINAL\n"}})
+
+	first := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first apply: expected 200, got %d: %s", first.Code, first.Body.String())
+	}
+	var r1 CortexApplyResult
+	json.Unmarshal(first.Body.Bytes(), &r1)
+	if r1.Status != "applied" {
+		t.Fatalf("first apply status=%q, want applied", r1.Status)
+	}
+
+	// Tamper with the applied file; a repeat apply must NOT re-write it.
+	target := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(target, []byte("TAMPERED\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	second := postJSON(t, wb, "/api/workbench/cortex/apply", `{}`)
+	if second.Code != http.StatusOK {
+		t.Fatalf("repeat apply: expected 200 (reuse), got %d: %s", second.Code, second.Body.String())
+	}
+	var r2 CortexApplyResult
+	json.Unmarshal(second.Body.Bytes(), &r2)
+	if r2.ID != r1.ID {
+		t.Errorf("repeat returned apply #%s, want existing #%s", r2.ID, r1.ID)
+	}
+
+	// The repeat must not have re-written the (tampered) file.
+	if got, _ := os.ReadFile(target); string(got) != "TAMPERED\n" {
+		t.Errorf("repeat apply re-wrote the file: %q", string(got))
+	}
+
+	// Exactly one apply result is stored for the aggregate.
+	rec := httptest.NewRecorder()
+	wb.mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/workbench/cortex/applies?aggregate_id="+agg.ID, nil))
+	var list []CortexApplyResult
+	json.Unmarshal(rec.Body.Bytes(), &list)
+	if len(list) != 1 {
+		t.Errorf("expected exactly 1 apply result for the aggregate, got %d", len(list))
+	}
 }
 
 func TestCortexApplySafePathRejectsEmpty(t *testing.T) {

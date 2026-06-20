@@ -94,6 +94,20 @@ var api = {
     return request("POST", "/api/workbench/cortex/apply/preview", { lockbox_request_id: lockboxRequestId });
   },
 
+  getApply: function () { return request("GET", "/api/workbench/cortex/apply"); },
+  // applyApprovedPreview crosses the write boundary: it writes the approved
+  // aggregate's files to the project. Only ever called from an explicit,
+  // confirmed click — never on load, preview, or approval.
+  applyApprovedPreview: function (lockboxRequestId) {
+    return request("POST", "/api/workbench/cortex/apply", { lockbox_request_id: lockboxRequestId });
+  },
+  getValidation: function () { return request("GET", "/api/workbench/cortex/apply/validation"); },
+  runValidation: function (applyId, command) {
+    var body = { apply_id: applyId };
+    if (command) body.command = command;
+    return request("POST", "/api/workbench/cortex/apply/validate", body);
+  },
+
   getLaneConversation: function () { return request("GET", "/api/workbench/lane-conversation"); },
   getLaneConversations: function () { return request("GET", "/api/workbench/lane-conversations"); },
   createLaneConversation: function (body) { return request("POST", "/api/workbench/lane-conversation", body); },
@@ -121,7 +135,9 @@ var state = {
   aggregate: null,          // current CortexAggregateProposal
   review: null,             // current CortexAggregateReview
   approvals: [],            // LockboxApprovalRequest list
-  applyPreview: null,       // current CortexApplyPreview
+  applyPreview: null,       // current CortexApplyPreview (read-only)
+  apply: null,              // current CortexApplyResult (the write)
+  validation: null,         // current CortexApplyValidation
   events: [],
   error: "",
   loading: false,
@@ -707,26 +723,127 @@ function renderPreview(p) {
   return html;
 }
 
-// renderLockboxApply renders the Lockbox approval + apply-preview controls. The
-// actual apply (which writes files) is intentionally shown disabled in this
-// slice — the safe boundary is surfaced, writes are not rushed.
+// appliedResultForAggregate returns the successful apply result for an aggregate,
+// or null. The backend applies an aggregate at most once (idempotent).
+function appliedResultForAggregate(agg) {
+  if (!agg || !state.apply) return null;
+  return (state.apply.aggregate_id === agg.id && state.apply.status === "applied") ? state.apply : null;
+}
+
+// applyReadiness gates the explicit "Apply Approved Preview" write: an approved
+// Lockbox request, a ready apply preview, and no existing applied result.
+function applyReadiness() {
+  var agg = currentAggregate();
+  var approval = agg ? approvalForAggregate(agg.id) : null;
+  var approved = !!(approval && approval.status === "approved");
+  var preview = previewReadiness().preview;
+  var ready = !!(preview && preview.status === "ready");
+  var applied = appliedResultForAggregate(agg);
+  var r = {
+    agg: agg,
+    approval: approval,
+    applied: applied,
+    canApply: approved && ready && !applied,
+    hint: "",
+  };
+  if (!agg) r.hint = "";
+  else if (!approved) r.hint = "Approve the Lockbox request first.";
+  else if (!preview) r.hint = "Generate an apply preview first.";
+  else if (!ready) r.hint = "Apply preview is " + preview.status + " — resolve before applying.";
+  else if (applied) r.hint = "Already applied (#" + applied.id + ").";
+  else r.hint = "Apply writes the approved files to your project on disk.";
+  return r;
+}
+
+// validationReadiness gates "Run Validation" — only after a successful apply.
+function validationReadiness() {
+  var agg = currentAggregate();
+  var applied = appliedResultForAggregate(agg);
+  var validation = (state.validation && applied && state.validation.apply_id === applied.id) ? state.validation : null;
+  var r = {
+    applied: applied,
+    validation: validation,
+    canValidate: !!applied,
+    hint: "",
+  };
+  if (!applied) r.hint = "Validation runs after a successful apply.";
+  else if (validation) r.hint = "Validation " + validation.status + ".";
+  else r.hint = "Run a bounded validation command in the project.";
+  return r;
+}
+
+function renderApplyResult(a) {
+  var statusCls = a.status === "applied" ? "ok" : (a.status === "failed" ? "bad" : "muted");
+  var files = a.files || [];
+  var failed = files.filter(function (f) { return f.status === "failed" || f.error; }).length;
+  var html = '<div class="agg-head">apply <b>#' + esc(a.id) + '</b> · <span class="' + statusCls + '">' + esc(a.status) + "</span>" +
+    (a.ts ? ' · <span class="muted">' + esc(fmtTs(a.ts)) + "</span>" : "") + "</div>";
+  html += '<div class="agg-sub">aggregate #' + esc(a.aggregate_id) + " · " + files.length + " file" + (files.length === 1 ? "" : "s") + " written · " + failed + " failed</div>";
+  if (a.error) html += '<div class="bad agg-summary">' + esc(a.error) + "</div>";
+  if (files.length) {
+    html += '<ul class="agg-conf">' + files.map(function (f) {
+      var cls = (f.status === "failed" || f.error) ? "bad" : "ok";
+      return '<li><span class="prop-action">' + esc(f.action) + '</span> <span class="mono">' + esc(truncPath(f.path)) +
+        '</span> · <span class="' + cls + '">' + esc(f.status) + (f.error ? " (" + esc(f.error) + ")" : "") + "</span></li>";
+    }).join("") + "</ul>";
+  }
+  return html;
+}
+
+function renderValidation(v) {
+  var statusCls = v.status === "passed" ? "ok" : (v.status === "failed" ? "bad" : "warn");
+  var html = '<div class="agg-head">validation <b>#' + esc(v.id) + '</b> · <span class="' + statusCls + '">' + esc(v.status) +
+    '</span> · <span class="muted">exit ' + esc(v.exit_code) + "</span></div>";
+  if (v.command) html += '<div class="agg-sub mono">' + esc(v.command) + "</div>";
+  if (v.error) html += '<div class="bad agg-summary">' + esc(v.error) + "</div>";
+  function out(label, s) {
+    if (!s) return "";
+    var lines = String(s).split("\n").slice(0, 6).join("\n");
+    return '<div class="rev-list-h">' + label + '</div><pre class="val-out">' + esc(lines) + "</pre>";
+  }
+  html += out("stdout", v.stdout);
+  html += out("stderr", v.stderr);
+  return html;
+}
+
+// renderLockboxApply renders the Lockbox approval + read-only preview controls,
+// then the explicit write boundary (apply + post-apply validation). Apply is a
+// guarded, confirmed action — never automatic.
 function renderLockboxApply() {
   var apr = approvalReadiness();
   var pvr = previewReadiness();
   if (!apr.agg) return "";
+
+  // Lockbox approval + read-only preview (no writes).
   var html = '<div class="rev-sec"><div class="rev-actions">';
   html += '<button class="rev-btn" data-action="request-approval"' + (apr.canRequest ? "" : " disabled") + ">Request Lockbox Approval</button>";
   if (apr.approval && apr.approval.status === "pending") {
     html += '<button class="rev-btn" data-action="approve">Approve</button>';
     html += '<button class="rev-btn" data-action="reject">Reject</button>';
   }
-  html += '<button class="rev-btn" data-action="preview"' + (pvr.canPreview ? "" : " disabled") + ">Preview Apply</button>";
-  html += '<button class="rev-btn" disabled title="Applying writes files to the project; not wired in this slice">Apply · explicit, not wired</button>';
+  html += '<button class="rev-btn" data-action="preview"' + (pvr.canPreview ? "" : " disabled") + ' title="Read-only — never writes files">Preview Apply (read-only)</button>';
   html += "</div>";
   html += '<div class="hint">' + esc(apr.approval ? pvr.hint : apr.hint) + "</div>";
   if (apr.approval) html += renderApproval(apr.approval);
   if (pvr.preview) html += renderPreview(pvr.preview);
   html += "</div>";
+
+  // Explicit write boundary: Apply writes files (guarded + confirmed), then
+  // optional post-apply validation.
+  var ar = applyReadiness();
+  var vr = validationReadiness();
+  html += '<div class="rev-sec write-boundary">';
+  html += '<div class="write-label">Write boundary — Apply writes files to your project</div>';
+  html += '<div class="rev-actions">';
+  html += '<button class="rev-btn apply-btn" data-action="apply"' + (ar.canApply ? "" : " disabled") + ' title="Writes the approved files to your project on disk">Apply Approved Preview</button>';
+  html += '<input id="validate-command" class="val-cmd" placeholder="validation command (optional)">';
+  html += '<button class="rev-btn" data-action="validate"' + (vr.canValidate ? "" : " disabled") + ">Run Validation</button>";
+  html += "</div>";
+  html += '<div class="hint">' + esc(ar.applied ? vr.hint : ar.hint) + "</div>";
+  if (ar.applied) html += renderApplyResult(ar.applied);
+  if (vr.validation) html += renderValidation(vr.validation);
+  html += "</div>";
+
   return html;
 }
 
@@ -904,6 +1021,10 @@ function renderDrawerScope() {
     parts.push(state.applyPreview
       ? "preview #" + esc(state.applyPreview.id) + " · " + esc(state.applyPreview.status)
       : '<span class="muted">no preview</span>');
+    var applied = appliedResultForAggregate(currentAggregate());
+    if (applied) parts.push("apply #" + esc(applied.id) + " · " + esc(applied.status));
+    var v = (state.validation && applied && state.validation.apply_id === applied.id) ? state.validation : null;
+    if (v) parts.push("validation · " + esc(v.status));
   }
   $("drawer-scope").innerHTML = parts.join(" · ");
 }
@@ -1196,6 +1317,46 @@ async function generatePreview() {
   renderReviewPanel(); renderDrawer(); refreshEvents();
 }
 
+async function loadApply() {
+  var r = await api.getApply();
+  if (r.ok) state.apply = r.data; else if (r.status === 404) state.apply = null;
+}
+
+async function loadValidation() {
+  var r = await api.getValidation();
+  if (r.ok) state.validation = r.data; else if (r.status === 404) state.validation = null;
+}
+
+// applyApproved crosses the write boundary. It runs ONLY from this explicit
+// click after a browser confirm() — never on load, preview, or approval.
+async function applyApproved() {
+  var ar = applyReadiness();
+  if (!ar.canApply || !ar.approval) { showError("apply: " + (ar.hint || "not ready")); return; }
+  if (!window.confirm("Apply will write the approved files to your project on disk. This crosses the write boundary and is not automatically undone. Continue?")) {
+    return; // operator declined
+  }
+  var r = await api.applyApprovedPreview(ar.approval.id);
+  if (r.data && r.data.id) {
+    state.apply = r.data;
+    if (r.data.status === "failed") showError("apply failed: " + (r.data.error || ""));
+    else clearError();
+  } else {
+    showError("apply: " + (r.error || ("HTTP " + r.status)));
+  }
+  renderReviewPanel(); renderDrawer(); refreshEvents();
+}
+
+async function runValidation() {
+  var vr = validationReadiness();
+  if (!vr.applied) { showError("validation: apply first"); return; }
+  var cmdEl = $("validate-command");
+  var cmd = cmdEl ? cmdEl.value.trim() : "";
+  var r = await api.runValidation(vr.applied.id, cmd);
+  if (r.data && r.data.id) { state.validation = r.data; clearError(); }
+  else if (fail(r, "run validation")) { renderReviewPanel(); refreshEvents(); return; }
+  renderReviewPanel(); renderDrawer(); refreshEvents();
+}
+
 // ---- Lane Console resize --------------------------------------------------
 var CONSOLE = { key: "hf.consoleHeight.v1", def: 320, min: 180, max: 560 };
 
@@ -1376,6 +1537,8 @@ function wire() {
     else if (e.target.closest('[data-action="approve"]')) decideApproval("approve");
     else if (e.target.closest('[data-action="reject"]')) decideApproval("reject");
     else if (e.target.closest('[data-action="preview"]')) generatePreview();
+    else if (e.target.closest('[data-action="apply"]')) applyApproved();
+    else if (e.target.closest('[data-action="validate"]')) runValidation();
   });
 
   function onEnter(id, fn) {
@@ -1415,10 +1578,12 @@ async function boot() {
     api.getReview(),
     api.getLockboxRequests(),
     api.getApplyPreview(),
+    api.getApply(),
+    api.getValidation(),
   ]);
   var proj = r[0], prov = r[1], sess = r[2], sessions = r[3],
     task = r[4], conv = r[5], convs = r[6], events = r[7], props = r[8], agg = r[9], review = r[10],
-    approvals = r[11], preview = r[12];
+    approvals = r[11], preview = r[12], applyRes = r[13], validation = r[14];
 
   if (proj.ok) state.project = proj.data;
   if (prov.ok) state.provider = prov.data;
@@ -1436,6 +1601,8 @@ async function boot() {
   if (review.ok) state.review = review.data;
   if (approvals.ok && Array.isArray(approvals.data)) state.approvals = approvals.data;
   if (preview.ok) state.applyPreview = preview.data;
+  if (applyRes.ok) state.apply = applyRes.data;
+  if (validation.ok) state.validation = validation.data;
 
   // Re-apply the operator's last selection against the hydrated lanes.
   restoreSelection();
