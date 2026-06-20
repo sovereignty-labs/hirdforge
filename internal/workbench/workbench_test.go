@@ -603,6 +603,51 @@ func TestWorkbenchUICleanupMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUICurrentStepMarkers checks the central, state-driven Current Step
+// action area: the served app.js carries the step state machine + renderer +
+// dispatched actions, surfaces Generate Builder Proposal for a selected builder
+// lane and Open Builder revision chat for a revise verdict, drops the stale
+// "Lane Console" continue copy, and keeps the right panel coherent on lane
+// selection; the served index carries the Current Step container.
+func TestWorkbenchUICurrentStepMarkers(t *testing.T) {
+	mux := New().mux
+	getBody := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	js := getBody("/app.js")
+	for _, marker := range []string{
+		"function currentStep",                            // central state machine for the next action
+		"function renderCurrentStep",                      // renders the Current Step area
+		"data-step-action",                                // central action buttons, dispatched in wire()
+		"Generate Builder Proposal",                       // surfaced centrally for a selected builder lane
+		"Builder lane #",                                  // builder-lane-selected current-step copy
+		"Open Builder revision chat",                      // revise verdict surfaces the forward path centrally
+		"Generate revised proposal",                       // revise follow-up action (when generatable)
+		"No Builder proposals yet. Select a Builder lane", // corrected aggregate empty state
+		`setView("context")`,                              // selecting a lane refreshes the right panel to Context
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+	// Stale chat-first-conflicting copy must be gone.
+	if strings.Contains(js, "continue in the Lane Console") {
+		t.Error("expected app.js to no longer contain the stale 'continue in the Lane Console' copy")
+	}
+
+	html := getBody("/")
+	if !strings.Contains(html, `id="current-step"`) {
+		t.Error(`expected index to contain the central Current Step container id="current-step"`)
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)

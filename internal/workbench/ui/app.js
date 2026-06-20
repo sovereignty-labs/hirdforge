@@ -269,7 +269,12 @@ function loopNext() {
   if (!s.session) return "Start an Architect session.";
   if (s.session.status !== "accepted") return "Refine the spec, then Accept it.";
   if (!s.task) return "Create a Cortex task from the accepted spec.";
-  if (s.proposedCount === 0) return "Open a builder lane and generate a proposal.";
+  if (s.proposedCount === 0) {
+    var l = state.selectedLane;
+    return (l && l.role === "builder")
+      ? "Generate a proposal for the selected Builder lane."
+      : "Select a Builder lane, then generate a proposal.";
+  }
   if (!s.aggregate) return "Go to Agg and aggregate the Builder proposals.";
   if (!s.review) return "Go to Agg and run the Reviewer.";
   if (s.review.verdict === "revise") return "Reviewer requested changes. Open the Builder revision chat, ask for a revised proposal, then aggregate and review again.";
@@ -322,6 +327,131 @@ function renderNextHint() {
   el.innerHTML = html;
 }
 
+function firstBuilderLane() {
+  return state.lanes.find(function (x) { return x.role === "builder"; }) || null;
+}
+
+// currentStep is the state-driven "do the next thing" model: a one-line
+// description plus the action button(s) that progress the workflow RIGHT HERE in
+// the chat, so the operator never has to hunt for the next action in a side
+// panel. It is derived from the same loopStatus() / readiness helpers as
+// loopNext(), and each action maps to an existing frontend handler (no hidden
+// backend behavior). Buttons are disabled (not hidden) when their gate is unmet,
+// so the current step is always visible and honest.
+function currentStep() {
+  var s = loopStatus();
+  var step = { text: "", actions: [] };
+
+  if (!s.project) { step.text = "Open a local project in Setup (left rail)."; return step; }
+  if (!s.provider) { step.text = "Configure a provider in Setup (left rail)."; return step; }
+  if (!s.session) { step.text = "Describe a goal in the composer below so the Architect can draft a spec."; return step; }
+
+  var ar = architectReadiness();
+  if (s.session.status !== "accepted") {
+    step.text = "Refine the spec with the Architect, then accept it.";
+    step.actions.push({ label: "Accept spec", action: "accept-spec", disabled: !ar.canAccept });
+    return step;
+  }
+  if (!s.task) {
+    step.text = "Spec accepted — create a Cortex task.";
+    step.actions.push({ label: "Create Cortex task", action: "create-task", disabled: !ar.canCreateTask });
+    return step;
+  }
+
+  // A task exists. Reviewer "revise" is checked first so it never dead-ends: it
+  // only matches while there's a review for the current aggregate with that
+  // verdict (re-aggregating clears it and the normal flow resumes).
+  if (s.review && s.review.verdict === "revise") {
+    step.text = "Reviewer requested changes — open the Builder revision chat and ask for a revised proposal.";
+    step.actions.push({ label: "Open Builder revision chat", action: "revise" });
+    var bl = state.selectedLane;
+    if (bl && bl.role === "builder" && state.laneConversation && state.laneConversation.status === "active") {
+      step.actions.push({ label: "Send revision request", action: "send-conv" });
+    }
+    if (proposalReadiness().canGenerate) step.actions.push({ label: "Generate revised proposal", action: "gen-proposal" });
+    if (aggregateReadiness().canAggregate) step.actions.push({ label: "Re-aggregate", action: "aggregate" });
+    return step;
+  }
+
+  if (s.proposedCount === 0) {
+    var l = state.selectedLane;
+    if (l && l.role === "builder") {
+      step.text = "Builder lane #" + l.id + " selected — generate its proposal.";
+      step.actions.push({ label: "Generate Builder Proposal", action: "gen-proposal", disabled: !proposalReadiness().canGenerate });
+    } else {
+      var b = firstBuilderLane();
+      step.text = "Select a Builder lane to generate a proposal.";
+      if (b) step.actions.push({ label: "Select Builder " + b.index, action: "select-builder" });
+    }
+    return step;
+  }
+  if (aggregateReadiness().canAggregate) {
+    step.text = s.aggregate ? "New proposals — re-aggregate for review." : "Aggregate the Builder proposals.";
+    step.actions.push({ label: s.aggregate ? "Re-aggregate" : "Aggregate Proposals", action: "aggregate" });
+    return step;
+  }
+  if (!s.review) {
+    step.text = "Run the Reviewer on the aggregate.";
+    step.actions.push({ label: "Run Reviewer", action: "review", disabled: !reviewReadiness().canReview });
+    return step;
+  }
+  if (s.review.verdict !== "approve") {
+    step.text = "Reviewer verdict is " + s.review.verdict + " — revise the proposal, then review again.";
+    return step;
+  }
+  if (!s.approval) {
+    step.text = "Request Lockbox approval for the reviewed aggregate.";
+    step.actions.push({ label: "Request Lockbox Approval", action: "request-approval", disabled: !approvalReadiness().canRequest });
+    return step;
+  }
+  if (s.approval.status === "pending") {
+    step.text = "Human approval required for the Lockbox request.";
+    step.actions.push({ label: "Approve", action: "approve" });
+    step.actions.push({ label: "Reject", action: "reject" });
+    return step;
+  }
+  if (s.approval.status === "rejected") {
+    step.text = "Lockbox rejected — revise and request approval again.";
+    return step;
+  }
+  if (!s.preview || s.preview.status !== "ready") {
+    step.text = "Preview the apply (read-only) before writing.";
+    step.actions.push({ label: "Preview Apply", action: "preview", disabled: !previewReadiness().canPreview });
+    return step;
+  }
+  if (!s.applied) {
+    step.text = "Write boundary — apply the approved preview to your project.";
+    step.actions.push({ label: "Apply Approved Preview", action: "apply", disabled: !applyReadiness().canApply, danger: true });
+    return step;
+  }
+  if (!s.validation) {
+    step.text = "Validate the applied changes.";
+    step.actions.push({ label: "Run Validation", action: "validate", disabled: !validationReadiness().canValidate });
+    return step;
+  }
+  step.text = "Loop complete — applied and validated. ✓";
+  return step;
+}
+
+// renderCurrentStep paints the central Current Step action area. Each button
+// carries data-step-action, dispatched in wire() to the existing handler.
+function renderCurrentStep() {
+  var el = $("current-step");
+  if (!el) return;
+  var step = currentStep();
+  var html = '<span class="step-label">Current step</span>' +
+    '<span class="step-text">' + esc(step.text) + "</span>";
+  if (step.actions && step.actions.length) {
+    html += '<span class="step-actions">';
+    step.actions.forEach(function (a) {
+      html += '<button class="step-btn' + (a.danger ? " step-danger" : "") + '" data-step-action="' + esc(a.action) + '"' +
+        (a.disabled ? " disabled" : "") + ">" + esc(a.label) + "</button>";
+    });
+    html += "</span>";
+  }
+  el.innerHTML = html;
+}
+
 // renderRunSummary lists every loop stage with a compact status, so the operator
 // can see where the run stands at a glance — including right after a reload.
 function renderRunSummary() {
@@ -354,7 +484,7 @@ function renderRunSummary() {
 // renderHeader keeps the chips, Next hint, Run Summary, setup-collapse, and rail
 // badges in sync; call it wherever a setup-affecting state field changes.
 function renderHeader() {
-  renderChips(); renderNextHint(); renderRunSummary();
+  renderChips(); renderNextHint(); renderCurrentStep(); renderRunSummary();
   applySetupCollapse(); renderRailBadges(); renderTickerStatus();
 }
 
@@ -539,7 +669,7 @@ function architectReadiness() {
   else if (!s) r.hint = "Enter a goal and click Start to open an Architect session.";
   else if (active) r.hint = hasSpec ? "Refine with messages, then Accept the spec." : "Send a message so the Architect drafts a spec.";
   else if (accepted && !hasTask) r.hint = "Spec accepted — create a Cortex task.";
-  else if (hasTask) r.hint = "Cortex task #" + architectTaskId() + " created — continue in the Lane Console.";
+  else if (hasTask) r.hint = "Cortex task #" + architectTaskId() + " created — select a Builder lane or use Current Step to continue.";
   return r;
 }
 
@@ -805,23 +935,27 @@ function renderReviewPanel() {
   renderAggregateView();
   renderLockboxView();
   renderApplyView();
-  // Keep the loop-wide Next hint and Run Summary fresh after aggregate → apply
-  // actions (which re-render these stages but not the header).
-  renderNextHint(); renderRunSummary();
+  // Keep the loop-wide guidance fresh after aggregate → apply actions (which
+  // re-render these panels but not the header).
+  renderNextHint(); renderCurrentStep(); renderRunSummary();
 }
 
 // renderAggregateView renders the Aggregate & Review stage (Agg).
 function renderAggregateView() {
   var el = $("view-aggregate");
   if (!el) return;
+  var head = '<div class="stage-head"><h2>Aggregate &amp; Review</h2></div>';
   if (!state.cortexTask) {
-    el.innerHTML = '<div class="stage-head"><h2>Aggregate &amp; Review</h2></div>' +
-      '<div class="empty">Create a Cortex task (Lanes) before aggregating proposals.</div>';
+    el.innerHTML = head + '<div class="empty">Create a Cortex task before aggregating proposals.</div>';
     return;
   }
   var ar = aggregateReadiness();
   var rr = reviewReadiness();
-  var html = '<div class="stage-head"><h2>Aggregate &amp; Review</h2></div>';
+  if (ar.proposedCount === 0 && !ar.agg) {
+    el.innerHTML = head + '<div class="empty">No Builder proposals yet. Select a Builder lane and generate a proposal first.</div>';
+    return;
+  }
+  var html = head;
   html += '<div class="rev-actions">' +
     '<button class="rev-btn" data-action="aggregate"' + (ar.canAggregate ? "" : " disabled") + ">Aggregate Proposals</button>" +
     '<button class="rev-btn" data-action="review"' + (rr.canReview ? "" : " disabled") + ">Run Reviewer</button>" +
@@ -1119,7 +1253,7 @@ function renderInspector() {
     (l.workspace_path ? '<div class="ins-row"><b>workspace</b> <span class="mono">' + esc(l.workspace_path) + "</span></div>" : "") +
     (conv
       ? '<div class="ins-row"><b>conversation</b> #' + esc(conv.id) + ' · <span class="status-' + esc(conv.status) + '">' + esc(conv.status) + "</span></div>"
-      : '<div class="ins-row"><b>conversation</b> <span class="muted">none — start one in the Lane Console</span></div>');
+      : '<div class="ins-row"><b>conversation</b> <span class="muted">none — open one from the chat</span></div>');
 
   if (l.role === "builder") {
     var pr = proposalReadiness();
@@ -1173,6 +1307,7 @@ function renderChat() {
   }
   renderChatHead();
   renderReviseBanner();
+  renderCurrentStep();
 }
 
 function renderChatHead() {
@@ -1503,7 +1638,9 @@ async function createTask() {
   // Record the task on the session locally so the panel reflects it without a
   // reload (the backend already persisted cortex_task_id).
   if (state.architectSession && r.data) state.architectSession.cortex_task_id = r.data.id;
-  renderBoard(); renderInspector(); renderDrawer(); renderChat(); renderArchitect(); renderHeader(); refreshEvents();
+  // renderReviewPanel refreshes the Agg/Lock/Apply context panels so they reflect
+  // the new task instead of their stale "no task" empty state.
+  renderBoard(); renderInspector(); renderDrawer(); renderChat(); renderReviewPanel(); renderArchitect(); renderHeader(); refreshEvents();
 }
 
 function selectLane(id) {
@@ -1770,7 +1907,7 @@ function showResumeCues() {
   if (state.provider) items.push("Provider configured");
   if (state.architectSession) items.push("Architect session " + state.architectSession.status);
   if (state.cortexTask) items.push("Cortex task #" + state.cortexTask.id + " restored");
-  if (state.selectedLane) items.push("Lane Console restored: " + state.selectedLane.role + " lane " + state.selectedLane.id);
+  if (state.selectedLane) items.push("Lane restored: " + state.selectedLane.role + " lane " + state.selectedLane.id);
   else if (state.laneConversation) items.push("Lane conversation #" + state.laneConversation.id + " restored");
   renderResume(items);
 }
@@ -1840,6 +1977,28 @@ function wire() {
   var revise = $("revise-banner");
   if (revise) revise.addEventListener("click", function (e) {
     if (e.target.closest('[data-action="open-revision"]')) openBuilderRevision();
+  });
+  // Central Current Step actions: the next valid workflow action, surfaced in the
+  // chat. Each maps to the same handler reachable elsewhere — no hidden behavior.
+  var stepEl = $("current-step");
+  if (stepEl) stepEl.addEventListener("click", function (e) {
+    var b = e.target.closest("[data-step-action]");
+    if (!b) return;
+    var a = b.getAttribute("data-step-action");
+    if (a === "accept-spec") acceptSpec();
+    else if (a === "create-task") createTask();
+    else if (a === "select-builder") { var bl = firstBuilderLane(); if (bl) selectLane(bl.id); }
+    else if (a === "gen-proposal") generateProposal();
+    else if (a === "aggregate") aggregateProposals();
+    else if (a === "review") runReviewer();
+    else if (a === "revise") openBuilderRevision();
+    else if (a === "send-conv") sendConversation();
+    else if (a === "request-approval") requestApproval();
+    else if (a === "approve") decideApproval("approve");
+    else if (a === "reject") decideApproval("reject");
+    else if (a === "preview") generatePreview();
+    else if (a === "apply") applyApproved();
+    else if (a === "validate") runValidation();
   });
   // "Edit setup" / "Hide setup": demote or reveal the setup controls in the rail.
   var setupToggle = $("btn-setup-toggle");
