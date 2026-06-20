@@ -92,6 +92,30 @@ func TestWorkbenchUIAssets(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUIResumeMarkers checks the served app.js carries the reload
+// resume/polling logic, by stable identifier rather than brittle full content.
+func TestWorkbenchUIResumeMarkers(t *testing.T) {
+	mux := New().mux
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("/app.js: expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, marker := range []string{
+		"hf.selectedLaneId.v1",      // persisted selected lane id
+		"hf.selectedConsoleKind.v1", // persisted console kind
+		"restoreSelection",          // resume-after-reload logic
+		"EVENTS_POLL_MS",            // event polling
+		"visibilitychange",          // polling pauses when the tab is hidden
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)

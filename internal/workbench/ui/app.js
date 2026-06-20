@@ -375,7 +375,7 @@ async function createTask() {
   if (!state.architectSession) { showError("architect: no session"); return; }
   var r = await api.createCortexTask(state.architectSession.id);
   if (fail(r, "create cortex task")) return;
-  clearError(); setCortexTask(r.data); state.selectedLane = null;
+  clearError(); setCortexTask(r.data); state.selectedLane = null; persistSelection();
   renderBoard(); renderInspector(); renderChips(); refreshEvents();
 }
 
@@ -383,6 +383,7 @@ function selectLane(id) {
   var l = state.lanes.find(function (x) { return x.id === id; });
   if (!l) return;
   state.selectedLane = l; state.kind = l.role;
+  persistSelection();
   renderBoard(); renderInspector(); renderDrawer();
 }
 
@@ -395,6 +396,7 @@ function setKind(k) {
   } else {
     state.selectedLane = null;
   }
+  persistSelection();
   renderBoard(); renderInspector(); renderDrawer();
 }
 
@@ -492,6 +494,94 @@ function initConsoleResize() {
   grip.addEventListener("dblclick", function () { setConsoleHeight(CONSOLE.def, true); });
 }
 
+// ---- selection persistence + resume cues ----------------------------------
+// Only lightweight, non-sensitive UI selection is persisted: the selected lane
+// id and the console kind. Provider keys and conversation messages are never
+// written to localStorage.
+var SEL = { lane: "hf.selectedLaneId.v1", kind: "hf.selectedConsoleKind.v1" };
+
+function lsGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function lsSet(key, val) {
+  try {
+    if (val == null || val === "") localStorage.removeItem(key);
+    else localStorage.setItem(key, String(val));
+  } catch (e) { /* ignore (private mode / disabled storage) */ }
+}
+
+function persistSelection() {
+  lsSet(SEL.kind, state.kind);
+  lsSet(SEL.lane, state.selectedLane ? state.selectedLane.id : null);
+}
+
+// restoreSelection re-applies the persisted console kind / selected lane against
+// freshly hydrated lanes, falling back safely when the saved lane is gone.
+function restoreSelection() {
+  var savedKind = lsGet(SEL.kind);
+  var savedLaneId = lsGet(SEL.lane);
+
+  // A still-existing saved lane is the strongest signal: restore it and adopt
+  // its role as the console kind (how selecting a lane behaves normally).
+  var lane = savedLaneId ? state.lanes.find(function (x) { return x.id === savedLaneId; }) : null;
+  if (lane) {
+    state.selectedLane = lane;
+    state.kind = lane.role;
+    return;
+  }
+
+  // No usable saved lane: restore the saved kind (if valid) with safe fallbacks.
+  var kind = (savedKind && KINDS.indexOf(savedKind) >= 0) ? savedKind : state.kind;
+  if (LANE_KINDS.indexOf(kind) >= 0) {
+    var first = state.lanes.find(function (x) { return x.role === kind; });
+    if (first) { state.kind = kind; state.selectedLane = first; }       // first lane of that role
+    else if (!state.lanes.length) { state.kind = "architect"; state.selectedLane = null; } // no task/lanes
+    else { state.kind = kind; state.selectedLane = null; }              // lanes exist but none of this role
+  } else {
+    state.kind = kind; state.selectedLane = null;                       // architect / lockbox / apply
+  }
+}
+
+// showResumeCues surfaces a compact line describing what boot recovered, so the
+// operator can see the thread was not lost across a refresh or restart.
+function showResumeCues() {
+  var items = [];
+  if (state.project) items.push("Project restored");
+  if (state.provider) items.push("Provider configured");
+  if (state.architectSession) items.push("Architect session " + state.architectSession.status);
+  if (state.cortexTask) items.push("Cortex task #" + state.cortexTask.id + " restored");
+  if (state.selectedLane) items.push("Lane Console restored: " + state.selectedLane.role + " lane " + state.selectedLane.id);
+  else if (state.laneConversation) items.push("Lane conversation #" + state.laneConversation.id + " restored");
+  renderResume(items);
+}
+
+function renderResume(items) {
+  var el = $("resume");
+  if (!el) return;
+  if (!items.length) { el.innerHTML = ""; el.classList.add("hidden"); return; }
+  el.innerHTML = '<span class="resume-label">Resumed</span>' +
+    items.map(function (x) { return '<span class="resume-pill">' + esc(x) + "</span>"; }).join("");
+  el.classList.remove("hidden");
+}
+
+// ---- event polling --------------------------------------------------------
+var EVENTS_POLL_MS = 5000;
+var pollBusy = false;
+
+// pollEvents refreshes the event stream on a timer, skipping while the tab is
+// hidden and never piling up concurrent requests.
+async function pollEvents() {
+  if (document.hidden || pollBusy) return;
+  pollBusy = true;
+  try { await refreshEvents(); } finally { pollBusy = false; }
+}
+
+function startEventPolling() {
+  setInterval(pollEvents, EVENTS_POLL_MS);
+  // Refresh promptly when the operator returns to a previously hidden tab.
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) pollEvents();
+  });
+}
+
 // ---- boot -----------------------------------------------------------------
 function wire() {
   $("btn-project-open").onclick = openProject;
@@ -527,18 +617,45 @@ function wire() {
 }
 
 async function boot() {
-  // Reflect any existing server-side state; 404s simply mean "nothing yet".
-  var proj = await api.getProject(); if (proj.ok) state.project = proj.data;
-  var prov = await api.getProvider(); if (prov.ok) state.provider = prov.data;
-  var sess = await api.getArchitectSession(); if (sess.ok) setArchitectSession(sess.data);
-  await loadSessions();
-  var task = await api.getCortexTask(); if (task.ok) setCortexTask(task.data);
-  var conv = await api.getLaneConversation();
-  if (conv.ok && conv.data) { state.laneConversation = conv.data; if (conv.data.context) state.kind = conv.data.context.kind; }
-  await loadConversations();
-  await refreshEvents();
+  loadConsoleHeight(); // apply the persisted drawer height before the first paint
+
+  // Hydrate from the backend in parallel (fewer round-trips, less boot flicker).
+  // A 404 / no-current-object is normal empty state, never an operator error; we
+  // only ever set state from a successful read, so one optional 404 cannot wipe
+  // usable state recovered from another endpoint.
+  var r = await Promise.all([
+    api.getProject(),
+    api.getProvider(),
+    api.getArchitectSession(),
+    api.getArchitectSessions(),
+    api.getCortexTask(),
+    api.getLaneConversation(),
+    api.getLaneConversations(),
+    api.getEvents(),
+  ]);
+  var proj = r[0], prov = r[1], sess = r[2], sessions = r[3],
+    task = r[4], conv = r[5], convs = r[6], events = r[7];
+
+  if (proj.ok) state.project = proj.data;
+  if (prov.ok) state.provider = prov.data;
+  if (sess.ok) setArchitectSession(sess.data);
+  if (sessions.ok && Array.isArray(sessions.data)) state.sessionCount = sessions.data.length;
+  if (task.ok) setCortexTask(task.data);
+  if (conv.ok && conv.data) {
+    state.laneConversation = conv.data;
+    if (conv.data.context && conv.data.context.kind) state.kind = conv.data.context.kind;
+  }
+  if (convs.ok && Array.isArray(convs.data)) state.conversations = convs.data;
+  if (events.ok && Array.isArray(events.data)) state.events = events.data;
+
+  // Re-apply the operator's last selection against the hydrated lanes, then
+  // announce what was recovered.
+  restoreSelection();
+  showResumeCues();
+
   wire();
   renderAll();
+  startEventPolling();
 }
 
 document.addEventListener("DOMContentLoaded", boot);

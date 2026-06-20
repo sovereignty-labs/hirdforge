@@ -69,6 +69,15 @@ input:focus { outline: none; border-color: var(--accent-2); }
   background: #3a2422; border: 1px solid var(--bad); color: #f0c4bd; font-size: 13px;
 }
 
+/* Resume cues: a compact line listing what boot recovered after a reload. */
+.resume {
+  margin: 10px 16px 0; padding: 6px 12px; border-radius: 6px; flex: none;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
+  font-size: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+}
+.resume-label { color: var(--ok); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+.resume-pill { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--ink); }
+
 /* The grid fills the remaining viewport height. The board row flexes; the Lane
    Console drawer takes a fixed (resizable) height; the events row is auto. This
    makes the drawer steal vertical room from the board area, never the events. */
