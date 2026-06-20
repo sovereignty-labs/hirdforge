@@ -968,9 +968,9 @@ func TestWorkbenchProviderTestNotConfigured(t *testing.T) {
 func TestWorkbenchProviderTestSuccess(t *testing.T) {
 	var receivedAuth string
 	var receivedBody struct {
-		Model       string             `json:"model"`
+		Model       string              `json:"model"`
 		Messages    []map[string]string `json:"messages"`
-		Temperature float64            `json:"temperature"`
+		Temperature float64             `json:"temperature"`
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
