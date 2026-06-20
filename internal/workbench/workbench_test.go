@@ -415,6 +415,50 @@ func TestWorkbenchUIShellMarkers(t *testing.T) {
 	}
 }
 
+// TestWorkbenchUILaneDetailMarkers checks the focused lane-detail slice: the
+// served app.js carries the lane-detail view, the "selecting a lane opens its
+// detail page" wiring, the focused renderer, the back control, and the builder
+// proposal action; the served index carries the lane-detail view, the back
+// control, and the fused Lane Console conversation area.
+func TestWorkbenchUILaneDetailMarkers(t *testing.T) {
+	mux := New().mux
+	getBody := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200, got %d", path, w.Code)
+		}
+		return w.Body.String()
+	}
+
+	js := getBody("/app.js")
+	for _, marker := range []string{
+		`"lane-detail"`,             // lane-detail is a supported (frontend-only) view
+		`setView("lane-detail")`,    // clicking/selecting a lane opens the detail page
+		"renderLaneDetail",          // focused lane-detail renderer
+		"btn-lane-back",             // back-to-lanes control wiring
+		"Generate Builder Proposal", // builder proposal action lives in the lane artifact area
+	} {
+		if !strings.Contains(js, marker) {
+			t.Errorf("expected app.js to contain %q", marker)
+		}
+	}
+
+	html := getBody("/")
+	for _, marker := range []string{
+		`class="view view-lane-detail"`, // focused lane-detail view
+		`id="btn-lane-back"`,            // "← Lanes" back control
+		`id="lane-detail-title"`,        // lane-detail header
+		`class="lane-console"`,          // fused Lane Console conversation area
+		`id="inspector-body"`,           // lane metadata + role artifact area (now in detail)
+	} {
+		if !strings.Contains(html, marker) {
+			t.Errorf("expected index to contain %q", marker)
+		}
+	}
+}
+
 func TestWorkbenchRejectsNonGET(t *testing.T) {
 	mux := New().mux
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)

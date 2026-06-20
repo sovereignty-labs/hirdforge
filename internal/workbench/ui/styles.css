@@ -121,26 +121,53 @@ input:focus { outline: none; border-color: var(--accent-2); }
 .stage { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .stage-status { flex: none; padding: 9px 18px; border-bottom: 1px solid var(--line-soft); }
 
-/* Only the active view is shown; switching is driven by body[data-view]. */
+/* Only the active view is shown; switching is driven by body[data-view].
+   lane-detail is a focused sub-view of Lanes (no rail item of its own). */
 .view { display: none; flex: 1 1 auto; min-height: 0; }
 body[data-view="lanes"] .view-lanes,
 body[data-view="aggregate"] .view-aggregate,
 body[data-view="lockbox"] .view-lockbox,
 body[data-view="apply"] .view-apply,
-body[data-view="log"] .view-log { display: flex; }
+body[data-view="log"] .view-log,
+body[data-view="lane-detail"] .view-lane-detail { display: flex; }
 
-/* Lanes view — the lane-first default workspace: setup · board · inspector,
-   with the resizable Lane Console drawer beneath. */
+/* Lanes view — lane-first: a compressed Setup column + the lane grid as the
+   main focus. The inspector + Lane Console moved to the lane-detail view. */
 .view-lanes { flex-direction: column; min-height: 0; }
 .lanes-grid {
   flex: 1 1 auto; min-height: 0;
   display: grid; gap: 14px; padding: 14px 18px;
-  grid-template-columns: 300px minmax(0, 1fr) 290px;
+  grid-template-columns: 290px minmax(0, 1fr);
 }
 .setup { min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 12px; }
 .board { min-height: 0; overflow: auto; }
-.inspector { min-height: 0; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
-.view-lanes .drawer { margin: 0 18px 14px; }
+.board-foot { margin-top: 12px; font-size: 11px; }
+
+/* Compressed Setup panel: project / provider / architect as light sub-blocks. */
+.setup-panel { display: flex; flex-direction: column; gap: 12px; }
+.setup-block { border-top: 1px solid var(--line-soft); padding-top: 10px; }
+.setup-block:first-of-type { border-top: none; padding-top: 0; }
+.setup-label { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.02em; margin-bottom: 6px; }
+
+/* Lane detail view — one focused page: lane + artifact fused with the console. */
+.view-lane-detail { flex-direction: column; min-height: 0; overflow: hidden; }
+.lane-detail { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 14px 18px; gap: 12px; }
+.lane-detail-head { display: flex; align-items: center; gap: 12px; flex: none; }
+.back-btn { background: var(--panel-2); border-color: var(--line); }
+.back-btn:hover:not(:disabled) { border-color: var(--accent); }
+.lane-detail-title { font-size: 13px; color: var(--ink); }
+.lane-detail-grid {
+  flex: 1 1 auto; min-height: 0;
+  display: grid; gap: 14px; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+}
+.lane-artifact {
+  min-height: 0; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+}
+.lane-console {
+  min-height: 0; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px;
+}
 
 /* Aggregate / Lockbox / Apply / Log views — a single focused, scrollable
    stage panel each. */
@@ -249,20 +276,11 @@ body[data-view="log"] .view-log { display: flex; }
 .prop-files li { margin: 1px 0; }
 .prop-action { color: var(--accent); font-size: 9px; letter-spacing: 0.03em; }
 
-/* Lane Console drawer: fixed (resizable) height, internal message scroll, and a
-   top-edge grip for dragging the height up/down. */
-.drawer {
-  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-  padding: 0 14px 14px; height: var(--console-h); min-height: 0;
-  display: flex; flex-direction: column; flex: none;
-}
-.drawer-grip {
-  height: 14px; margin: 0 -14px 4px; cursor: ns-resize; flex: none;
-  display: flex; align-items: center; justify-content: center; touch-action: none;
-}
-.drawer-grip::before { content: ""; width: 44px; height: 3px; border-radius: 2px; background: var(--line); }
-.drawer-grip:hover::before { background: var(--accent); }
-.drawer-head { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; flex: none; padding-top: 10px; }
+/* Lane Console (inside the focused lane-detail page): a fused header + scope +
+   scrollable messages + composer. The messages area flexes to fill the column;
+   the header, scope, and composer stay fixed. */
+.drawer-head { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; flex: none; }
+.drawer-head h2 { margin: 0; }
 .kinds { display: flex; gap: 6px; flex-wrap: wrap; }
 .kind { text-transform: capitalize; padding: 4px 12px; border-radius: 999px; }
 .kind.active { background: var(--accent); color: #1a1408; border-color: var(--accent); font-weight: 600; }
@@ -273,8 +291,13 @@ body[data-view="log"] .view-log { display: flex; }
 .scope-tag { font-size: 10px; letter-spacing: 0.04em; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
 .scope-lane { color: var(--accent-2); border-color: var(--accent-2); }
 .scope-general { color: var(--muted); }
-.drawer .field { flex: none; }
+.lane-console .field { flex: none; }
+.lane-console .hint { flex: none; }
 #conv-messages { flex: 1 1 auto; min-height: 0; max-height: none; }
+
+/* The builder proposal action is the primary CTA on a builder lane page. */
+.lane-artifact .ins-prop-head .prop-btn { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.lane-artifact .ins-prop-head .prop-btn:hover:not(:disabled) { background: var(--accent); color: #1a1408; }
 
 /* Event log (Log view) + the always-on bottom ticker. */
 .event-list { overflow: auto; display: flex; flex-direction: column; gap: 2px; }
@@ -297,7 +320,7 @@ body[data-view="log"] .view-log { display: flex; }
   .navrail { flex-direction: row; border-right: none; border-bottom: 1px solid var(--line); overflow-x: auto; }
   .nav-item { flex-direction: row; gap: 6px; }
   .stage { overflow: visible; }
-  .view-aggregate, .view-lockbox, .view-apply, .view-log { overflow: visible; }
-  .lanes-grid { grid-template-columns: 1fr; }
-  .setup, .board, .inspector { overflow: visible; min-height: 0; }
+  .view-aggregate, .view-lockbox, .view-apply, .view-log, .view-lane-detail { overflow: visible; }
+  .lanes-grid, .lane-detail-grid { grid-template-columns: 1fr; }
+  .setup, .board, .lane-artifact, .lane-console { overflow: visible; min-height: 0; }
 }

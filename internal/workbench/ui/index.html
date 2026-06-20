@@ -39,50 +39,55 @@
         <div id="next-hint" class="next-hint"></div>
       </div>
 
-      <!-- LANES VIEW — the lane-first default workspace. -->
+      <!-- LANES VIEW — lane-first: a compressed Setup panel + the lane grid.
+           The inspector and Lane Console now live in the focused lane-detail
+           view, entered by clicking a lane. -->
       <section class="view view-lanes">
         <div class="lanes-grid">
           <aside class="setup">
-            <section class="panel">
-              <h2>Project</h2>
-              <div class="field">
-                <input id="project-path" placeholder="absolute path to project">
-                <button id="btn-project-open">Open</button>
+            <section class="panel setup-panel">
+              <h2>Setup</h2>
+              <div class="setup-block">
+                <div class="setup-label">Project</div>
+                <div class="field">
+                  <input id="project-path" placeholder="absolute path to project">
+                  <button id="btn-project-open">Open</button>
+                </div>
+                <div class="hint">Absolute path, e.g. <code>/home/you/project</code> or <code>C:\Users\You\project</code>.</div>
+                <div class="meta" id="project-meta">No project open.</div>
               </div>
-              <div class="hint">Use an absolute path, e.g. <code>/home/you/project</code> (Linux/macOS) or <code>C:\Users\You\project</code> (Windows).</div>
-              <div class="meta" id="project-meta">No project open.</div>
-            </section>
 
-            <section class="panel">
-              <h2>Provider</h2>
-              <div class="field"><input id="provider-base" placeholder="https://api.example.com/v1"></div>
-              <div class="field"><input id="provider-key" type="password" placeholder="api key (never displayed)"></div>
-              <div class="field">
-                <input id="provider-model" placeholder="model">
-                <button id="btn-provider-save">Save</button>
-                <button id="btn-provider-test">Test</button>
+              <div class="setup-block">
+                <div class="setup-label">Provider</div>
+                <div class="field"><input id="provider-base" placeholder="https://api.example.com/v1"></div>
+                <div class="field"><input id="provider-key" type="password" placeholder="api key (never displayed)"></div>
+                <div class="field">
+                  <input id="provider-model" placeholder="model">
+                  <button id="btn-provider-save">Save</button>
+                  <button id="btn-provider-test">Test</button>
+                </div>
+                <div class="hint">Your API key is stored on the local backend, cleared from this form after saving, and never shown again.</div>
+                <div class="meta" id="provider-meta">No provider configured.</div>
               </div>
-              <div class="hint">Your API key is sent to the local Workbench backend and stored there. It is cleared from this form after saving and is never shown again.</div>
-              <div class="meta" id="provider-meta">No provider configured.</div>
-            </section>
 
-            <section class="panel">
-              <h2>Architect spec</h2>
-              <div class="field">
-                <input id="architect-goal" placeholder="goal to refine into a spec">
-                <button id="btn-architect-start">Start</button>
-              </div>
-              <div class="meta" id="architect-meta">No session.</div>
-              <div class="hint hidden" id="architect-hint"></div>
-              <div class="messages" id="architect-messages"></div>
-              <div class="field">
-                <input id="architect-message" placeholder="message to architect">
-                <button id="btn-architect-send">Send</button>
-              </div>
-              <div class="spec" id="architect-spec"></div>
-              <div class="field">
-                <button id="btn-architect-accept">Accept spec</button>
-                <button id="btn-architect-task">Create Cortex task</button>
+              <div class="setup-block">
+                <div class="setup-label">Architect spec</div>
+                <div class="field">
+                  <input id="architect-goal" placeholder="goal to refine into a spec">
+                  <button id="btn-architect-start">Start</button>
+                </div>
+                <div class="meta" id="architect-meta">No session.</div>
+                <div class="hint hidden" id="architect-hint"></div>
+                <div class="messages" id="architect-messages"></div>
+                <div class="field">
+                  <input id="architect-message" placeholder="message to architect">
+                  <button id="btn-architect-send">Send</button>
+                </div>
+                <div class="spec" id="architect-spec"></div>
+                <div class="field">
+                  <button id="btn-architect-accept">Accept spec</button>
+                  <button id="btn-architect-task">Create Cortex task</button>
+                </div>
               </div>
             </section>
 
@@ -98,32 +103,45 @@
               <div class="meta" id="board-meta">No Cortex task.</div>
             </div>
             <div class="lanes" id="lanes"></div>
+            <div class="board-foot meta">Select a lane to open its focused detail page.</div>
           </section>
-
-          <aside class="inspector">
-            <h2>Inspector</h2>
-            <div id="inspector-body" class="meta">Select a lane or context.</div>
-          </aside>
         </div>
+      </section>
 
-        <section class="drawer">
-          <div class="drawer-grip" id="drawer-grip" title="Drag to resize · double-click to reset"></div>
-          <div class="drawer-head">
-            <h2>Lane Console</h2>
-            <div class="kinds" id="kind-chips"></div>
+      <!-- LANE DETAIL VIEW — a focused lane page: lane metadata + role artifact
+           fused with the Lane Console conversation. Entered by clicking a lane;
+           "← Lanes" returns to the grid. -->
+      <section class="view view-lane-detail">
+        <div class="lane-detail">
+          <div class="lane-detail-head">
+            <button id="btn-lane-back" class="back-btn">← Lanes</button>
+            <div id="lane-detail-title" class="lane-detail-title"></div>
           </div>
-          <div class="drawer-scope meta" id="drawer-scope"></div>
-          <div class="field">
-            <button id="btn-conv-new">Open Conversation</button>
-            <button id="btn-conv-close">Close</button>
+          <div class="lane-detail-grid">
+            <section class="lane-artifact">
+              <h2>Lane &amp; artifact</h2>
+              <div id="inspector-body" class="meta">Select a lane.</div>
+            </section>
+
+            <section class="lane-console">
+              <div class="drawer-head">
+                <h2>Lane Console</h2>
+                <div class="kinds" id="kind-chips"></div>
+              </div>
+              <div class="drawer-scope meta" id="drawer-scope"></div>
+              <div class="field">
+                <button id="btn-conv-new">Open Conversation</button>
+                <button id="btn-conv-close">Close</button>
+              </div>
+              <div class="hint hidden" id="console-hint"></div>
+              <div class="messages" id="conv-messages"></div>
+              <div class="field">
+                <input id="conv-message" placeholder="ask this lane / artifact…">
+                <button id="btn-conv-send">Send</button>
+              </div>
+            </section>
           </div>
-          <div class="hint hidden" id="console-hint"></div>
-          <div class="messages" id="conv-messages"></div>
-          <div class="field">
-            <input id="conv-message" placeholder="ask this lane / artifact…">
-            <button id="btn-conv-send">Send</button>
-          </div>
-        </section>
+        </div>
       </section>
 
       <!-- AGGREGATE VIEW — aggregate the Builder proposals and review them. -->

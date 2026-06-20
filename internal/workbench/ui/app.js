@@ -155,15 +155,19 @@ var LANE_KINDS = ["builder", "reviewer", "validator"];
 // is purely frontend (CSS via body[data-view]) and persisted, independent of
 // the loop's backend state. VIEW_KEY is separate from the selection keys so it
 // can never disturb hf.selectedLaneId.v1 / hf.selectedConsoleKind.v1.
-var VIEWS = ["lanes", "aggregate", "lockbox", "apply", "log"];
+// lane-detail is a focused sub-view of Lanes: it has no rail item of its own and
+// is entered by clicking a lane (selectLane); the Lanes rail item stays active
+// for it and returns to the grid.
+var VIEWS = ["lanes", "aggregate", "lockbox", "apply", "log", "lane-detail"];
 var VIEW_KEY = "hf.workbenchView.v1";
 
 function applyView() {
   if (document.body) document.body.setAttribute("data-view", state.view);
+  var railView = (state.view === "lane-detail") ? "lanes" : state.view;
   var items = document.querySelectorAll(".nav-item");
   for (var i = 0; i < items.length; i++) {
     var v = items[i].getAttribute("data-view");
-    if (v === state.view) items[i].classList.add("active");
+    if (v === railView) items[i].classList.add("active");
     else items[i].classList.remove("active");
   }
 }
@@ -178,6 +182,10 @@ function setView(view) {
 function restoreView() {
   var v = lsGet(VIEW_KEY);
   if (v && VIEWS.indexOf(v) >= 0) state.view = v;
+  // lane-detail only makes sense with a selected lane; otherwise fall back to
+  // the grid so a stale persisted view never strands the operator on an empty
+  // detail page.
+  if (state.view === "lane-detail" && !state.selectedLane) state.view = "lanes";
   applyView();
 }
 
@@ -1049,7 +1057,36 @@ function renderInspector() {
       (rr.review ? renderReview(rr.review) : '<div class="empty">No review yet. Aggregate proposals, then Run Reviewer.</div>') +
       "</div>";
   }
+
+  if (l.role === "validator") {
+    var vr = validationReadiness();
+    rows += '<div class="ins-prop"><div class="ins-prop-head"><b>validator</b></div>' +
+      (vr.validation ? renderValidation(vr.validation) : '<div class="empty">No validation yet. Apply an approved preview, then Run Validation (Apply stage).</div>') +
+      "</div>";
+  }
+
+  if (l.role === "architect") {
+    rows += '<div class="ins-prop"><div class="ins-prop-head"><b>architect</b></div>' +
+      (state.acceptedSpec ? '<div class="spec-accepted">spec accepted</div>' : "") +
+      (state.cortexTask
+        ? '<div class="prop-sub">task #' + esc(state.cortexTask.id) + " · " + esc(state.cortexTask.goal) + "</div>"
+        : '<div class="empty">No Cortex task yet — accept a spec, then create one.</div>') +
+      "</div>";
+  }
   b.innerHTML = rows;
+}
+
+// renderLaneDetail fills the focused lane page header. The lane artifact area is
+// renderInspector (#inspector-body) and the conversation is renderDrawer; both
+// keep their stable ids, so this only owns the title/back row.
+function renderLaneDetail() {
+  var el = $("lane-detail-title");
+  if (!el) return;
+  var l = state.selectedLane;
+  if (!l) { el.innerHTML = '<span class="muted">No lane selected</span>'; return; }
+  el.innerHTML = '<b>#' + esc(l.id) + '</b> · <span class="lane-role">' + esc(l.role) + " " + esc(l.index) +
+    '</span> · <span class="muted">' + esc(l.status) + "</span>" +
+    (state.cortexTask ? ' · <span class="muted">task #' + esc(state.cortexTask.id) + "</span>" : "");
 }
 
 // kindAvailable reports whether a context kind can be used now: non-lane kinds
@@ -1201,7 +1238,7 @@ function renderTicker() {
 
 function renderAll() {
   renderHeader(); renderProject(); renderProvider(); renderArchitect();
-  renderBoard(); renderReviewPanel(); renderInspector(); renderDrawer(); renderEvents();
+  renderBoard(); renderReviewPanel(); renderInspector(); renderDrawer(); renderLaneDetail(); renderEvents();
   applyView();
 }
 
@@ -1296,7 +1333,8 @@ function selectLane(id) {
   state.selectedLane = l; state.kind = l.role;
   syncConversationForContext(); // show this lane's conversation if one exists
   persistSelection();
-  renderBoard(); renderInspector(); renderDrawer(); renderHeader();
+  setView("lane-detail"); // selecting a lane opens its focused detail page
+  renderBoard(); renderInspector(); renderDrawer(); renderLaneDetail(); renderHeader();
 }
 
 function setKind(k) {
@@ -1310,7 +1348,7 @@ function setKind(k) {
   }
   syncConversationForContext();
   persistSelection();
-  renderBoard(); renderInspector(); renderDrawer(); renderHeader();
+  renderBoard(); renderInspector(); renderDrawer(); renderLaneDetail(); renderHeader();
 }
 
 async function newConversation() {
@@ -1667,6 +1705,10 @@ function wire() {
   });
   var openLog = $("btn-open-log");
   if (openLog) openLog.onclick = function () { setView("log"); };
+  // "← Lanes" leaves the focused lane-detail page for the grid (the lane stays
+  // selected, so re-clicking it reopens the same page).
+  var back = $("btn-lane-back");
+  if (back) back.onclick = function () { setView("lanes"); };
 
   $("lanes").addEventListener("click", function (e) {
     var b = e.target.closest("[data-lane]");
