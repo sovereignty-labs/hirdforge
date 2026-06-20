@@ -11,12 +11,18 @@ import (
 
 const modeName = "workbench"
 
-// indexHTML is the embedded Lane Console operator UI served at "/". It is a
-// single self-contained page (HTML/CSS/vanilla JS) that calls the live
-// Workbench APIs; see internal/workbench/ui/index.html.
+// The Lane Console operator UI is served from these embedded static assets (see
+// internal/workbench/ui/). index.html is served at "/" and references styles.css
+// and app.js, each served from its own path. No Node build step is involved.
 //
 //go:embed ui/index.html
-var indexHTML string
+var indexHTML []byte
+
+//go:embed ui/styles.css
+var stylesCSS []byte
+
+//go:embed ui/app.js
+var appJS []byte
 
 // Server is the Workbench runtime: it ties the event store and project,
 // provider, session, inspection, proposal, and Lockbox state to a small HTTP
@@ -150,19 +156,32 @@ func (wb *Server) registerRoutes() *http.ServeMux {
 	mux.HandleFunc("/api/workbench/validation", wb.handleValidation)
 	mux.HandleFunc("/api/workbench/diff", wb.handleDiff)
 
+	mux.HandleFunc("/styles.css", func(w http.ResponseWriter, r *http.Request) {
+		serveAsset(w, r, "text/css; charset=utf-8", stylesCSS)
+	})
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		serveAsset(w, r, "text/javascript; charset=utf-8", appJS)
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(indexHTML))
+		serveAsset(w, r, "text/html; charset=utf-8", indexHTML)
 	})
 
 	return mux
+}
+
+// serveAsset writes an embedded UI asset with the given content type, allowing
+// only GET. It is the serving primitive behind "/", "/styles.css", and "/app.js".
+func serveAsset(w http.ResponseWriter, r *http.Request, contentType string, body []byte) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }

@@ -54,8 +54,41 @@ func TestWorkbenchIndex(t *testing.T) {
 	if got := w.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
 		t.Fatalf("expected text/html content type, got %q", got)
 	}
-	if !strings.Contains(w.Body.String(), "Hirdforge Workbench") {
-		t.Errorf("expected body to contain title, got: %q", w.Body.String())
+	body := w.Body.String()
+	if !strings.Contains(body, "Hirdforge Workbench") {
+		t.Errorf("expected body to contain title, got: %q", body)
+	}
+	// The page is split into embedded assets; it must reference both.
+	if !strings.Contains(body, "app.js") {
+		t.Errorf("expected index to reference app.js")
+	}
+	if !strings.Contains(body, "styles.css") {
+		t.Errorf("expected index to reference styles.css")
+	}
+}
+
+// TestWorkbenchUIAssets verifies the split CSS/JS assets are served with a
+// usable content type and non-empty body (not 404).
+func TestWorkbenchUIAssets(t *testing.T) {
+	mux := New().mux
+	cases := []struct{ path, ctype string }{
+		{"/styles.css", "text/css"},
+		{"/app.js", "javascript"},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodGet, c.path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: expected 200, got %d", c.path, w.Code)
+			continue
+		}
+		if got := w.Header().Get("Content-Type"); !strings.Contains(got, c.ctype) {
+			t.Errorf("%s: expected content type containing %q, got %q", c.path, c.ctype, got)
+		}
+		if w.Body.Len() == 0 {
+			t.Errorf("%s: expected non-empty body", c.path)
+		}
 	}
 }
 
