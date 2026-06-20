@@ -42,6 +42,10 @@ const indexHTML = `<!doctype html>
     <li><code>GET /api/workbench/build/proposals</code></li>
     <li><code>GET /api/workbench/lockbox/request</code></li>
     <li><code>GET /api/workbench/lockbox/requests</code></li>
+    <li><code>GET /api/workbench/architect/session</code></li>
+    <li><code>GET /api/workbench/architect/sessions</code></li>
+    <li><code>GET /api/workbench/lane-conversation</code></li>
+    <li><code>GET /api/workbench/lane-conversations</code></li>
     <li><code>GET /api/workbench/cortex/task</code></li>
     <li><code>GET /api/workbench/cortex/tasks</code></li>
     <li><code>GET /api/workbench/cortex/lanes</code></li>
@@ -85,6 +89,9 @@ type Server struct {
 	cortexApplyPreviews *cortexApplyPreviewStore
 	cortexValidations   *cortexValidationStore
 
+	architect         *architectSessionStore
+	laneConversations *laneConversationStore
+
 	mux *http.ServeMux
 }
 
@@ -109,6 +116,9 @@ func New() *Server {
 		cortexApplies:       newCortexApplyStore(),
 		cortexApplyPreviews: newCortexApplyPreviewStore(),
 		cortexValidations:   newCortexValidationStore(),
+
+		architect:         newArchitectSessionStore(),
+		laneConversations: newLaneConversationStore(),
 	}
 	wb.mux = wb.registerRoutes()
 	return wb
@@ -176,6 +186,17 @@ func (wb *Server) registerRoutes() *http.ServeMux {
 	mux.HandleFunc("/api/workbench/cortex/apply/validate", wb.handleCortexApplyValidate)
 	mux.HandleFunc("/api/workbench/cortex/apply/validation", wb.handleCortexApplyValidation)
 	mux.HandleFunc("/api/workbench/cortex/apply/validations", wb.handleCortexApplyValidations)
+
+	mux.HandleFunc("/api/workbench/architect/session", wb.handleArchitectSession)
+	mux.HandleFunc("/api/workbench/architect/sessions", wb.handleArchitectSessions)
+	mux.HandleFunc("/api/workbench/architect/message", wb.handleArchitectMessage)
+	mux.HandleFunc("/api/workbench/architect/accept", wb.handleArchitectAccept)
+	mux.HandleFunc("/api/workbench/architect/cortex-task", wb.handleArchitectCortexTask)
+
+	mux.HandleFunc("/api/workbench/lane-conversation", wb.handleLaneConversation)
+	mux.HandleFunc("/api/workbench/lane-conversations", wb.handleLaneConversations)
+	mux.HandleFunc("/api/workbench/lane-conversation/message", wb.handleLaneConversationMessage)
+	mux.HandleFunc("/api/workbench/lane-conversation/close", wb.handleLaneConversationClose)
 
 	mux.HandleFunc("/api/workbench/validation", wb.handleValidation)
 	mux.HandleFunc("/api/workbench/diff", wb.handleDiff)

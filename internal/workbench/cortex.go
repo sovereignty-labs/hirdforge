@@ -298,6 +298,37 @@ func (wb *Server) appendCortexEvent(evType, message string, payload any) {
 	}
 }
 
+// resolveCortexRoleCounts applies the Cortex task mode/role rules shared by the
+// Cortex task endpoint and the Architect spec→task conversion: it validates the
+// mode, selects role counts from explicit roles or the mode default, and bounds
+// the total. It returns the resolved counts, or a non-empty error message (and
+// zero counts) describing the first rule the request violated.
+func resolveCortexRoleCounts(mode string, roles *CortexRoleCounts) (CortexRoleCounts, string) {
+	if mode != cortexModeSingle && mode != cortexModeMulti {
+		return CortexRoleCounts{}, "mode must be single or multi"
+	}
+	var counts CortexRoleCounts
+	switch {
+	case roles != nil:
+		counts = *roles
+	case mode == cortexModeMulti:
+		counts = CortexRoleCounts{Architect: 1, Builder: 2, Reviewer: 1, Validator: 1}
+	default:
+		counts = CortexRoleCounts{Architect: 0, Builder: 1, Reviewer: 0, Validator: 0}
+	}
+	if counts.Architect < 0 || counts.Builder < 0 || counts.Reviewer < 0 || counts.Validator < 0 {
+		return CortexRoleCounts{}, "role counts must not be negative"
+	}
+	total := counts.Architect + counts.Builder + counts.Reviewer + counts.Validator
+	if total == 0 {
+		return CortexRoleCounts{}, "at least one lane is required"
+	}
+	if total > cortexMaxLanes {
+		return CortexRoleCounts{}, "total lane count exceeds the maximum of 12"
+	}
+	return counts, ""
+}
+
 // handleCortexTask serves GET (current task) and POST (create a task with one
 // or many lanes per role).
 func (wb *Server) handleCortexTask(w http.ResponseWriter, r *http.Request) {
@@ -332,32 +363,9 @@ func (wb *Server) handleCortexTask(w http.ResponseWriter, r *http.Request) {
 		if mode == "" {
 			mode = cortexModeSingle
 		}
-		if mode != cortexModeSingle && mode != cortexModeMulti {
-			http.Error(w, "mode must be single or multi", http.StatusBadRequest)
-			return
-		}
-
-		var counts CortexRoleCounts
-		switch {
-		case in.Roles != nil:
-			counts = *in.Roles
-		case mode == cortexModeMulti:
-			counts = CortexRoleCounts{Architect: 1, Builder: 2, Reviewer: 1, Validator: 1}
-		default:
-			counts = CortexRoleCounts{Architect: 0, Builder: 1, Reviewer: 0, Validator: 0}
-		}
-
-		if counts.Architect < 0 || counts.Builder < 0 || counts.Reviewer < 0 || counts.Validator < 0 {
-			http.Error(w, "role counts must not be negative", http.StatusBadRequest)
-			return
-		}
-		total := counts.Architect + counts.Builder + counts.Reviewer + counts.Validator
-		if total == 0 {
-			http.Error(w, "at least one lane is required", http.StatusBadRequest)
-			return
-		}
-		if total > cortexMaxLanes {
-			http.Error(w, "total lane count exceeds the maximum of 12", http.StatusBadRequest)
+		counts, errMsg := resolveCortexRoleCounts(mode, in.Roles)
+		if errMsg != "" {
+			http.Error(w, errMsg, http.StatusBadRequest)
 			return
 		}
 

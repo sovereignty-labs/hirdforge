@@ -184,7 +184,7 @@ func TestWorkbenchEventsGET(t *testing.T) {
 }
 
 func TestWorkbenchEventsGETEmpty(t *testing.T) {
-	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore(), cortexApplies: newCortexApplyStore(), cortexApplyPreviews: newCortexApplyPreviewStore(), cortexValidations: newCortexValidationStore()}
+	wb := &Server{store: newEventStore(), project: newProjectState(), provider: newProviderState(), sessions: newSessionStore(), inspection: newInspectionState(), proposals: newProposalStore(), lockbox: newLockboxStore(), cortex: newCortexStore(), cortexLaneProposals: newCortexLaneProposalStore(), cortexAggregates: newCortexAggregateStore(), cortexReviews: newCortexReviewStore(), cortexApplies: newCortexApplyStore(), cortexApplyPreviews: newCortexApplyPreviewStore(), cortexValidations: newCortexValidationStore(), architect: newArchitectSessionStore(), laneConversations: newLaneConversationStore()}
 	wb.mux = wb.registerRoutes()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workbench/events", nil)
@@ -6398,6 +6398,1105 @@ func TestWorkbenchCortexApplyValidateNoAPIKey(t *testing.T) {
 	for _, e := range wb.store.List() {
 		if strings.HasPrefix(e.Type, "cortex.apply.validation") {
 			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+// architectGET issues a GET against the workbench mux and returns the recorder.
+func architectGET(t *testing.T, wb *Server, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	w := httptest.NewRecorder()
+	wb.mux.ServeHTTP(w, req)
+	return w
+}
+
+// architectResponse returns a handler that replies with an OpenAI-style
+// envelope whose message content is the Architect JSON {message, spec}.
+func architectResponse(message string, spec map[string]any) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		content, _ := json.Marshal(map[string]any{"message": message, "spec": spec})
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "test",
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": string(content)}},
+			},
+		})
+	}
+}
+
+// newArchitectWorkbench builds a workbench with a non-git temp project open and,
+// when handler is non-nil, a mock provider configured against it.
+func newArchitectWorkbench(t *testing.T, handler http.HandlerFunc) (*Server, string) {
+	t.Helper()
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	if handler != nil {
+		server := startMockProvider(t, handler)
+		postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	}
+	return wb, dir
+}
+
+// createArchitectSession creates an active Architect session and returns it.
+func createArchitectSession(t *testing.T, wb *Server, goal string) ArchitectSession {
+	t.Helper()
+	w := postJSON(t, wb, "/api/workbench/architect/session", `{"goal":"`+goal+`"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("architect session: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var s ArchitectSession
+	if err := json.Unmarshal(w.Body.Bytes(), &s); err != nil {
+		t.Fatalf("decode architect session: %v", err)
+	}
+	return s
+}
+
+func TestWorkbenchArchitectSessionRequiresProject(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/architect/session", `{"goal":"ship it"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectSessionRequiresGoal(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	w := postJSON(t, wb, "/api/workbench/architect/session", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectSessionCreatesActive(t *testing.T) {
+	wb, dir := newArchitectWorkbench(t, nil)
+	w := postJSON(t, wb, "/api/workbench/architect/session", `{"goal":"ship it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var s ArchitectSession
+	json.Unmarshal(w.Body.Bytes(), &s)
+	if s.ID == "" {
+		t.Error("expected session id")
+	}
+	if s.Status != "active" {
+		t.Errorf("status=%q, want active", s.Status)
+	}
+	if s.Spec.Goal != "ship it" {
+		t.Errorf("spec goal=%q, want ship it", s.Spec.Goal)
+	}
+	if s.Project.Path != dir {
+		t.Errorf("project path=%q, want %q", s.Project.Path, dir)
+	}
+	// Empty spec slices must serialize as [] rather than null.
+	if body := w.Body.String(); !strings.Contains(body, `"constraints":[]`) {
+		t.Errorf("expected empty constraints slice in %s", body)
+	}
+}
+
+func TestWorkbenchArchitectSessionAppendsUserMessage(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	s := createArchitectSession(t, wb, "ship it")
+	if len(s.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(s.Messages))
+	}
+	if s.Messages[0].Role != "user" {
+		t.Errorf("role=%q, want user", s.Messages[0].Role)
+	}
+	if s.Messages[0].Content != "ship it" {
+		t.Errorf("content=%q, want ship it", s.Messages[0].Content)
+	}
+}
+
+func TestWorkbenchArchitectSessionEventAppended(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "ship it")
+	if ev := cortexHasEvent(wb, "architect.session.created"); ev == nil {
+		t.Error("architect.session.created event not appended")
+	} else if ev.Message != "Created Architect session" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchArchitectSessionGET404(t *testing.T) {
+	wb := New()
+	w := architectGET(t, wb, "/api/workbench/architect/session")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectSessionGETCurrent(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	created := createArchitectSession(t, wb, "ship it")
+	w := architectGET(t, wb, "/api/workbench/architect/session")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var s ArchitectSession
+	json.Unmarshal(w.Body.Bytes(), &s)
+	if s.ID != created.ID {
+		t.Errorf("current session id=%q, want %q", s.ID, created.ID)
+	}
+	if s.Spec.Goal != "ship it" {
+		t.Errorf("spec goal=%q, want ship it", s.Spec.Goal)
+	}
+}
+
+func TestWorkbenchArchitectSessionsEmpty(t *testing.T) {
+	wb := New()
+	w := architectGET(t, wb, "/api/workbench/architect/sessions")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty sessions, got %q", body)
+	}
+}
+
+func TestWorkbenchArchitectSessionsIncludes(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "first")
+	createArchitectSession(t, wb, "second")
+	w := architectGET(t, wb, "/api/workbench/architect/sessions")
+	var list []ArchitectSession
+	json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(list))
+	}
+	if list[0].Spec.Goal != "first" || list[1].Spec.Goal != "second" {
+		t.Errorf("unexpected session order: %q, %q", list[0].Spec.Goal, list[1].Spec.Goal)
+	}
+}
+
+func TestWorkbenchArchitectMessageRequiresSession(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"hi"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectMessageRejectsAccepted(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "ship it")
+	if w := postJSON(t, wb, "/api/workbench/architect/accept", `{}`); w.Code != http.StatusOK {
+		t.Fatalf("accept: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"more"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectMessageRequiresProvider(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil) // no provider configured
+	createArchitectSession(t, wb, "ship it")
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"hi"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectMessageRequiresMessage(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, architectResponse("ok", map[string]any{"goal": "g"}))
+	createArchitectSession(t, wb, "ship it")
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectMessageSendsContext(t *testing.T) {
+	var gotUser string
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 2 {
+			gotUser = body.Messages[1]["content"]
+		}
+		architectResponse("refined", map[string]any{"goal": "ship it", "constraints": []string{"c1"}})(w, r)
+	}
+	wb := New()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := startMockProvider(t, handler)
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	// Populate the latest inspection so it is included in the prompt.
+	architectGET(t, wb, "/api/workbench/project/inspect")
+	createArchitectSession(t, wb, "ship it")
+
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"please add tests"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{
+		"Project path: " + dir, // project state
+		"Config files: go.mod", // latest inspection
+		"user: ship it",        // prior conversation history
+		"Current spec draft:",  // current spec draft
+		"Goal: ship it",
+		"New user message: please add tests", // new user message
+	} {
+		if !strings.Contains(gotUser, want) {
+			t.Errorf("expected provider prompt to contain %q, got:\n%s", want, gotUser)
+		}
+	}
+}
+
+func TestWorkbenchArchitectMessageParsesValidJSON(t *testing.T) {
+	spec := map[string]any{
+		"goal":                "ship it well",
+		"constraints":         []string{"no new deps"},
+		"affected_areas":      []string{"api"},
+		"acceptance_criteria": []string{"tests pass"},
+		"risks":               []string{"scope creep"},
+		"open_questions":      []string{"which db?"},
+		"suggested_lanes":     []string{"builder"},
+	}
+	wb, _ := newArchitectWorkbench(t, architectResponse("Here is the refined spec.", spec))
+	createArchitectSession(t, wb, "ship it")
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"refine"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var s ArchitectSession
+	json.Unmarshal(w.Body.Bytes(), &s)
+	if s.Spec.Goal != "ship it well" {
+		t.Errorf("spec goal=%q, want ship it well", s.Spec.Goal)
+	}
+	if len(s.Spec.Constraints) != 1 || s.Spec.Constraints[0] != "no new deps" {
+		t.Errorf("constraints=%v", s.Spec.Constraints)
+	}
+	if len(s.Spec.SuggestedLanes) != 1 || s.Spec.SuggestedLanes[0] != "builder" {
+		t.Errorf("suggested_lanes=%v", s.Spec.SuggestedLanes)
+	}
+}
+
+func TestWorkbenchArchitectMessageNormalizesNilSlices(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, architectResponse("ok", map[string]any{"goal": "g2"}))
+	createArchitectSession(t, wb, "ship it")
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"refine"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, field := range []string{"constraints", "affected_areas", "acceptance_criteria", "risks", "open_questions", "suggested_lanes"} {
+		if !strings.Contains(body, `"`+field+`":[]`) {
+			t.Errorf("expected %q to serialize as [], got:\n%s", field, body)
+		}
+	}
+}
+
+func TestWorkbenchArchitectMessageUpdatesSpec(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, architectResponse("ok", map[string]any{"goal": "updated goal", "constraints": []string{"x"}}))
+	created := createArchitectSession(t, wb, "original goal")
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"refine"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	// The persisted session reflects the updated spec.
+	got := architectGET(t, wb, "/api/workbench/architect/session")
+	var s ArchitectSession
+	json.Unmarshal(got.Body.Bytes(), &s)
+	if s.ID != created.ID {
+		t.Fatalf("expected same session id %q, got %q", created.ID, s.ID)
+	}
+	if s.Spec.Goal != "updated goal" {
+		t.Errorf("spec goal=%q, want updated goal", s.Spec.Goal)
+	}
+	if len(s.Spec.Constraints) != 1 || s.Spec.Constraints[0] != "x" {
+		t.Errorf("constraints=%v", s.Spec.Constraints)
+	}
+}
+
+func TestWorkbenchArchitectMessageAppendsArchitectMessage(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, architectResponse("architect reply", map[string]any{"goal": "g"}))
+	createArchitectSession(t, wb, "g")
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"hello"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var s ArchitectSession
+	json.Unmarshal(w.Body.Bytes(), &s)
+	if len(s.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %+v", len(s.Messages), s.Messages)
+	}
+	if s.Messages[1].Role != "user" || s.Messages[1].Content != "hello" {
+		t.Errorf("unexpected user message: %+v", s.Messages[1])
+	}
+	if s.Messages[2].Role != "architect" || s.Messages[2].Content != "architect reply" {
+		t.Errorf("unexpected architect message: %+v", s.Messages[2])
+	}
+}
+
+func TestWorkbenchArchitectMessageEvents(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, architectResponse("ok", map[string]any{"goal": "g"}))
+	createArchitectSession(t, wb, "g")
+	if w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"hi"}`); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if cortexHasEvent(wb, "architect.message.created") == nil {
+		t.Error("architect.message.created event not appended")
+	}
+	if cortexHasEvent(wb, "architect.spec.updated") == nil {
+		t.Error("architect.spec.updated event not appended")
+	}
+}
+
+func TestWorkbenchArchitectMessageProviderFailure(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream boom"}`))
+	}
+	wb, _ := newArchitectWorkbench(t, handler)
+	createArchitectSession(t, wb, "g")
+	w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"hi"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var s ArchitectSession
+	json.Unmarshal(w.Body.Bytes(), &s)
+	// user(goal), user(hi), system(error)
+	if len(s.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %+v", len(s.Messages), s.Messages)
+	}
+	if s.Messages[1].Role != "user" || s.Messages[1].Content != "hi" {
+		t.Errorf("expected user message appended, got %+v", s.Messages[1])
+	}
+	last := s.Messages[2]
+	if last.Role != "system" {
+		t.Errorf("last message role=%q, want system", last.Role)
+	}
+	if last.Content == "" {
+		t.Error("expected a system error summary")
+	}
+	if s.Spec.Goal != "g" {
+		t.Errorf("spec must not change on failure, got goal=%q", s.Spec.Goal)
+	}
+	if cortexHasEvent(wb, "architect.message.failed") == nil {
+		t.Error("architect.message.failed event not appended")
+	}
+}
+
+func TestWorkbenchArchitectNoAPIKey(t *testing.T) {
+	const secret = "architect-secret"
+	server := startMockProvider(t, architectResponse("ok", map[string]any{"goal": "g", "constraints": []string{"c"}}))
+	wb := New()
+	dir := t.TempDir()
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"`+secret+`","model":"m"}`)
+	createArchitectSession(t, wb, "g")
+
+	msg := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"hi"}`)
+	if msg.Code != http.StatusOK {
+		t.Fatalf("message: expected 200, got %d: %s", msg.Code, msg.Body.String())
+	}
+	assertNoSecret(t, "message", secret, msg.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/architect/session", "/api/workbench/architect/sessions"} {
+		assertNoSecret(t, path, secret, architectGET(t, wb, path).Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "architect.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+func TestWorkbenchArchitectMessageNoFileWrite(t *testing.T) {
+	wb, dir := newArchitectWorkbench(t, architectResponse("ok", map[string]any{"goal": "g", "constraints": []string{"c"}}))
+	if err := os.WriteFile(filepath.Join(dir, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	createArchitectSession(t, wb, "g")
+	before := snapshotDir(t, dir)
+	if w := postJSON(t, wb, "/api/workbench/architect/message", `{"message":"add a file please"}`); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	after := snapshotDir(t, dir)
+	if len(before) != len(after) {
+		t.Fatalf("file count changed: %d -> %d", len(before), len(after))
+	}
+	for path, content := range before {
+		if after[path] != content {
+			t.Errorf("file %s changed", path)
+		}
+	}
+}
+
+func TestWorkbenchArchitectAcceptRequiresSession(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectAcceptRejectsAlreadyAccepted(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "g")
+	if w := postJSON(t, wb, "/api/workbench/architect/accept", `{}`); w.Code != http.StatusOK {
+		t.Fatalf("first accept: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	w := postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectAcceptMarksAccepted(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "g")
+	w := postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var s ArchitectSession
+	json.Unmarshal(w.Body.Bytes(), &s)
+	if s.Status != "accepted" {
+		t.Errorf("status=%q, want accepted", s.Status)
+	}
+}
+
+func TestWorkbenchArchitectAcceptEvent(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "g")
+	postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	if ev := cortexHasEvent(wb, "architect.spec.accepted"); ev == nil {
+		t.Error("architect.spec.accepted event not appended")
+	} else if ev.Message != "Accepted Architect spec" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchArchitectCortexTaskRequiresAccepted(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "g") // active, not accepted
+	w := postJSON(t, wb, "/api/workbench/architect/cortex-task", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchArchitectCortexTaskCreatesTask(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "ship the thing")
+	postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	w := postJSON(t, wb, "/api/workbench/architect/cortex-task", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var task CortexTask
+	json.Unmarshal(w.Body.Bytes(), &task)
+	if task.Goal != "ship the thing" {
+		t.Errorf("task goal=%q, want ship the thing", task.Goal)
+	}
+	if task.Status != "planned" {
+		t.Errorf("task status=%q, want planned", task.Status)
+	}
+	if len(task.Lanes) == 0 {
+		t.Error("expected lanes to be created")
+	}
+}
+
+func TestWorkbenchArchitectCortexTaskDefaultsMulti(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "g")
+	postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	w := postJSON(t, wb, "/api/workbench/architect/cortex-task", `{}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var task CortexTask
+	json.Unmarshal(w.Body.Bytes(), &task)
+	counts := cortexRoleCounts(task.Lanes)
+	if counts["architect"] != 1 || counts["builder"] != 2 || counts["reviewer"] != 1 || counts["validator"] != 1 {
+		t.Errorf("expected multi defaults (1/2/1/1), got %v", counts)
+	}
+}
+
+func TestWorkbenchArchitectCortexTaskRespectsRoles(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	createArchitectSession(t, wb, "g")
+	postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	w := postJSON(t, wb, "/api/workbench/architect/cortex-task", `{"roles":{"architect":0,"builder":3,"reviewer":0,"validator":0}}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var task CortexTask
+	json.Unmarshal(w.Body.Bytes(), &task)
+	counts := cortexRoleCounts(task.Lanes)
+	if counts["builder"] != 3 {
+		t.Errorf("expected 3 builder lanes, got %v", counts)
+	}
+	if len(task.Lanes) != 3 {
+		t.Errorf("expected 3 total lanes, got %d", len(task.Lanes))
+	}
+}
+
+func TestWorkbenchArchitectCortexTaskEvent(t *testing.T) {
+	wb, _ := newArchitectWorkbench(t, nil)
+	session := createArchitectSession(t, wb, "g")
+	postJSON(t, wb, "/api/workbench/architect/accept", `{}`)
+	postJSON(t, wb, "/api/workbench/architect/cortex-task", `{}`)
+	ev := cortexHasEvent(wb, "architect.cortex_task.created")
+	if ev == nil {
+		t.Fatal("architect.cortex_task.created event not appended")
+	}
+	if ev.Message != "Created Cortex task from Architect spec" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+	var data struct {
+		ArchitectSessionID string     `json:"architect_session_id"`
+		Task               CortexTask `json:"task"`
+	}
+	if err := json.Unmarshal(ev.Data, &data); err != nil {
+		t.Fatalf("decode event data: %v", err)
+	}
+	if data.ArchitectSessionID != session.ID {
+		t.Errorf("event architect_session_id=%q, want %q", data.ArchitectSessionID, session.ID)
+	}
+	if data.Task.Goal != "g" {
+		t.Errorf("event task goal=%q, want g", data.Task.Goal)
+	}
+}
+
+// laneProviderResponse returns a handler whose assistant message content is
+// exactly content (plain text or a JSON object, as the caller chooses).
+func laneProviderResponse(content string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "test",
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": content}},
+			},
+		})
+	}
+}
+
+// newLaneConvWorkbench builds a workbench with a mock provider configured when
+// handler is non-nil. Lane conversations do not require a project to be open.
+func newLaneConvWorkbench(t *testing.T, handler http.HandlerFunc) *Server {
+	t.Helper()
+	wb := New()
+	if handler != nil {
+		server := startMockProvider(t, handler)
+		postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	}
+	return wb
+}
+
+func createLaneConversation(t *testing.T, wb *Server, body string) LaneConversation {
+	t.Helper()
+	w := postJSON(t, wb, "/api/workbench/lane-conversation", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("lane conversation: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var c LaneConversation
+	if err := json.Unmarshal(w.Body.Bytes(), &c); err != nil {
+		t.Fatalf("decode lane conversation: %v", err)
+	}
+	return c
+}
+
+func laneOfRole(t *testing.T, task CortexTask, role string) string {
+	t.Helper()
+	for _, l := range task.Lanes {
+		if l.Role == role {
+			return l.ID
+		}
+	}
+	t.Fatalf("no %s lane in task", role)
+	return ""
+}
+
+func TestWorkbenchLaneConversationRequiresKind(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/lane-conversation", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneConversationRejectsUnknownKind(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/lane-conversation", `{"kind":"wizard"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneConversationLaneKindsRequireLane(t *testing.T) {
+	wb := New()
+	for _, kind := range []string{"builder", "reviewer", "validator"} {
+		w := postJSON(t, wb, "/api/workbench/lane-conversation", `{"kind":"`+kind+`"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("kind %s: expected 400, got %d: %s", kind, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestWorkbenchLaneConversationResolvesLaneRole(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	laneID := laneOfRole(t, task, "builder")
+	c := createLaneConversation(t, wb, `{"kind":"builder","lane_id":"`+laneID+`"}`)
+	if c.Status != "active" {
+		t.Errorf("status=%q, want active", c.Status)
+	}
+	if c.Context.LaneRole != "builder" {
+		t.Errorf("lane_role=%q, want builder", c.Context.LaneRole)
+	}
+	if c.Context.TaskID != task.ID {
+		t.Errorf("task_id=%q, want %q", c.Context.TaskID, task.ID)
+	}
+}
+
+func TestWorkbenchLaneConversationArchitectNoLane(t *testing.T) {
+	wb := New()
+	c := createLaneConversation(t, wb, `{"kind":"architect"}`)
+	if c.Context.Kind != "architect" {
+		t.Errorf("kind=%q, want architect", c.Context.Kind)
+	}
+	if c.Context.LaneID != "" {
+		t.Errorf("expected no lane id, got %q", c.Context.LaneID)
+	}
+}
+
+func TestWorkbenchLaneConversationLockboxApplyArtifactContext(t *testing.T) {
+	wb := New()
+	for _, kind := range []string{"lockbox", "apply"} {
+		c := createLaneConversation(t, wb, `{"kind":"`+kind+`","artifact_id":"a1","artifact_type":"lockbox_request"}`)
+		if c.Context.Kind != kind {
+			t.Errorf("kind=%q, want %q", c.Context.Kind, kind)
+		}
+		if c.Context.ArtifactID != "a1" {
+			t.Errorf("artifact_id=%q, want a1", c.Context.ArtifactID)
+		}
+		if c.Context.ArtifactType != "lockbox_request" {
+			t.Errorf("artifact_type=%q, want lockbox_request", c.Context.ArtifactType)
+		}
+	}
+}
+
+func TestWorkbenchLaneConversationCreatedEvent(t *testing.T) {
+	wb := New()
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	if ev := cortexHasEvent(wb, "lane.conversation.created"); ev == nil {
+		t.Error("lane.conversation.created event not appended")
+	} else if ev.Message != "Created lane conversation" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchLaneConversationGET404(t *testing.T) {
+	wb := New()
+	w := architectGET(t, wb, "/api/workbench/lane-conversation")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneConversationGETCurrent(t *testing.T) {
+	wb := New()
+	created := createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := architectGET(t, wb, "/api/workbench/lane-conversation")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var c LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &c)
+	if c.ID != created.ID {
+		t.Errorf("current conversation id=%q, want %q", c.ID, created.ID)
+	}
+}
+
+func TestWorkbenchLaneConversationsEmpty(t *testing.T) {
+	wb := New()
+	w := architectGET(t, wb, "/api/workbench/lane-conversations")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if body := strings.TrimSpace(w.Body.String()); body != "[]" {
+		t.Errorf("expected [] for empty conversations, got %q", body)
+	}
+}
+
+func TestWorkbenchLaneConversationsFilterByTask(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	laneID := laneOfRole(t, task, "builder")
+	createLaneConversation(t, wb, `{"kind":"builder","lane_id":"`+laneID+`"}`)
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := architectGET(t, wb, "/api/workbench/lane-conversations?task_id="+task.ID)
+	var list []LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list) != 1 || list[0].Context.TaskID != task.ID {
+		t.Fatalf("expected 1 conversation for task %s, got %v", task.ID, list)
+	}
+}
+
+func TestWorkbenchLaneConversationsFilterByLane(t *testing.T) {
+	wb := New()
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	builderLane := laneOfRole(t, task, "builder")
+	reviewerLane := laneOfRole(t, task, "reviewer")
+	createLaneConversation(t, wb, `{"kind":"builder","lane_id":"`+builderLane+`"}`)
+	createLaneConversation(t, wb, `{"kind":"reviewer","lane_id":"`+reviewerLane+`"}`)
+	w := architectGET(t, wb, "/api/workbench/lane-conversations?lane_id="+builderLane)
+	var list []LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list) != 1 || list[0].Context.LaneID != builderLane {
+		t.Fatalf("expected 1 conversation for lane %s, got %v", builderLane, list)
+	}
+}
+
+func TestWorkbenchLaneConversationsFilterByKind(t *testing.T) {
+	wb := New()
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	createLaneConversation(t, wb, `{"kind":"lockbox"}`)
+	w := architectGET(t, wb, "/api/workbench/lane-conversations?kind=lockbox")
+	var list []LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &list)
+	if len(list) != 1 || list[0].Context.Kind != "lockbox" {
+		t.Fatalf("expected 1 lockbox conversation, got %v", list)
+	}
+}
+
+func TestWorkbenchLaneMessageRequiresConversation(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneMessageRejectsClosed(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	if w := postJSON(t, wb, "/api/workbench/lane-conversation/close", `{}`); w.Code != http.StatusOK {
+		t.Fatalf("close: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneMessageRequiresProvider(t *testing.T) {
+	wb := New() // no provider configured
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneMessageRequiresMessage(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneMessageSendsContext(t *testing.T) {
+	var gotUser string
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]string `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Messages) == 2 {
+			gotUser = body.Messages[1]["content"]
+		}
+		laneProviderResponse("assistant reply")(w, r)
+	}
+	wb := New()
+	server := startMockProvider(t, handler)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	builderLane := laneOfRole(t, task, "builder")
+	// Seed a lane proposal so the builder artifact context is non-empty.
+	wb.cortexLaneProposals.Append(CortexLaneProposal{
+		TaskID:    task.ID,
+		LaneID:    builderLane,
+		LaneIndex: 1,
+		Status:    builderProposalStatusProposed,
+		Summary:   "proposal summary here",
+		Files:     []BuilderProposedFile{{Path: "a.go", Action: "create"}},
+	})
+	createLaneConversation(t, wb, `{"kind":"builder","lane_id":"`+builderLane+`"}`)
+
+	// First message establishes history; the second message's prompt is captured.
+	if w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"first question"}`); w.Code != http.StatusOK {
+		t.Fatalf("first message: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"second question"}`); w.Code != http.StatusOK {
+		t.Fatalf("second message: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, want := range []string{
+		"Conversation kind: builder",        // conversation context
+		"Lane id: " + builderLane,           // lane scope
+		"Lane role: builder",                // resolved lane role
+		"Selected lane:",                    // selected lane details
+		"proposal summary here",             // artifact context
+		"first question",                    // prior conversation history
+		"New user message: second question", // new user message
+	} {
+		if !strings.Contains(gotUser, want) {
+			t.Errorf("expected provider prompt to contain %q, got:\n%s", want, gotUser)
+		}
+	}
+}
+
+func TestWorkbenchLaneMessagePlainText(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("plain reply text"))
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var c LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &c)
+	last := c.Messages[len(c.Messages)-1]
+	if last.Role != "assistant" || last.Content != "plain reply text" {
+		t.Errorf("unexpected assistant message: %+v", last)
+	}
+}
+
+func TestWorkbenchLaneMessageJSONResponse(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse(`{"message":"json reply"}`))
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var c LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &c)
+	last := c.Messages[len(c.Messages)-1]
+	if last.Content != "json reply" {
+		t.Errorf("assistant content=%q, want json reply", last.Content)
+	}
+}
+
+func TestWorkbenchLaneMessageAppendsMessages(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hello"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var c LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &c)
+	if len(c.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(c.Messages), c.Messages)
+	}
+	if c.Messages[0].Role != "user" || c.Messages[0].Content != "hello" {
+		t.Errorf("unexpected user message: %+v", c.Messages[0])
+	}
+	if c.Messages[1].Role != "assistant" || c.Messages[1].Content != "reply" {
+		t.Errorf("unexpected assistant message: %+v", c.Messages[1])
+	}
+}
+
+func TestWorkbenchLaneMessageGenericEvent(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	if w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if cortexHasEvent(wb, "lane.message.created") == nil {
+		t.Error("lane.message.created event not appended")
+	}
+}
+
+func TestWorkbenchLaneMessageRoleEventArchitect(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if cortexHasEvent(wb, "architect.message.created") == nil {
+		t.Error("architect.message.created event not appended")
+	}
+}
+
+func TestWorkbenchLaneMessageRoleEventBuilder(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	laneID := laneOfRole(t, task, "builder")
+	createLaneConversation(t, wb, `{"kind":"builder","lane_id":"`+laneID+`"}`)
+	postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if cortexHasEvent(wb, "builder.message.created") == nil {
+		t.Error("builder.message.created event not appended")
+	}
+}
+
+func TestWorkbenchLaneMessageRoleEventReviewer(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	laneID := laneOfRole(t, task, "reviewer")
+	createLaneConversation(t, wb, `{"kind":"reviewer","lane_id":"`+laneID+`"}`)
+	postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if cortexHasEvent(wb, "reviewer.message.created") == nil {
+		t.Error("reviewer.message.created event not appended")
+	}
+}
+
+func TestWorkbenchLaneMessageRoleEventValidator(t *testing.T) {
+	wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+	task := createCortexTask(t, wb, `{"goal":"g","mode":"multi"}`)
+	laneID := laneOfRole(t, task, "validator")
+	createLaneConversation(t, wb, `{"kind":"validator","lane_id":"`+laneID+`"}`)
+	postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if cortexHasEvent(wb, "validator.message.created") == nil {
+		t.Error("validator.message.created event not appended")
+	}
+}
+
+func TestWorkbenchLaneMessageRoleEventLockboxApply(t *testing.T) {
+	for _, kind := range []string{"lockbox", "apply"} {
+		wb := newLaneConvWorkbench(t, laneProviderResponse("reply"))
+		createLaneConversation(t, wb, `{"kind":"`+kind+`"}`)
+		postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+		if cortexHasEvent(wb, "lockbox.message.created") == nil {
+			t.Errorf("kind %s: lockbox.message.created event not appended", kind)
+		}
+	}
+}
+
+func TestWorkbenchLaneMessageProviderFailure(t *testing.T) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"upstream boom"}`))
+	}
+	wb := newLaneConvWorkbench(t, handler)
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var c LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &c)
+	if len(c.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d: %+v", len(c.Messages), c.Messages)
+	}
+	if c.Messages[0].Role != "user" || c.Messages[0].Content != "hi" {
+		t.Errorf("expected user message appended, got %+v", c.Messages[0])
+	}
+	last := c.Messages[1]
+	if last.Role != "system" {
+		t.Errorf("last message role=%q, want system", last.Role)
+	}
+	if last.Content == "" {
+		t.Error("expected a system error summary")
+	}
+	if cortexHasEvent(wb, "lane.message.failed") == nil {
+		t.Error("lane.message.failed event not appended")
+	}
+}
+
+func TestWorkbenchLaneConversationCloseRequiresConversation(t *testing.T) {
+	wb := New()
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/close", `{}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneConversationCloseRejectsClosed(t *testing.T) {
+	wb := New()
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	if w := postJSON(t, wb, "/api/workbench/lane-conversation/close", `{}`); w.Code != http.StatusOK {
+		t.Fatalf("first close: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/close", `{}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestWorkbenchLaneConversationCloseMarksClosed(t *testing.T) {
+	wb := New()
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	w := postJSON(t, wb, "/api/workbench/lane-conversation/close", `{}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var c LaneConversation
+	json.Unmarshal(w.Body.Bytes(), &c)
+	if c.Status != "closed" {
+		t.Errorf("status=%q, want closed", c.Status)
+	}
+}
+
+func TestWorkbenchLaneConversationCloseEvent(t *testing.T) {
+	wb := New()
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+	postJSON(t, wb, "/api/workbench/lane-conversation/close", `{}`)
+	if ev := cortexHasEvent(wb, "lane.conversation.closed"); ev == nil {
+		t.Error("lane.conversation.closed event not appended")
+	} else if ev.Message != "Closed lane conversation" {
+		t.Errorf("event message: %q", ev.Message)
+	}
+}
+
+func TestWorkbenchLaneConversationNoAPIKey(t *testing.T) {
+	const secret = "lane-secret"
+	server := startMockProvider(t, laneProviderResponse("reply"))
+	wb := New()
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"`+secret+`","model":"m"}`)
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+
+	msg := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"hi"}`)
+	if msg.Code != http.StatusOK {
+		t.Fatalf("message: expected 200, got %d: %s", msg.Code, msg.Body.String())
+	}
+	assertNoSecret(t, "message", secret, msg.Body.Bytes())
+
+	for _, path := range []string{"/api/workbench/lane-conversation", "/api/workbench/lane-conversations"} {
+		assertNoSecret(t, path, secret, architectGET(t, wb, path).Body.Bytes())
+	}
+	for _, e := range wb.store.List() {
+		if strings.HasPrefix(e.Type, "lane.") || strings.HasPrefix(e.Type, "architect.") {
+			assertNoSecret(t, "event "+e.Type, secret, e.Data)
+		}
+	}
+}
+
+func TestWorkbenchLaneMessageNoFileWrite(t *testing.T) {
+	wb := New()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server := startMockProvider(t, laneProviderResponse("reply"))
+	postJSON(t, wb, "/api/workbench/project/open", `{"path":"`+dir+`"}`)
+	postJSON(t, wb, "/api/workbench/provider", `{"base_url":"`+server.URL+`","api_key":"k","model":"m"}`)
+	createLaneConversation(t, wb, `{"kind":"architect"}`)
+
+	before := snapshotDir(t, dir)
+	if w := postJSON(t, wb, "/api/workbench/lane-conversation/message", `{"message":"add a file please"}`); w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	after := snapshotDir(t, dir)
+	if len(before) != len(after) {
+		t.Fatalf("file count changed: %d -> %d", len(before), len(after))
+	}
+	for path, content := range before {
+		if after[path] != content {
+			t.Errorf("file %s changed", path)
 		}
 	}
 }
