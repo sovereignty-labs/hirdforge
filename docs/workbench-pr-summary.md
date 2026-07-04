@@ -1,6 +1,10 @@
 # PR: Hirdforge Workbench — local operator loop (MVP)
 
-Draft summary for opening the PR for `feat/hirdforge-workbench-local`.
+Draft summary for opening the PR for `feat/hirdforge-workbench-local-clean`.
+
+> **Note:** This is a docs-only handoff/PR-prep commit on `feat/hirdforge-workbench-local-clean`.
+> No backend gate changes. The UI evolved from "stage-first" to "chat-first" with
+> Current Step and invalid context normalization.
 
 ## Title suggestion
 
@@ -69,8 +73,16 @@ Idempotency / reuse:
 - Per-stage **Run Summary** + a full-loop **Next** hint; the whole run rehydrates
   from read endpoints on boot (reload-safe), with resume cues and 5s event
   polling (paused when hidden).
-- Lane board + right inspector + a resizable Lane Console drawer; lane-scoped
-  conversations with reuse.
+- **Chat-first layout** — chat is the always-visible primary work surface; stages
+  moved to the right panel.
+- **Current Step** card in the center of the chat — the single next valid workflow
+  action, derived from `loopStatus()`, with actionable buttons (disabled when
+  gates are unmet). Replaced the "stage-first" layout after manual testing showed
+  the "escape room" failure mode.
+- **Active context normalization** (`normalizeActiveContext()`) — runs on every
+  state change and after boot to prevent the operator from being stranded in an
+  impossible context (e.g., Builder chat before a task exists).
+- Lane board + right inspector; lane-scoped conversations with reuse.
 - Setup (project/provider) hardening, provider key cleared from the form after
   save, and operator-safe empty/error copy across panels.
 - Frontend↔backend route audit: **0 mismatches** (every UI call resolves to a
@@ -93,9 +105,13 @@ node --check internal/workbench/ui/app.js
   `docs/workbench-operator-loop-smoke.md`. Verified: apply writes only the
   approved file, repeat apply does not re-write, validation passes, no key leak.
 
-## Known non-goals (this MVP)
+## Known limitations (this MVP)
 
 - No persistence — state is in-memory and lost on restart.
+- No native shell (Linux/Windows packaging is a future target).
+- Provider model-name field has no dropdown or validation; it must match
+  the provider's `/v1/models` response.
+- No browser automation tests.
 - No rollback/undo after apply.
 - No streaming; compact file/path diffs (not full unified diffs).
 - Validation runs a single bounded command (no shell); output is capped.

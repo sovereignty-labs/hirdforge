@@ -9,13 +9,18 @@ Audited at commit `ca0743a`. Frontend (`internal/workbench/ui/app.js`) uses a
 subset of these; every UI call resolves to a registered route (0 mismatches).
 Routes the UI does not call are marked _(unused by UI)_.
 
+> **Note:** The UI evolved from a "stage-first" layout to a **chat-first** layout
+> with a **Current Step** card surfaced in the central chat. These API routes
+> remain unchanged — the UI evolution was purely frontend (layout, rendering,
+> localStorage persistence, context normalization).
+
 ## UI assets
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/` | embedded `index.html` (Lane Console) |
+| GET | `/` | embedded `index.html` (chat-first operator UI) |
 | GET | `/styles.css` | embedded stylesheet |
-| GET | `/app.js` | embedded operator UI script |
+| GET | `/app.js` | embedded operator UI script (~2160 lines vanilla JS) |
 | GET | `/health` | `{status, mode}` |
 
 ## Events
