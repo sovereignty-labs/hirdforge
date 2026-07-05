@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hirdforge Workbench</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-view="context" data-chat="architect" data-arch="nosession">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">⬡</span>
+      <div class="brand-text">
+        <div class="title">Hirdforge Workbench</div>
+        <div class="subtitle">local agentic workbench</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="loading" class="hidden">working…</span>
+      <div class="chips" id="status-chips"></div>
+    </div>
+  </header>
+
+  <div id="error" class="hidden"></div>
+  <div id="resume" class="resume hidden"></div>
+
+  <div class="shell">
+    <!-- LEFT: context rail — setup, run state, lanes, and the (secondary) context
+         panel switcher. All secondary to the central chat. -->
+    <nav class="contextrail" aria-label="Context rail">
+      <section class="rail-sec rail-setup">
+        <div class="rail-head">
+          <h2>Setup</h2>
+          <button id="btn-setup-toggle" class="setup-toggle" disabled title="Setup stays open until a Cortex task exists.">Setup required</button>
+        </div>
+        <div class="setup-summary meta" id="setup-summary"></div>
+        <div class="setup-controls" id="setup-controls">
+          <div class="setup-block">
+            <div class="setup-label">Project</div>
+            <div class="field">
+              <input id="project-path" placeholder="absolute path to project">
+              <button id="btn-project-open">Open</button>
+            </div>
+            <div class="hint">Absolute path, e.g. <code>/home/you/project</code> or <code>C:\Users\You\project</code>.</div>
+            <div class="meta" id="project-meta">No project open.</div>
+          </div>
+          <div class="setup-block">
+            <div class="setup-label">Provider</div>
+            <div class="field"><input id="provider-base" placeholder="https://api.example.com/v1"></div>
+            <div class="field"><input id="provider-key" type="password" placeholder="api key (never displayed)"></div>
+            <div class="field">
+              <input id="provider-model" placeholder="model">
+              <button id="btn-provider-save">Save</button>
+              <button id="btn-provider-test">Test</button>
+            </div>
+            <div class="hint">Your API key is stored on the local backend, cleared from this form after saving, and never shown again.</div>
+            <div class="meta" id="provider-meta">No provider configured.</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="rail-sec rail-run">
+        <div class="rail-head"><h2>Run</h2></div>
+        <div id="run-summary" class="run-summary"></div>
+      </section>
+
+      <section class="rail-sec rail-lanes">
+        <div class="rail-head"><h2>Lanes</h2></div>
+        <div class="meta" id="board-meta">No Cortex task.</div>
+        <div class="lanes" id="lanes"></div>
+        <div class="rail-hint meta">Select a lane to chat with it.</div>
+      </section>
+
+      <section class="rail-sec rail-nav">
+        <div class="rail-head"><h2>Context panel</h2></div>
+        <div class="navrail" id="navrail">
+          <button class="nav-item" data-view="context"><span class="nav-label">Context</span><span class="nav-badge" id="nav-badge-context"></span></button>
+          <button class="nav-item" data-view="aggregate"><span class="nav-label">Agg</span><span class="nav-badge" id="nav-badge-aggregate"></span></button>
+          <button class="nav-item" data-view="lockbox"><span class="nav-label">Lock</span><span class="nav-badge" id="nav-badge-lockbox"></span></button>
+          <button class="nav-item" data-view="apply"><span class="nav-label">Apply</span><span class="nav-badge" id="nav-badge-apply"></span></button>
+          <button class="nav-item" data-view="log"><span class="nav-label">Log</span><span class="nav-badge" id="nav-badge-log"></span></button>
+        </div>
+      </section>
+    </nav>
+
+    <!-- CENTER: the chat work surface. Always visible. Routes between the
+         Architect spec session and lane conversations by active context. -->
+    <main class="chat" id="chat">
+      <div class="chat-head">
+        <div class="chat-id">
+          <div class="chat-title" id="chat-title">Architect</div>
+          <div class="chat-sub meta" id="chat-sub"></div>
+        </div>
+        <div class="kinds" id="kind-chips"></div>
+      </div>
+
+      <div class="next-hint-bar"><div id="next-hint" class="next-hint"></div></div>
+
+      <!-- Current Step: the next valid workflow action, always visible in the
+           chat so the operator never hunts a side panel for the next button. -->
+      <div id="current-step" class="current-step"></div>
+
+      <div class="chat-stream">
+        <div class="messages chat-architect" id="architect-messages"></div>
+        <div class="messages chat-lane" id="conv-messages"></div>
+      </div>
+
+      <div id="revise-banner" class="revise-banner hidden"></div>
+
+      <div class="chat-composer">
+        <div class="scope-row chat-lane">
+          <div class="drawer-scope meta" id="drawer-scope"></div>
+          <div class="conv-actions">
+            <button id="btn-conv-new">Open Conversation</button>
+            <button id="btn-conv-close">Close</button>
+          </div>
+        </div>
+        <div class="hint hidden chat-architect" id="architect-hint"></div>
+        <div class="hint hidden chat-lane" id="console-hint"></div>
+        <div class="field chat-architect arch-start">
+          <input id="architect-goal" placeholder="describe a goal so the Architect can draft a spec…">
+          <button id="btn-architect-start">Start</button>
+        </div>
+        <div class="field chat-architect arch-send">
+          <input id="architect-message" placeholder="message the Architect…">
+          <button id="btn-architect-send">Send</button>
+        </div>
+        <div class="field chat-lane">
+          <input id="conv-message" placeholder="message this lane / context…">
+          <button id="btn-conv-send">Send</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- RIGHT: context panel — artifacts for the active context. Changes with the
+         context-panel switcher; never replaces the central chat. -->
+    <aside class="contextpanel" id="contextpanel">
+      <section class="ctx-view ctx-context">
+        <div class="ctx-architect">
+          <div class="ctx-head"><h2>Architect spec</h2><div class="meta" id="architect-meta"></div></div>
+          <div class="spec" id="architect-spec"></div>
+          <div class="field">
+            <button id="btn-architect-accept">Accept spec</button>
+            <button id="btn-architect-task">Create Cortex task</button>
+          </div>
+        </div>
+        <div class="ctx-lane">
+          <div class="ctx-head"><h2>Lane &amp; artifact</h2></div>
+          <div id="inspector-body" class="meta">Select a lane to see its role, status, conversation, and artifact.</div>
+        </div>
+      </section>
+
+      <section class="ctx-view ctx-aggregate"><div class="stage-panel" id="view-aggregate"></div></section>
+      <section class="ctx-view ctx-lockbox"><div class="stage-panel" id="view-lockbox"></div></section>
+      <section class="ctx-view ctx-apply"><div class="stage-panel" id="view-apply"></div></section>
+      <section class="ctx-view ctx-log">
+        <div class="stage-panel">
+          <div class="stage-head">
+            <h2>Event log</h2>
+            <button id="btn-events-refresh">Refresh</button>
+          </div>
+          <div class="event-list" id="event-list"></div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <footer class="ticker">
+    <span class="ticker-label">Latest</span>
+    <span id="ticker-msg" class="ticker-msg">No events yet.</span>
+    <button id="btn-open-log" class="ticker-action">Open log →</button>
+    <span class="ticker-status meta" id="ticker-status"></span>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
