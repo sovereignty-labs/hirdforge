@@ -3,6 +3,7 @@ on:
   push:
     branches:
       - main
+      - next
 env:
   REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
   REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
@@ -20,22 +21,36 @@ jobs:
       - name: Clone repository
         run: rm -rf /src-agent && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-agent
       - name: Build and push agent
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           cd /src-agent
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
-          if ! echo "$CHANGED" | grep -Eq '^(cmd/agent/|pkg/|go\.mod$|go\.sum$|Dockerfile\.agent$)'; then
-            if docker pull $REGISTRY/valhalla-agent:latest 2>/dev/null; then
-              docker tag $REGISTRY/valhalla-agent:latest $REGISTRY/valhalla-agent:sha-$SHA_SHORT
+          # Staging (next) lane: use branch-prefixed tags; never overwrite :latest
+          if [ "$BRANCH_NAME" = "next" ]; then
+            STAGING_TAG="$REGISTRY/valhalla-agent:sha-next-$SHA_SHORT"
+            docker build -f Dockerfile.agent -t "$STAGING_TAG" .
+            docker push "$STAGING_TAG"
+          elif [ -n "$BRANCH_NAME" ] && ! [ "$BRANCH_NAME" = "main" ]; then
+            SANITIZED=$(echo "$BRANCH_NAME" | tr '/' '-' | tr -cd 'a-zA-Z0-9-')
+            BRANCH_TAG="$REGISTRY/valhalla-agent:sha-$SANITIZED-$SHA_SHORT"
+            docker build -f Dockerfile.agent -t "$BRANCH_TAG" .
+            docker push "$BRANCH_TAG"
+          else
+            if ! echo "$CHANGED" | grep -Eq '^(cmd/agent/|pkg/|go\.mod$|go\.sum$|Dockerfile\.agent$)'; then
+              if docker pull $REGISTRY/valhalla-agent:latest 2>/dev/null; then
+                docker tag $REGISTRY/valhalla-agent:latest $REGISTRY/valhalla-agent:sha-$SHA_SHORT
+              else
+                docker build -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
+                docker push $REGISTRY/valhalla-agent:latest
+              fi
             else
               docker build -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
               docker push $REGISTRY/valhalla-agent:latest
             fi
-          else
-            docker build -f Dockerfile.agent -t $REGISTRY/valhalla-agent:latest -t $REGISTRY/valhalla-agent:sha-$SHA_SHORT .
-            docker push $REGISTRY/valhalla-agent:latest
+            docker push $REGISTRY/valhalla-agent:sha-$SHA_SHORT
           fi
-          docker push $REGISTRY/valhalla-agent:sha-$SHA_SHORT
   build-gateway:
     runs-on: ubuntu-latest
 
@@ -47,22 +62,35 @@ jobs:
       - name: Clone repository
         run: rm -rf /src-gateway && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-gateway
       - name: Build and push gateway
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           cd /src-gateway
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
-          if ! echo "$CHANGED" | grep -Eq '^(cmd/gateway/|pkg/|go\.mod$|go\.sum$|Dockerfile\.gateway$|ui/)'; then
-            if docker pull $REGISTRY/valhalla-gateway:latest 2>/dev/null; then
-              docker tag $REGISTRY/valhalla-gateway:latest $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+          if [ "$BRANCH_NAME" = "next" ]; then
+            STAGING_TAG="$REGISTRY/valhalla-gateway:sha-next-$SHA_SHORT"
+            docker build -f Dockerfile.gateway -t "$STAGING_TAG" .
+            docker push "$STAGING_TAG"
+          elif [ -n "$BRANCH_NAME" ] && ! [ "$BRANCH_NAME" = "main" ]; then
+            SANITIZED=$(echo "$BRANCH_NAME" | tr '/' '-' | tr -cd 'a-zA-Z0-9-')
+            BRANCH_TAG="$REGISTRY/valhalla-gateway:sha-$SANITIZED-$SHA_SHORT"
+            docker build -f Dockerfile.gateway -t "$BRANCH_TAG" .
+            docker push "$BRANCH_TAG"
+          else
+            if ! echo "$CHANGED" | grep -Eq '^(cmd/gateway/|pkg/|go\.mod$|go\.sum$|Dockerfile\.gateway$|ui/)'; then
+              if docker pull $REGISTRY/valhalla-gateway:latest 2>/dev/null; then
+                docker tag $REGISTRY/valhalla-gateway:latest $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
+              else
+                docker build -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
+                docker push $REGISTRY/valhalla-gateway:latest
+              fi
             else
               docker build -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
               docker push $REGISTRY/valhalla-gateway:latest
             fi
-          else
-            docker build -f Dockerfile.gateway -t $REGISTRY/valhalla-gateway:latest -t $REGISTRY/valhalla-gateway:sha-$SHA_SHORT .
-            docker push $REGISTRY/valhalla-gateway:latest
+            docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
           fi
-          docker push $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
   build-seidr:
     runs-on: ubuntu-latest
 
@@ -74,22 +102,35 @@ jobs:
       - name: Clone repository
         run: rm -rf /src-seidr && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-seidr
       - name: Build and push seidr
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           cd /src-seidr
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
-          if ! echo "$CHANGED" | grep -Eq '^(seidr/|Dockerfile\.seidr$)'; then
-            if docker pull $REGISTRY/valhalla-seidr:latest 2>/dev/null; then
-              docker tag $REGISTRY/valhalla-seidr:latest $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
+          if [ "$BRANCH_NAME" = "next" ]; then
+            STAGING_TAG="$REGISTRY/valhalla-seidr:sha-next-$SHA_SHORT"
+            docker build -f Dockerfile.seidr -t "$STAGING_TAG" .
+            docker push "$STAGING_TAG"
+          elif [ -n "$BRANCH_NAME" ] && ! [ "$BRANCH_NAME" = "main" ]; then
+            SANITIZED=$(echo "$BRANCH_NAME" | tr '/' '-' | tr -cd 'a-zA-Z0-9-')
+            BRANCH_TAG="$REGISTRY/valhalla-seidr:sha-$SANITIZED-$SHA_SHORT"
+            docker build -f Dockerfile.seidr -t "$BRANCH_TAG" .
+            docker push "$BRANCH_TAG"
+          else
+            if ! echo "$CHANGED" | grep -Eq '^(seidr/|Dockerfile\.seidr$)'; then
+              if docker pull $REGISTRY/valhalla-seidr:latest 2>/dev/null; then
+                docker tag $REGISTRY/valhalla-seidr:latest $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
+              else
+                docker build -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
+                docker push $REGISTRY/valhalla-seidr:latest
+              fi
             else
               docker build -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
               docker push $REGISTRY/valhalla-seidr:latest
             fi
-          else
-            docker build -f Dockerfile.seidr -t $REGISTRY/valhalla-seidr:latest -t $REGISTRY/valhalla-seidr:sha-$SHA_SHORT .
-            docker push $REGISTRY/valhalla-seidr:latest
+            docker push $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
           fi
-          docker push $REGISTRY/valhalla-seidr:sha-$SHA_SHORT
   build-lockbox:
     runs-on: ubuntu-latest
 
@@ -101,23 +142,36 @@ jobs:
       - name: Clone repository
         run: rm -rf /src-lockbox && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-lockbox
       - name: Build and push lockbox
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           cd /src-lockbox
           if [ -f Dockerfile.lockbox ]; then
             SHA_SHORT=$(git rev-parse --short HEAD)
             CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
-            if ! echo "$CHANGED" | grep -Eq '^(cmd/lockbox/|pkg/|go\.mod$|go\.sum$|Dockerfile\.lockbox$)'; then
-              if docker pull $REGISTRY/valhalla-lockbox:latest 2>/dev/null; then
-                docker tag $REGISTRY/valhalla-lockbox:latest $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
+            if [ "$BRANCH_NAME" = "next" ]; then
+              STAGING_TAG="$REGISTRY/valhalla-lockbox:sha-next-$SHA_SHORT"
+              docker build -f Dockerfile.lockbox -t "$STAGING_TAG" .
+              docker push "$STAGING_TAG"
+            elif [ -n "$BRANCH_NAME" ] && ! [ "$BRANCH_NAME" = "main" ]; then
+              SANITIZED=$(echo "$BRANCH_NAME" | tr '/' '-' | tr -cd 'a-zA-Z0-9-')
+              BRANCH_TAG="$REGISTRY/valhalla-lockbox:sha-$SANITIZED-$SHA_SHORT"
+              docker build -f Dockerfile.lockbox -t "$BRANCH_TAG" .
+              docker push "$BRANCH_TAG"
+            else
+              if ! echo "$CHANGED" | grep -Eq '^(cmd/lockbox/|pkg/|go\.mod$|go\.sum$|Dockerfile\.lockbox$)'; then
+                if docker pull $REGISTRY/valhalla-lockbox:latest 2>/dev/null; then
+                  docker tag $REGISTRY/valhalla-lockbox:latest $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
+                else
+                  docker build -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
+                  docker push $REGISTRY/valhalla-lockbox:latest
+                fi
               else
                 docker build -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
                 docker push $REGISTRY/valhalla-lockbox:latest
               fi
-            else
-              docker build -f Dockerfile.lockbox -t $REGISTRY/valhalla-lockbox:latest -t $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT .
-              docker push $REGISTRY/valhalla-lockbox:latest
+              docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
             fi
-            docker push $REGISTRY/valhalla-lockbox:sha-$SHA_SHORT
           fi
   build-hirdforge:
     runs-on: ubuntu-latest
@@ -130,22 +184,35 @@ jobs:
       - name: Clone repository
         run: rm -rf /src-hirdforge && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-hirdforge
       - name: Build and push hirdforge
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           cd /src-hirdforge
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
-          if ! echo "$CHANGED" | grep -Eq '^(cmd/hirdforge/|go\.mod$|go\.sum$|Dockerfile\.hirdforge$)'; then
-            if docker pull $REGISTRY/valhalla-hirdforge:latest 2>/dev/null; then
-              docker tag $REGISTRY/valhalla-hirdforge:latest $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
+          if [ "$BRANCH_NAME" = "next" ]; then
+            STAGING_TAG="$REGISTRY/valhalla-hirdforge:sha-next-$SHA_SHORT"
+            docker build -f Dockerfile.hirdforge -t "$STAGING_TAG" .
+            docker push "$STAGING_TAG"
+          elif [ -n "$BRANCH_NAME" ] && ! [ "$BRANCH_NAME" = "main" ]; then
+            SANITIZED=$(echo "$BRANCH_NAME" | tr '/' '-' | tr -cd 'a-zA-Z0-9-')
+            BRANCH_TAG="$REGISTRY/valhalla-hirdforge:sha-$SANITIZED-$SHA_SHORT"
+            docker build -f Dockerfile.hirdforge -t "$BRANCH_TAG" .
+            docker push "$BRANCH_TAG"
+          else
+            if ! echo "$CHANGED" | grep -Eq '^(cmd/hirdforge/|go\.mod$|go\.sum$|Dockerfile\.hirdforge$)'; then
+              if docker pull $REGISTRY/valhalla-hirdforge:latest 2>/dev/null; then
+                docker tag $REGISTRY/valhalla-hirdforge:latest $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
+              else
+                docker build -f Dockerfile.hirdforge -t $REGISTRY/valhalla-hirdforge:latest -t $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT .
+                docker push $REGISTRY/valhalla-hirdforge:latest
+              fi
             else
               docker build -f Dockerfile.hirdforge -t $REGISTRY/valhalla-hirdforge:latest -t $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT .
               docker push $REGISTRY/valhalla-hirdforge:latest
             fi
-          else
-            docker build -f Dockerfile.hirdforge -t $REGISTRY/valhalla-hirdforge:latest -t $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT .
-            docker push $REGISTRY/valhalla-hirdforge:latest
+            docker push $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
           fi
-          docker push $REGISTRY/valhalla-hirdforge:sha-$SHA_SHORT
   build-openai-mcp-tunnel:
     runs-on: ubuntu-latest
 
@@ -157,22 +224,35 @@ jobs:
       - name: Clone repository
         run: rm -rf /src-openai-mcp-tunnel && git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src-openai-mcp-tunnel
       - name: Build and push openai mcp tunnel
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
         run: |
           cd /src-openai-mcp-tunnel
           SHA_SHORT=$(git rev-parse --short HEAD)
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "all")
-          if ! echo "$CHANGED" | grep -Eq '^(Dockerfile\.openai-mcp-tunnel$)'; then
-            if docker pull $REGISTRY/openai-mcp-tunnel:latest 2>/dev/null; then
-              docker tag $REGISTRY/openai-mcp-tunnel:latest $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT
+          if [ "$BRANCH_NAME" = "next" ]; then
+            STAGING_TAG="$REGISTRY/openai-mcp-tunnel:sha-next-$SHA_SHORT"
+            docker build -f Dockerfile.openai-mcp-tunnel -t "$STAGING_TAG" .
+            docker push "$STAGING_TAG"
+          elif [ -n "$BRANCH_NAME" ] && ! [ "$BRANCH_NAME" = "main" ]; then
+            SANITIZED=$(echo "$BRANCH_NAME" | tr '/' '-' | tr -cd 'a-zA-Z0-9-')
+            BRANCH_TAG="$REGISTRY/openai-mcp-tunnel:sha-$SANITIZED-$SHA_SHORT"
+            docker build -f Dockerfile.openai-mcp-tunnel -t "$BRANCH_TAG" .
+            docker push "$BRANCH_TAG"
+          else
+            if ! echo "$CHANGED" | grep -Eq '^(Dockerfile\.openai-mcp-tunnel$)'; then
+              if docker pull $REGISTRY/openai-mcp-tunnel:latest 2>/dev/null; then
+                docker tag $REGISTRY/openai-mcp-tunnel:latest $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT
+              else
+                docker build -f Dockerfile.openai-mcp-tunnel -t $REGISTRY/openai-mcp-tunnel:latest -t $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT .
+                docker push $REGISTRY/openai-mcp-tunnel:latest
+              fi
             else
               docker build -f Dockerfile.openai-mcp-tunnel -t $REGISTRY/openai-mcp-tunnel:latest -t $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT .
               docker push $REGISTRY/openai-mcp-tunnel:latest
             fi
-          else
-            docker build -f Dockerfile.openai-mcp-tunnel -t $REGISTRY/openai-mcp-tunnel:latest -t $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT .
-            docker push $REGISTRY/openai-mcp-tunnel:latest
+            docker push $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT
           fi
-          docker push $REGISTRY/openai-mcp-tunnel:sha-$SHA_SHORT
   update-infra:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
