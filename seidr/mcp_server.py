@@ -9,6 +9,17 @@ from starlette.responses import PlainTextResponse
 
 SEIDR_URL = os.getenv("SEIDR_URL", "http://localhost:8082").rstrip("/")
 
+# Most tools are simple reads and 10s is plenty. `remember` and `learn` are NOT:
+# they run cognitive processing (fact extraction, relationship extraction,
+# contradiction checks) against an inference server, which routinely takes
+# 20-30s. With the 10s default those tool calls ALWAYS timed out — while the
+# REST endpoint kept running and committed the memory. The caller saw
+# "500: Error executing tool remember: " with an empty message (str() of an
+# httpx.ReadTimeout is ""), concluded the write had failed, and retried,
+# creating duplicate memories of work that had in fact been saved.
+TIMEOUT = float(os.getenv("SEIDR_MCP_TIMEOUT", "10"))
+COGNITION_TIMEOUT = float(os.getenv("SEIDR_MCP_COGNITION_TIMEOUT", "180"))
+
 
 def _seidr_endpoint(path: str) -> str:
     return f"{SEIDR_URL}{path}"
@@ -20,28 +31,28 @@ def _split_tags(tags: Optional[str]) -> list[str]:
     return [tag.strip() for tag in tags.split(",") if tag.strip()]
 
 
-async def _post_json(path: str, payload: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+async def _post_json(path: str, payload: dict[str, Any], timeout: float = TIMEOUT) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(_seidr_endpoint(path), json=payload)
         response.raise_for_status()
         return response.json()
 
 
-async def _get_json(path: str, timeout: float = 10.0) -> dict[str, Any]:
+async def _get_json(path: str, timeout: float = TIMEOUT) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.get(_seidr_endpoint(path))
         response.raise_for_status()
         return response.json()
 
 
-async def _get_json_params(path: str, params: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
+async def _get_json_params(path: str, params: dict[str, Any], timeout: float = TIMEOUT) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.get(_seidr_endpoint(path), params=params)
         response.raise_for_status()
         return response.json()
 
 
-async def _delete_json(path: str, timeout: float = 10.0) -> dict[str, Any]:
+async def _delete_json(path: str, timeout: float = TIMEOUT) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.delete(_seidr_endpoint(path))
         response.raise_for_status()
@@ -133,7 +144,7 @@ def _build_mcp_server() -> FastMCP:
             "tags": _split_tags(tags),
             "shared": bool(shared),
         }
-        data = await _post_json("/remember", payload)
+        data = await _post_json("/remember", payload, timeout=COGNITION_TIMEOUT)
         return {
             "stored": bool(data.get("stored", False)),
             "memory_id": data.get("id"),
@@ -230,6 +241,7 @@ def _build_mcp_server() -> FastMCP:
                     "agent": agent,
                     "source": source,
                 },
+                timeout=COGNITION_TIMEOUT,
             )
             return {
                 "stored": True,
