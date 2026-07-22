@@ -1,0 +1,538 @@
+<style>
+  :root{
+    /* light (default) — cool neutral, not cream */
+    --ground:#F1F1F4; --surface:#FBFBFC; --surface-2:#EAEAEF; --raise:#FFFFFF;
+    --line:#DEDCE4; --line-soft:#E9E7EF;
+    --text:#211F28; --text-2:#57525F; --text-3:#8B8694;
+    --accent:#B25E36; --accent-2:#C56E42; --accent-ink:#FFFFFF;
+    --accent-glow:rgba(178,94,54,.12);
+    --good:#3E9E6D; --warn:#B98A22; --crit:#CC4E3B;
+    --good-bg:rgba(62,158,109,.13); --warn-bg:rgba(185,138,34,.14); --crit-bg:rgba(204,78,59,.12);
+    --shadow:0 1px 2px rgba(20,18,26,.06),0 8px 24px rgba(20,18,26,.06);
+    --shadow-lift:0 2px 6px rgba(20,18,26,.10),0 18px 48px rgba(20,18,26,.16);
+    --r:10px; --r-sm:7px;
+    --mono:ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;
+    --ui:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ground:#141319; --surface:#1B1A21; --surface-2:#232128; --raise:#26242D;
+      --line:#332F3B; --line-soft:#2A2833;
+      --text:#ECE8E3; --text-2:#A8A2B0; --text-3:#736E7C;
+      --accent:#D08453; --accent-2:#DB925F; --accent-ink:#1a120c;
+      --accent-glow:rgba(208,132,83,.15);
+      --good:#63BC8C; --warn:#E0B455; --crit:#E2664F;
+      --good-bg:rgba(99,188,140,.12); --warn-bg:rgba(224,180,85,.13); --crit-bg:rgba(226,102,79,.13);
+      --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 26px rgba(0,0,0,.34);
+      --shadow-lift:0 2px 8px rgba(0,0,0,.4),0 22px 54px rgba(0,0,0,.5);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#141319; --surface:#1B1A21; --surface-2:#232128; --raise:#26242D;
+    --line:#332F3B; --line-soft:#2A2833;
+    --text:#ECE8E3; --text-2:#A8A2B0; --text-3:#736E7C;
+    --accent:#D08453; --accent-2:#DB925F; --accent-ink:#1a120c; --accent-glow:rgba(208,132,83,.15);
+    --good:#63BC8C; --warn:#E0B455; --crit:#E2664F;
+    --good-bg:rgba(99,188,140,.12); --warn-bg:rgba(224,180,85,.13); --crit-bg:rgba(226,102,79,.13);
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 26px rgba(0,0,0,.34);
+    --shadow-lift:0 2px 8px rgba(0,0,0,.4),0 22px 54px rgba(0,0,0,.5);
+  }
+  :root[data-theme="light"]{
+    --ground:#F1F1F4; --surface:#FBFBFC; --surface-2:#EAEAEF; --raise:#FFFFFF;
+    --line:#DEDCE4; --line-soft:#E9E7EF;
+    --text:#211F28; --text-2:#57525F; --text-3:#8B8694;
+    --accent:#B25E36; --accent-2:#C56E42; --accent-ink:#FFFFFF; --accent-glow:rgba(178,94,54,.12);
+    --good:#3E9E6D; --warn:#B98A22; --crit:#CC4E3B;
+    --good-bg:rgba(62,158,109,.13); --warn-bg:rgba(185,138,34,.14); --crit-bg:rgba(204,78,59,.12);
+    --shadow:0 1px 2px rgba(20,18,26,.06),0 8px 24px rgba(20,18,26,.06);
+    --shadow-lift:0 2px 6px rgba(20,18,26,.10),0 18px 48px rgba(20,18,26,.16);
+  }
+
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--ground);color:var(--text);font-family:var(--ui);
+    font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+    font-variant-numeric:tabular-nums;overflow:hidden}
+  button{font-family:inherit;cursor:pointer}
+  ::selection{background:var(--accent-glow)}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  .num{font-variant-numeric:tabular-nums}
+  .mono{font-family:var(--mono)}
+
+  /* ---- app shell ---- */
+  .app{display:grid;grid-template-rows:46px 1fr;height:100dvh}
+  .topbar{display:flex;align-items:center;gap:14px;padding:0 12px 0 14px;background:var(--surface);
+    border-bottom:1px solid var(--line)}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.14em;text-transform:lowercase;font-size:13px}
+  .ember{width:9px;height:9px;border-radius:50%;background:radial-gradient(circle at 35% 30%,var(--accent-2),var(--accent));
+    box-shadow:0 0 0 3px var(--accent-glow),0 0 10px var(--accent-glow)}
+  .crumbs{display:flex;align-items:center;gap:7px;color:var(--text-3);font-size:12px}
+  .crumbs b{color:var(--text-2);font-weight:500}
+  .crumbs .sep{opacity:.5}
+  .spacer{flex:1}
+  .lanepill{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 8px;border:1px solid var(--line);
+    border-radius:999px;background:var(--surface-2);font-size:12px;color:var(--text-2)}
+  .lanepill .k{color:var(--text-3);font-size:10.5px;text-transform:uppercase;letter-spacing:.08em}
+  .lanepill b{color:var(--text);font-weight:600}
+  .iconbtn{width:30px;height:30px;display:grid;place-items:center;border:1px solid transparent;border-radius:8px;
+    background:transparent;color:var(--text-2)}
+  .iconbtn:hover{background:var(--surface-2);color:var(--text);border-color:var(--line)}
+  svg{display:block}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .dot.good{background:var(--good)} .dot.warn{background:var(--warn)} .dot.crit{background:var(--crit)}
+  .dot.live{background:var(--good);box-shadow:0 0 0 0 var(--good)}
+  @media (prefers-reduced-motion:no-preference){
+    .dot.live{animation:pulse 2s ease-out infinite}
+    @keyframes pulse{0%{box-shadow:0 0 0 0 var(--good-bg)}70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+  }
+
+  .body{display:grid;grid-template-columns:230px 1fr 350px;min-height:0}
+  @media (max-width:1080px){.body{grid-template-columns:210px 1fr}.inspector{display:none}}
+  @media (max-width:760px){.body{grid-template-columns:1fr}.rail{display:none}}
+
+  /* ---- left rail ---- */
+  .rail{background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  .rail .pad{padding:12px 12px 8px}
+  .newbtn{width:100%;display:flex;align-items:center;gap:9px;justify-content:flex-start;padding:9px 11px;
+    border:1px solid var(--line);border-radius:9px;background:var(--surface-2);color:var(--text);font-weight:500;font-size:13px}
+  .newbtn:hover{border-color:var(--accent);background:var(--accent-glow)}
+  .newbtn svg{color:var(--accent)}
+  .navsec{padding:4px 8px}
+  .navlabel{padding:10px 8px 5px;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-3)}
+  .navitem{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:7px 9px;border-radius:8px;
+    border:1px solid transparent;background:transparent;color:var(--text-2);font-size:13px}
+  .navitem:hover{background:var(--surface-2);color:var(--text)}
+  .navitem.on{background:var(--accent-glow);color:var(--text);border-color:color-mix(in srgb,var(--accent) 30%,transparent)}
+  .navitem.on svg{color:var(--accent)}
+  .navitem svg{color:var(--text-3);flex:none}
+  .navitem .badge{margin-left:auto;font-size:11px;color:var(--text-3);background:var(--surface-2);
+    padding:1px 7px;border-radius:999px;border:1px solid var(--line)}
+  .navitem.on .badge{background:var(--surface);color:var(--accent)}
+  .threads{flex:1;overflow-y:auto;padding:2px 8px 8px}
+  .thread{display:block;width:100%;text-align:left;padding:8px 9px;border-radius:8px;border:1px solid transparent;
+    background:transparent;color:var(--text-2);margin-bottom:1px}
+  .thread:hover{background:var(--surface-2)}
+  .thread.on{background:var(--surface-2);border-color:var(--line)}
+  .thread .t{font-size:12.5px;color:var(--text);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .thread .m{font-size:11px;color:var(--text-3);margin-top:2px;display:flex;align-items:center;gap:6px}
+  .thread.on .t{color:var(--accent)}
+  .railfoot{border-top:1px solid var(--line);padding:9px 10px;display:flex;align-items:center;gap:9px}
+  .avatar{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    display:grid;place-items:center;color:var(--accent-ink);font-weight:700;font-size:12px}
+  .railfoot .who{font-size:12.5px;font-weight:600}
+  .railfoot .role{font-size:11px;color:var(--text-3)}
+
+  /* ---- center ---- */
+  .main{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--ground)}
+  .maincol{max-width:760px;width:100%;margin:0 auto;padding:22px 26px 0;flex:1;overflow-y:auto;min-height:0}
+  .view{display:none} .view.on{display:block}
+
+  .msg{display:flex;gap:12px;margin-bottom:22px}
+  .msg .who{width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:11px;font-weight:700}
+  .who.op{background:var(--surface-2);color:var(--text-2);border:1px solid var(--line)}
+  .who.ai{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:var(--accent-ink)}
+  .bubble{flex:1;min-width:0}
+  .byline{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .byline .name{font-weight:600;font-size:12.5px}
+  .byline .tag{font-size:10.5px;text-transform:uppercase;letter-spacing:.07em;color:var(--text-3);
+    border:1px solid var(--line);border-radius:5px;padding:1px 6px}
+  .byline .time{font-size:11px;color:var(--text-3);margin-left:auto}
+  .prose{color:var(--text);font-size:13.5px;line-height:1.62}
+  .prose p{margin:0 0 9px}
+  .prose code{font-family:var(--mono);font-size:12px;background:var(--surface-2);padding:1px 5px;border-radius:5px;
+    border:1px solid var(--line-soft)}
+  .caret{display:inline-block;width:7px;height:15px;background:var(--accent);vertical-align:-2px;margin-left:1px}
+  @media (prefers-reduced-motion:no-preference){.caret{animation:blink 1.1s step-end infinite}}
+  @keyframes blink{50%{opacity:0}}
+
+  /* plan card — move 3 (visible plan) + move 4 (gates) */
+  .plan{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);box-shadow:var(--shadow);
+    margin:4px 0 6px;overflow:hidden}
+  .plan-h{display:flex;align-items:center;gap:9px;padding:11px 13px;border-bottom:1px solid var(--line-soft);
+    background:var(--surface-2)}
+  .plan-h .ttl{font-weight:600;font-size:12.5px}
+  .plan-h .meta{margin-left:auto;font-size:11px;color:var(--text-3)}
+  .steps{padding:6px 13px 11px}
+  .step{display:flex;gap:11px;padding:8px 0;border-bottom:1px dashed var(--line-soft)}
+  .step:last-child{border-bottom:0}
+  .step .n{width:20px;height:20px;border-radius:6px;flex:none;display:grid;place-items:center;font-size:11px;
+    font-weight:600;background:var(--surface-2);color:var(--text-2);border:1px solid var(--line)}
+  .step .s-t{font-size:12.5px;font-weight:500}
+  .step .s-m{font-size:11.5px;color:var(--text-3);margin-top:2px;font-family:var(--mono)}
+  .gate-chip{font-size:10.5px;color:var(--good);background:var(--good-bg);border:1px solid transparent;
+    padding:1px 7px;border-radius:999px;margin-left:auto;white-space:nowrap;align-self:center}
+  .plan-f{display:flex;align-items:center;gap:9px;padding:10px 13px;border-top:1px solid var(--line-soft);background:var(--surface)}
+  .plan-f .note{font-size:11.5px;color:var(--text-3)}
+  .btn{padding:7px 14px;border-radius:8px;font-size:12.5px;font-weight:600;border:1px solid var(--line);background:var(--surface-2);color:var(--text)}
+  .btn:hover{border-color:var(--text-3)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+  .btn.primary:hover{background:var(--accent-2)}
+  .btn.ghost{background:transparent}
+
+  .composer{max-width:760px;width:100%;margin:0 auto;padding:12px 26px 20px}
+  .inputwrap{border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:var(--shadow);
+    padding:11px 13px;display:flex;flex-direction:column;gap:9px}
+  .inputwrap:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+  .inputwrap .ph{color:var(--text-3);font-size:13.5px}
+  .inputrow{display:flex;align-items:center;gap:8px}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-2);
+    border:1px solid var(--line);border-radius:7px;padding:4px 9px;background:var(--surface-2)}
+  .chip svg{color:var(--text-3)}
+  .send{margin-left:auto;width:32px;height:32px;border-radius:8px;background:var(--accent);color:var(--accent-ink);
+    border:none;display:grid;place-items:center}
+
+  /* ---- inspector (right) ---- */
+  .inspector{background:var(--surface);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+  .insp-h{display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid var(--line)}
+  .insp-h .ttl{font-weight:600;font-size:12.5px;letter-spacing:.02em}
+  .insp-tabs{margin-left:auto;display:flex;gap:2px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:2px}
+  .insp-tab{font-size:11px;padding:3px 9px;border-radius:6px;border:none;background:transparent;color:var(--text-3)}
+  .insp-tab.on{background:var(--raise);color:var(--text);box-shadow:var(--shadow)}
+  .insp-body{flex:1;overflow-y:auto;padding:12px}
+  .sublabel{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-3);margin:4px 2px 8px}
+
+  .task{border:1px solid var(--line);border-radius:var(--r-sm);background:var(--surface-2);padding:10px 11px;margin-bottom:8px}
+  .task .top{display:flex;align-items:center;gap:8px}
+  .task .id{font-family:var(--mono);font-size:11px;color:var(--text-3)}
+  .task .st{margin-left:auto;font-size:10.5px;padding:1px 8px;border-radius:999px;font-weight:600}
+  .st.run{color:var(--warn);background:var(--warn-bg)} .st.done{color:var(--good);background:var(--good-bg)}
+  .st.wait{color:var(--text-3);background:var(--surface)}
+  .task .name{font-size:12.5px;font-weight:500;margin:6px 0 7px}
+  .task .foot{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-3);font-family:var(--mono)}
+  .task .foot .agent{color:var(--text-2)}
+  .prog{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin:8px 0 2px}
+  .prog i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));border-radius:2px}
+  .evi{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--good);background:var(--good-bg);
+    border-radius:6px;padding:2px 8px;font-family:var(--mono)}
+
+  .cortex{margin-top:6px;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--ground);overflow:hidden}
+  .cortex .ch{display:flex;align-items:center;gap:7px;padding:7px 10px;border-bottom:1px solid var(--line);font-size:11px;color:var(--text-2)}
+  .cortex .log{padding:8px 10px;font-family:var(--mono);font-size:11px;line-height:1.85;max-height:150px;overflow-y:auto}
+  .cortex .log div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-2)}
+  .cortex .log .t{color:var(--text-3)} .cortex .log .k{color:var(--accent)}
+  .cortex .log .g{color:var(--good)} .cortex .log .w{color:var(--warn)}
+
+  .approve{margin-top:10px;border:1px solid color-mix(in srgb,var(--warn) 40%,var(--line));border-radius:var(--r-sm);
+    background:var(--warn-bg);overflow:hidden}
+  .approve .stripe{height:3px;background:var(--warn)}
+  .approve .ap{padding:11px 12px}
+  .approve .lab{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--warn);font-weight:600;display:flex;align-items:center;gap:6px}
+  .approve .txt{font-size:12.5px;margin:6px 0 10px;color:var(--text)}
+  .approve .row{display:flex;gap:8px}
+  .approve .btn{flex:1;padding:7px}
+  .btn.warn{background:var(--warn);border-color:var(--warn);color:#231a05}
+
+  /* ---- fleet view (anvil) ---- */
+  .fleetgrid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));padding:2px 0 20px}
+  .lane{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);box-shadow:var(--shadow);padding:14px}
+  .lane .lh{display:flex;align-items:center;gap:9px}
+  .lane .role{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);font-weight:600}
+  .lane .model{font-size:14px;font-weight:600;margin:7px 0 1px}
+  .lane .host{font-size:11.5px;color:var(--text-3);font-family:var(--mono)}
+  .vram{margin:12px 0 4px}
+  .vram .lab{display:flex;justify-content:space-between;font-size:11px;color:var(--text-2);margin-bottom:5px}
+  .vram .bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+  .vram .bar i{display:block;height:100%;border-radius:3px}
+  .lane .spark{margin:10px 0 4px}
+  .lane .lf{display:flex;align-items:center;gap:8px;margin-top:11px}
+  .lane .lf .btn{padding:5px 11px;font-size:12px}
+  .lane .meta{font-size:11px;color:var(--text-3);margin-left:auto;font-family:var(--mono)}
+
+  .viewhead{padding:22px 26px 4px;max-width:900px;margin:0 auto}
+  .viewhead h1{margin:0;font-size:19px;font-weight:650;letter-spacing:-.01em}
+  .viewhead p{margin:5px 0 0;color:var(--text-2);font-size:13px;max-width:60ch}
+  .viewpad{max-width:900px;margin:0 auto;padding:16px 26px 0;width:100%}
+
+  /* ---- settings modal ---- */
+  .scrim{position:fixed;inset:0;background:rgba(10,8,14,.5);backdrop-filter:blur(3px);display:none;place-items:center;z-index:50}
+  .scrim.on{display:grid}
+  .modal{width:min(860px,94vw);height:min(600px,90vh);background:var(--surface);border:1px solid var(--line);
+    border-radius:14px;box-shadow:var(--shadow-lift);display:grid;grid-template-columns:200px 1fr;overflow:hidden}
+  .set-nav{background:var(--surface-2);border-right:1px solid var(--line);padding:14px 10px}
+  .set-nav .h{padding:4px 10px 12px;font-weight:650;font-size:15px;display:flex;align-items:center;gap:8px}
+  .set-item{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:8px 10px;border-radius:8px;
+    border:none;background:transparent;color:var(--text-2);font-size:13px;margin-bottom:1px}
+  .set-item:hover{background:var(--surface)}
+  .set-item.on{background:var(--surface);color:var(--text);font-weight:500}
+  .set-item.on svg{color:var(--accent)}
+  .set-item svg{color:var(--text-3)}
+  .set-main{overflow-y:auto;padding:22px 26px}
+  .set-main h2{margin:0 0 3px;font-size:16px;font-weight:650}
+  .set-main .sub{color:var(--text-3);font-size:12.5px;margin:0 0 20px}
+  .field{display:flex;align-items:center;gap:16px;padding:14px 0;border-top:1px solid var(--line-soft)}
+  .field .fl{flex:1}
+  .field .fl .ft{font-size:13px;font-weight:500}
+  .field .fl .fd{font-size:11.5px;color:var(--text-3);margin-top:2px}
+  .close{position:absolute;top:12px;right:14px}
+  .toggle{width:38px;height:22px;border-radius:999px;background:var(--line);border:none;position:relative;flex:none}
+  .toggle.on{background:var(--accent)}
+  .toggle::after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;
+    transition:transform .16s ease;box-shadow:0 1px 3px rgba(0,0,0,.3)}
+  .toggle.on::after{transform:translateX(16px)}
+  .select{border:1px solid var(--line);background:var(--surface-2);color:var(--text);border-radius:8px;
+    padding:7px 11px;font-size:12.5px;font-family:inherit;min-width:180px}
+  .slider{-webkit-appearance:none;appearance:none;width:200px;height:4px;border-radius:2px;background:var(--line)}
+  .slider::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);cursor:pointer}
+  .swatchrow{display:flex;gap:8px}
+  .swatch{width:26px;height:26px;border-radius:7px;border:2px solid transparent}
+  .swatch.on{border-color:var(--text)}
+</style>
+
+<div class="app">
+  <!-- top bar -->
+  <div class="topbar">
+    <div class="brand"><span class="ember"></span>hirdforge</div>
+    <div class="crumbs">
+      <span>workspace</span><span class="sep">/</span><b>hirdforge/hirdforge</b>
+      <span class="sep">·</span><span class="mono">main</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="lanepill" title="The model you're talking to">
+      <span class="dot good"></span>
+      <span class="k">interlocutor</span><b>Nemotron‑3</b>
+      <span style="color:var(--text-3)" class="mono">inference-host</span>
+    </div>
+    <button class="iconbtn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+    </button>
+    <button class="iconbtn" id="gearBtn" title="Settings" aria-label="Settings">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 7 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0-1.1-2.7H1a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 2.6 7a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H7a1.6 1.6 0 0 0 1-1.5V1a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V7a1.6 1.6 0 0 0 1.5 1H23a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></svg>
+    </button>
+  </div>
+
+  <div class="body">
+    <!-- left rail -->
+    <aside class="rail">
+      <div class="pad">
+        <button class="newbtn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>New thread</button>
+      </div>
+      <div class="navsec">
+        <button class="navitem on" data-view="cockpit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></svg>Cockpit</button>
+        <button class="navitem" data-view="fleet"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Fleet &amp; models<span class="badge">3</span></button>
+        <button class="navitem" data-view="cockpit"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 2a7 7 0 0 0-7 7c0 3 2 4 2 6h10c0-2 2-3 2-6a7 7 0 0 0-7-7ZM9 21h6M10 18v3M14 18v3"/></svg>Memory<span class="badge">seidr</span></button>
+      </div>
+      <div class="navlabel">Threads</div>
+      <div class="threads">
+        <button class="thread on"><div class="t">Wire deep lane into Concierge</div><div class="m"><span class="dot live"></span>2 agents · live</div></button>
+        <button class="thread"><div class="t">studio.example.internal — DNS + cert</div><div class="m">merged · PR #128</div></button>
+        <button class="thread"><div class="t">Deep‑lane bakeoff: Nemotron vs Laguna</div><div class="m">3h ago</div></button>
+        <button class="thread"><div class="t">Homepage: Local Studio card</div><div class="m">merged · PR #124</div></button>
+        <button class="thread"><div class="t">Cortex routing rules — cortex.yaml</div><div class="m">yesterday</div></button>
+      </div>
+      <div class="railfoot">
+        <div class="avatar">K</div>
+        <div><div class="who">Kit</div><div class="role">Sovereign</div></div>
+        <button class="iconbtn" style="margin-left:auto" id="gearBtn2" aria-label="Settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg></button>
+      </div>
+    </aside>
+
+    <!-- center -->
+    <main class="main">
+      <!-- COCKPIT -->
+      <div class="view on" id="v-cockpit">
+        <div class="maincol">
+          <div class="msg">
+            <div class="who op">K</div>
+            <div class="bubble">
+              <div class="byline"><span class="name">Kit</span><span class="time">16:38</span></div>
+              <div class="prose"><p>The homepage card still points at the LAN IP. Let's give <code>studio.example.internal</code> a real cert and DNS, then flip the card. Do it the sovereign way.</p></div>
+            </div>
+          </div>
+
+          <div class="msg">
+            <div class="who ai">◆</div>
+            <div class="bubble">
+              <div class="byline"><span class="name">Concierge</span><span class="tag">Nemotron‑3 · inference-host</span><span class="time">16:38</span></div>
+              <div class="prose">
+                <p>Grounded against live state first: cert‑manager has the <code>example-internal-ca</code> issuer (Ready), and DNS is Technitium at <code>203.0.113.60</code> — app records go in directly, no OPNsense. Here's the plan; the DNS record is the one step that needs your key.</p>
+              </div>
+
+              <div class="plan">
+                <div class="plan-h">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><path d="M9 11l3 3 8-8M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
+                  <span class="ttl">Plan — studio.example.internal over TLS</span>
+                  <span class="meta">3 tasks · 1 needs you</span>
+                </div>
+                <div class="steps">
+                  <div class="step"><span class="n">1</span><div><div class="s-t">Issue cert from kws‑internal‑ca</div><div class="s-m">cert-manager · Certificate/studio-kws-lan</div></div><span class="gate-chip">gate: secret exists</span></div>
+                  <div class="step"><span class="n">2</span><div><div class="s-t">Caddy vhost → inference-host:3000, same‑origin</div><div class="s-m">agent → sandbox → PR</div></div><span class="gate-chip">gate: ci green</span></div>
+                  <div class="step"><span class="n">3</span><div><div class="s-t">DNS A studio.example.internal → 203.0.113.20</div><div class="s-m">Technitium · needs your token</div></div><span class="gate-chip" style="color:var(--warn);background:var(--warn-bg)">you</span></div>
+                </div>
+                <div class="plan-f">
+                  <span class="note">Cortex routes each task; you merge. Nothing hits <code>main</code> without you.</span>
+                  <button class="btn ghost">Revise</button>
+                  <button class="btn primary">Dispatch</button>
+                </div>
+              </div>
+
+              <div class="prose" style="margin-top:12px"><p>Dispatched tasks 1–2 to Cortex — watch them flow on the right. I'll hold task 3 for your token.<span class="caret"></span></p></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="composer">
+          <div class="inputwrap">
+            <div class="ph">Tell the forge what needs doing…</div>
+            <div class="inputrow">
+              <span class="chip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 15V6a2 2 0 0 0-2-2H9L3 8v10a2 2 0 0 0 2 2h5"/><circle cx="17" cy="17" r="4"/></svg>platform/infra</span>
+              <span class="chip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></svg>Nemotron‑3</span>
+              <button class="send" aria-label="Send"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h15M13 6l6 6-6 6"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- FLEET (anvil) -->
+      <div class="view" id="v-fleet">
+        <div class="viewhead"><h1>Fleet &amp; models</h1><p>The minds the forge runs on — every lane, host, and GPU in one place. Swap a model, watch throughput, keep the coordinator fed.</p></div>
+        <div class="viewpad">
+          <div class="fleetgrid">
+            <div class="lane">
+              <div class="lh"><span class="dot good"></span><span class="role">Interlocutor</span><span class="meta">inference-host</span></div>
+              <div class="model">Nemotron‑3‑Super</div>
+              <div class="host">120B‑A12B · IQ4_XS · :11435</div>
+              <div class="vram"><div class="lab"><span>RTX 3090 · VRAM</span><span class="num">22.4 / 24 GB</span></div><div class="bar"><i style="width:93%;background:var(--warn)"></i></div></div>
+              <svg class="spark" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"><path d="M0 22 L20 20 L40 21 L60 15 L80 17 L100 10 L120 13 L140 8 L160 11 L180 6 L200 9 L200 30 L0 30Z" fill="var(--accent-glow)"/><path d="M0 22 L20 20 L40 21 L60 15 L80 17 L100 10 L120 13 L140 8 L160 11 L180 6 L200 9" fill="none" stroke="var(--accent)" stroke-width="1.6"/></svg>
+              <div class="lf"><span class="host num">15 tok/s</span><span class="meta">1 session</span><button class="btn">Swap</button></div>
+            </div>
+
+            <div class="lane">
+              <div class="lh"><span class="dot good"></span><span class="role">Fleet worker</span><span class="meta">agent-host</span></div>
+              <div class="model">Qwen3.6‑27B</div>
+              <div class="host">UD‑Q4_K_XL · R9700 · :8002</div>
+              <div class="vram"><div class="lab"><span>R9700 · VRAM</span><span class="num">19.1 / 32 GB</span></div><div class="bar"><i style="width:60%;background:var(--good)"></i></div></div>
+              <svg class="spark" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"><path d="M0 18 L20 12 L40 20 L60 9 L80 22 L100 14 L120 8 L140 19 L160 11 L180 16 L200 10 L200 30 L0 30Z" fill="var(--accent-glow)"/><path d="M0 18 L20 12 L40 20 L60 9 L80 22 L100 14 L120 8 L140 19 L160 11 L180 16 L200 10" fill="none" stroke="var(--accent)" stroke-width="1.6"/></svg>
+              <div class="lf"><span class="host num">×3 agents</span><span class="meta">busy 2/3</span><button class="btn">Swap</button></div>
+            </div>
+
+            <div class="lane">
+              <div class="lh"><span class="dot" style="background:var(--text-3)"></span><span class="role">Light</span><span class="meta">workstation</span></div>
+              <div class="model">Gwen 1.1</div>
+              <div class="host">Gemma‑4‑12B ft · 5060Ti · :8003</div>
+              <div class="vram"><div class="lab"><span>RTX 5060 Ti · VRAM</span><span class="num">9.8 / 16 GB</span></div><div class="bar"><i style="width:61%;background:var(--good)"></i></div></div>
+              <svg class="spark" width="100%" height="30" viewBox="0 0 200 30" preserveAspectRatio="none"><path d="M0 20 L20 21 L40 18 L60 19 L80 16 L100 18 L120 15 L140 17 L160 14 L180 16 L200 15 L200 30 L0 30Z" fill="var(--accent-glow)"/><path d="M0 20 L20 21 L40 18 L60 19 L80 16 L100 18 L120 15 L140 17 L160 14 L180 16 L200 15" fill="none" stroke="var(--accent)" stroke-width="1.6"/></svg>
+              <div class="lf"><span class="host num">idle</span><span class="meta">standby</span><button class="btn">Swap</button></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- inspector -->
+    <aside class="inspector">
+      <div class="insp-h">
+        <span class="dot live"></span><span class="ttl">Pipeline</span>
+        <div class="insp-tabs"><button class="insp-tab on">Live</button><button class="insp-tab">Cortex</button></div>
+      </div>
+      <div class="insp-body">
+        <div class="sublabel">Active — thread #142</div>
+
+        <div class="task">
+          <div class="top"><span class="id">task‑1</span><span class="st done">done</span></div>
+          <div class="name">Issue cert · studio‑kws‑lan</div>
+          <div class="foot"><span class="agent">cert‑manager</span><span>·</span><span>kws‑internal‑ca</span></div>
+          <div style="margin-top:8px"><span class="evi"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>secret Ready · 20s</span></div>
+        </div>
+
+        <div class="task">
+          <div class="top"><span class="id">task‑2</span><span class="st run">building</span></div>
+          <div class="name">Caddy vhost → inference-host:3000</div>
+          <div class="prog"><i style="width:64%"></i></div>
+          <div class="foot"><span class="agent">agent‑2</span><span>·</span><span>sbx‑7</span><span>·</span><span>qwen</span></div>
+        </div>
+
+        <div class="task">
+          <div class="top"><span class="id">task‑3</span><span class="st wait">waiting</span></div>
+          <div class="name">DNS A → 203.0.113.20</div>
+          <div class="foot"><span>held · needs operator token</span></div>
+        </div>
+
+        <div class="cortex">
+          <div class="ch"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>Cortex log <span style="margin-left:auto;color:var(--text-3);font-size:10px">deterministic</span></div>
+          <div class="log">
+            <div><span class="t">16:41:02</span> <span class="k">route</span> task‑1 → issue rule=cert</div>
+            <div><span class="t">16:41:02</span> <span class="g">gate</span> task‑1 secret‑exists PASS</div>
+            <div><span class="t">16:41:03</span> <span class="k">route</span> task‑2 → build rule=default</div>
+            <div><span class="t">16:41:03</span> <span class="k">dispatch</span> agent‑2 sandbox=sbx‑7</div>
+            <div><span class="t">16:44:10</span> <span class="w">gate</span> task‑2 ci‑status PENDING</div>
+            <div><span class="t">16:44:11</span> <span class="k">hold</span> task‑3 reason=operator‑token</div>
+          </div>
+        </div>
+
+        <div class="approve">
+          <div class="stripe"></div>
+          <div class="ap">
+            <div class="lab"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>Lockbox · your call</div>
+            <div class="txt">Merge <b>PR #128</b> — homepage card → <code>studio.example.internal</code>. CI green, reviewer approved.</div>
+            <div class="row"><button class="btn warn">Approve merge</button><button class="btn ghost">Reject</button></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- settings -->
+<div class="scrim" id="scrim">
+  <div class="modal" role="dialog" aria-label="Settings">
+    <nav class="set-nav">
+      <div class="h"><span class="ember"></span>Settings</div>
+      <button class="set-item" data-set="general"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>General</button>
+      <button class="set-item on" data-set="models"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Models &amp; lanes</button>
+      <button class="set-item" data-set="conn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 17H7A5 5 0 0 1 7 7h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8"/></svg>Connections</button>
+      <button class="set-item" data-set="fleet"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M16 3.1a4 4 0 0 1 0 7.7M22 21v-2a4 4 0 0 0-3-3.8M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"/></svg>Fleet</button>
+      <button class="set-item" data-set="appear"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="13.5" cy="6.5" r="2.5"/><circle cx="17.5" cy="10.5" r="2.5"/><circle cx="8.5" cy="7.5" r="2.5"/><circle cx="6.5" cy="12.5" r="2.5"/><path d="M12 22a10 10 0 1 1 0-20c5 0 8 3.5 8 8 0 3-2 4-4 4h-2a2 2 0 0 0-1 3.7A2 2 0 0 1 12 22Z"/></svg>Appearance</button>
+      <button class="set-item" data-set="adv"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 20v-6M6 20v-3M18 20v-9M6 8V4M12 8V4M18 7V4"/><circle cx="6" cy="12" r="2"/><circle cx="12" cy="11" r="2"/><circle cx="18" cy="9" r="2"/></svg>Advanced</button>
+    </nav>
+    <div class="set-main">
+      <button class="iconbtn close" id="closeSet" aria-label="Close settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      <h2>Models &amp; lanes</h2>
+      <p class="sub">Which mind sits in each seat of the loop. Changes here re‑point the forge live.</p>
+
+      <div class="field"><div class="fl"><div class="ft">Interlocutor lane</div><div class="fd">The model you talk to — plans, scopes, dispatches.</div></div><select class="select"><option>Nemotron‑3‑Super · inference-host</option><option>Laguna S 2.1 · inference-host</option><option>Qwen3.6‑27B · agent-host</option></select></div>
+
+      <div class="field"><div class="fl"><div class="ft">Fleet worker lane</div><div class="fd">The hands. Cortex fans build tasks across these.</div></div><select class="select"><option>Qwen3.6‑27B · agent-host ×3</option><option>OpenCode · sandbox pool</option></select></div>
+
+      <div class="field"><div class="fl"><div class="ft">Reviewer lane</div><div class="fd">Judges the PR diff on top of the mechanical gate.</div></div><select class="select"><option>Nemotron‑3 · inference-host</option><option>Gwen 1.1 · workstation</option></select></div>
+
+      <div class="field"><div class="fl"><div class="ft">Auto‑swap on OOM</div><div class="fd">If a lane fails to load, roll back to the last good model.</div></div><button class="toggle on" aria-pressed="true"></button></div>
+
+      <div class="field"><div class="fl"><div class="ft">Max fleet concurrency</div><div class="fd">Sandboxes Cortex may run at once. 3 of 3 in use now.</div></div><input class="slider" type="range" min="1" max="8" value="3"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  (function(){
+    var root=document.documentElement;
+    function sysDark(){return window.matchMedia&&window.matchMedia("(prefers-color-scheme:dark)").matches;}
+    document.getElementById("themeBtn").addEventListener("click",function(){
+      var cur=root.getAttribute("data-theme")||(sysDark()?"dark":"light");
+      root.setAttribute("data-theme",cur==="dark"?"light":"dark");
+    });
+    // view switching
+    document.querySelectorAll(".navitem").forEach(function(b){
+      b.addEventListener("click",function(){
+        var v=b.getAttribute("data-view"); if(!v)return;
+        document.querySelectorAll(".navitem").forEach(function(x){x.classList.remove("on")});
+        b.classList.add("on");
+        document.querySelectorAll(".view").forEach(function(x){x.classList.remove("on")});
+        var el=document.getElementById("v-"+v); if(el)el.classList.add("on");
+      });
+    });
+    // settings
+    var scrim=document.getElementById("scrim");
+    function open(){scrim.classList.add("on")} function close(){scrim.classList.remove("on")}
+    document.getElementById("gearBtn").addEventListener("click",open);
+    document.getElementById("gearBtn2").addEventListener("click",open);
+    document.getElementById("closeSet").addEventListener("click",close);
+    scrim.addEventListener("click",function(e){if(e.target===scrim)close();});
+    document.addEventListener("keydown",function(e){if(e.key==="Escape")close();});
+    document.querySelectorAll(".set-item").forEach(function(b){
+      b.addEventListener("click",function(){document.querySelectorAll(".set-item").forEach(function(x){x.classList.remove("on")});b.classList.add("on");});
+    });
+    document.querySelectorAll(".toggle").forEach(function(t){
+      t.addEventListener("click",function(){t.classList.toggle("on");t.setAttribute("aria-pressed",t.classList.contains("on"));});
+    });
+  })();
+</script>
