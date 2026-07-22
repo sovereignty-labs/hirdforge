@@ -33,6 +33,22 @@ infrastructure, not agency.*
 6. **docs/source/** — the two originating specs (v2 architecture, builder
    harness). Read-only provenance. Where the source and the code disagree, the
    code wins — flag the contradiction.
+7. **docs/LOOP_SPEC.md** — the *felt* loop v2 must reproduce, abstracted from a
+   real Kit⇄Claude working session into eight moves. This is the **operator-
+   experience acceptance test**: any surface or route that serves none of the
+   eight moves is ballast; any move it can't make feel natural is unfinished.
+8. **docs/STEERING.md** — binding session advice on top of the PRD. Read it early.
+   It carries: (a) an **accuracy correction** — the v2 *plan* is ready, the v2
+   *code* is not; you are starting the Phase-1 skeleton, not finishing a built
+   thing (the repo's ROADMAP/BUILD_LOG are frozen at Feb v0.0.1 — ignore them);
+   (b) the **"it must WORK" mandate** — the mock is a contract, a green state you
+   can't mechanically back is forbidden; build reliable completion first, dress it
+   second; (c) the recommendation to bring the design language forward now and to
+   evaluate reskinning the Workbench UI as the interim face.
+9. **docs/ui/DESIGN_SYSTEM.md** + **docs/ui/cockpit-mock.html** — the **visual
+   north-star** for every surface (supersedes `strawman.jsx` as the visual
+   reference; `docs/ui/spec.md` remains the behavior/data contract). Binding house
+   style from Phase 1 on — do not ship another default-browser screen.
 
 ## Doctrine constraints (binding on every implementation choice)
 
