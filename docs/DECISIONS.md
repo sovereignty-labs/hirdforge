@@ -174,6 +174,29 @@ existing A2A task store per the v2 spec's Task shape. Load-bearing.
 transition-with-reason enforced transactionally). *Awaiting Kit's approval
 before building.*
 
+**O-HARDEN — Phase-1 deferred hardening (fold into Phase 2).** Non-blocking
+items the Phase-1 build deferred to reach a working loop, tracked so they are
+not lost: (a) **sandbox egress re-lock** — currently allow-all; re-tighten to
+{DNS, gitea toServices, inference} now that the gitea *ingress* allowlist is the
+real allowance; (b) **dedicated Lockbox merge secret** — stop reusing
+`warband-gitea-token`; (c) **CI image-bump for `CORTEX_AGENT_IMAGE`** — the env
+value isn't covered by the bump regex, so the sandbox agent image is pinned by
+hand; (d) **in-cluster GOPROXY** — the baked module cache breaks if a task adds
+a dependency (offline `go test`). Full detail in
+`PHASE2_EXECUTION_SPEC.md#deferred-phase-1-hardening`. *Owner: Phase 2.*
+
+**O-CI — RESOLVED 2026-07-23.** `git.hirdforge.com` Gitea has working CI runners
+(the Quality Gates + build workflows run against it; branch protection enforces
+green status checks). The walking skeleton's done-gate uses `test-command`
+(sandbox exit code) regardless, so `ci-status` remains an available-but-unused
+gate type.
+
+**O-SANDBOX-CONTRACT / O-ROUTING-SCHEMA / O-PERSISTENCE — RESOLVED 2026-07-23.**
+All three contracts were drafted, approved (PR #330), and *implemented and
+proven live* in Phase 1. The sandbox contract was amended (container-sequencing
+in place of exec-into-a-pause-sidecar, Kit-approved) — see
+`docs/specs/contracts/`.
+
 **O-WEBHOOK-SECRET — Webhook auth from `git.hirdforge.com` Gitea → Asgard
 gateway.** HMAC validation reusing existing `webhook.go` patterns. Both ends now
 live in Asgard (corrected D-INFRA), which simplifies secret provisioning —

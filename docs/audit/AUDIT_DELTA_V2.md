@@ -6,6 +6,29 @@ so ground truth stays current without re-auditing. Newest entries first.
 
 ---
 
+## 2026-07-23 — Phase 1 built, deployed, accepted
+
+The walking skeleton (P1.1–P1.8) is on `main`, deployed to Asgard, and proven
+live: issue `kit/hirdforge#359` → PR #361 → `gate_passed:test-command exit 0` →
+`review`. Acceptance recorded in `docs/specs/PHASE1_ACCEPTANCE.md`; Phase 2
+drafted in `docs/specs/PHASE2_EXECUTION_SPEC.md`. Statements this makes stale:
+
+- STEERING/PRD "the v2 *code* is ~zero" — no longer true; the coordination
+  spine exists and runs. Phase-1 code is `internal/cortex`, `internal/sandbox`,
+  and the `cmd/gateway` cortex glue.
+- `internal/workbench/cortex.go` is now definitively superseded by
+  `internal/cortex` (D-PORT executed): the deterministic v2 Cortex is built
+  fresh, not ported. The Workbench cortex remains only as dead v1 code pending
+  cutover.
+- Sandbox egress is **permissive (allow-all)** as a deliberate temporary
+  measure — the real clone blocker was gitea *ingress*, not sandbox egress.
+  Re-tighten is a Phase-2 hardening item (see DECISIONS O-HARDEN).
+- `CORTEX_AGENT_IMAGE` in the gateway deployment is pinned manually; the CI
+  image-bump regex does not rewrite env values.
+- The BUILDER_HARNESS "20/20 clean" benchmark result was **edit-only** and does
+  not measure the git/PR flow — which the live loop showed is where the builder
+  actually fails (~50%). The Phase-2 benchmark extension corrects this.
+
 ## 2026-07-23 — Phase 0 rebrand (`phase0/rebrand`)
 
 **Module path renamed** to `git.hirdforge.com/kit/hirdforge` (D-BRAND, with the
