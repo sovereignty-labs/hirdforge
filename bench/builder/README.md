@@ -38,7 +38,20 @@ LITELLM_KEY=... ./run.sh qwen-reserved 10
 ## Bar and baseline
 
 Target (harness spec, after M1–M5 land in Phase 2): **≥ 8/10 clean**.
-Historical baseline: ~0/2 — but that was measured against the Qwen 3.6 35B-A3B
-MoE, which was swapped off the fabric 2026-07-17 for weak agentic work. The
-current baseline against the dense 27B lanes is recorded in `results/` and in
-the PR that landed each run.
+Historical baseline: ~0/2 — measured against the Qwen 3.6 35B-A3B MoE, which
+was swapped off the fabric 2026-07-17 for weak agentic work.
+
+**Measured baseline, 2026-07-23** (current agent loop, BEFORE M2–M7; 10
+rounds per lane, all four mechanical checks required):
+
+| lane | model | clean | round duration |
+|---|---|---|---|
+| `qwen` | Qwen3.6-27B dense (agent-host R9700) | **10/10** | 90–411s |
+| `qwen-reserved` | Qwen3.6-27B dense + MTP (agent-host R9700) | **10/10** | 10–61s |
+
+The D-AUTONOMY #2 verification bar is met with headroom on both lanes; the
+dense-27B swap appears to have resolved the reliability gap the harness spec
+was written against. Caveat, stated honestly: this is one task archetype (the
+canonical refactor). The M2–M7 mechanisms and nightly per-model runs remain
+the plan for breadth; this baseline says the builders are fit to carry real
+skeleton work now.
