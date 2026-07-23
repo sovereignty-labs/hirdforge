@@ -123,14 +123,21 @@ func TestAllocateBuildsContractShapedJob(t *testing.T) {
 	}
 }
 
-func TestAllocateRejectsGatelessSpec(t *testing.T) {
-	_, srv := newFakeAPI(t)
+// Gateless specs are legal only for legs gated elsewhere (reviewer via the
+// Gitea review webhook); the job still runs an explicit no-op gate container
+// so the sequence shape never silently changes.
+func TestAllocateGatelessSpecGetsNoopGate(t *testing.T) {
+	f, srv := newFakeAPI(t)
 	defer srv.Close()
 	s := newTestSandbox(srv)
 	spec := testSpec()
 	spec.GateCommand = ""
-	if _, err := s.Allocate(context.Background(), spec); err == nil {
-		t.Fatal("gateless spec accepted — D-GATE violation")
+	if _, err := s.Allocate(context.Background(), spec); err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	raw, _ := json.Marshal(f.createdJob)
+	if !strings.Contains(string(raw), "no-job-gate-for-this-role") {
+		t.Fatal("gateless spec must run the explicit no-op gate container")
 	}
 }
 

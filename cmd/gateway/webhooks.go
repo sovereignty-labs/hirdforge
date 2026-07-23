@@ -128,7 +128,9 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if giteaEvent == "pull_request_review" {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
+		// v2 Cortex consumes review verdicts (P1.6); v1 has no review path.
+		g.handleCortexReviewEvent(body)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 		return
 	}
 
@@ -141,6 +143,7 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 	case "closed":
 		if pr.Merged {
 			go g.handlePRMerged(pr)
+			g.handleCortexPRMergedEvent(pr.Repo, pr.Number, pr.User)
 		}
 	}
 }

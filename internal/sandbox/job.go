@@ -38,6 +38,9 @@ cd %s/repo && git checkout -b %q && echo "checkout ok: $(git rev-parse HEAD)"`,
 		workspaceMountPath, spec.WorkBranch)
 
 	gateScript := fmt.Sprintf("cd %s/repo && %s", workspaceMountPath, spec.GateCommand)
+	if spec.GateCommand == "" {
+		gateScript = "echo no-job-gate-for-this-role"
+	}
 
 	volumes := []map[string]any{
 		{"name": "work", "emptyDir": map[string]any{}},

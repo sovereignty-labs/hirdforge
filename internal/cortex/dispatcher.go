@@ -26,6 +26,12 @@ type Dispatcher struct {
 	// Events receives the internal task.gate_* events (fed back to
 	// Cortex.HandleEvent so gate outcomes can fire follow-on routes).
 	Events func(Event)
+	// DiffFetch retrieves a PR's unified diff + head/base refs from Gitea
+	// (D-LESSONS #4: the reviewer sees the artifact).
+	DiffFetch func(ctx context.Context, repo string, prNumber int64) (diff, head, base string, err error)
+	// ReviewLookup observes whether a review verdict exists on a PR via the
+	// Gitea API. Returns (state APPROVED|REQUEST_CHANGES, reviewer, found).
+	ReviewLookup func(ctx context.Context, repo string, prNumber int64) (string, string, bool, error)
 
 	AgentImage    string
 	AgentCommand  []string
@@ -132,6 +138,14 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, cfg *Config, route *Route
 		"command": gate.Command, "evidence": string(evidence),
 	}
 	cause := Cause{Kind: CauseGate, Detail: map[string]any{"gate": gateResult, "pr_number": prNumber}}
+	if err := d.Store.SetPR(taskID, task.IssueRepo, prNumber); err != nil {
+		log.Printf("cortex: ERROR persisting PR ref on %s: %v", taskID, err)
+	}
+	if grJSON, err := json.Marshal(gateResult); err == nil {
+		if err := d.Store.SetGateResult(taskID, grJSON); err != nil {
+			log.Printf("cortex: ERROR persisting gate result on %s: %v", taskID, err)
+		}
+	}
 
 	if res.GateExitCode != 0 {
 		return d.failTaskWithEvent(ctx, route, taskID,
@@ -190,4 +204,89 @@ func firstLine(s string) string {
 		s = s[:200]
 	}
 	return s
+}
+
+// DispatchReviewer runs the reviewer leg (P1.6) against an existing task in
+// status review — no new task row; the reviewer is an attribute of THE task.
+// The reviewer's verdict reaches Cortex only as a pr.review_submitted webhook
+// (a Gitea fact); this method merely runs the reviewer and observes whether a
+// verdict landed. The builder task's mechanical gate has already passed —
+// the reviewer is a gate on top, never instead (D-GATE).
+func (d *Dispatcher) DispatchReviewer(ctx context.Context, cfg *Config, route *Route, ev Event) error {
+	task, _, err := d.Store.GetTask(ev.TaskID)
+	if err != nil {
+		return fmt.Errorf("dispatcher: reviewer: %w", err)
+	}
+	if task.Status != StatusReview {
+		return fmt.Errorf("dispatcher: reviewer: task %s is %s, not review", task.ID, task.Status)
+	}
+	if d.DiffFetch == nil {
+		return d.failTask(task.ID, "reviewer dispatch impossible: no diff fetcher wired", Cause{Kind: CauseSandbox})
+	}
+	diff, head, base, err := d.DiffFetch(ctx, task.PRRepo, task.PRNumber)
+	if err != nil {
+		return d.failTask(task.ID, "reviewer diff fetch failed: "+err.Error(), Cause{Kind: CauseSandbox})
+	}
+	env, err := BuildEnvelope(cfg, route, EnvelopeParams{
+		Task:          task,
+		CloneURL:      d.CloneURLBase + "/" + task.IssueRepo + ".git",
+		BaseBranch:    d.BaseBranch,
+		CredentialRef: d.CredentialRef,
+		Review: &ReviewContext{
+			PR:         ReviewPR{Repo: task.PRRepo, Number: task.PRNumber, Head: head, Base: base},
+			Diff:       diff,
+			GateResult: task.DoneGate, // config snapshot + last_result: the gate's evidence
+		},
+	})
+	if err != nil {
+		return d.failTask(task.ID, "reviewer envelope assembly failed: "+err.Error(), Cause{Kind: CauseSandbox})
+	}
+	envJSON, err := json.Marshal(env)
+	if err != nil {
+		return d.failTask(task.ID, "reviewer envelope marshal failed: "+err.Error(), Cause{Kind: CauseSandbox})
+	}
+	spec := sandbox.RunSpec{
+		TaskID:       task.ID + "-review",
+		Envelope:     envJSON,
+		AgentImage:   d.AgentImage,
+		AgentCommand: d.AgentCommand,
+		CloneURL:     env.Git.CloneURL,
+		BaseBranch:   d.BaseBranch,
+		WorkBranch:   "review/" + task.ID,
+		GateCommand:  "", // the reviewer's gate is the Gitea review webhook, not a job gate
+		CredSecret:   d.CredentialRef,
+	}
+	if route.TimeoutMinutes > 0 {
+		spec.Deadline = time.Duration(route.TimeoutMinutes) * time.Minute
+	}
+	ref, err := d.Sandbox.Allocate(ctx, spec)
+	if err != nil {
+		return d.failTask(task.ID, "reviewer sandbox allocation failed: "+err.Error(), Cause{Kind: CauseSandbox})
+	}
+	_, waitErr := d.Sandbox.Wait(ctx, &ref)
+	defer func() {
+		if derr := d.Sandbox.Destroy(context.WithoutCancel(ctx), ref); derr != nil {
+			log.Printf("cortex: SANDBOX LEAK %s: %v", ref.String(), derr)
+		}
+	}()
+	if waitErr != nil {
+		return d.failTask(task.ID, "reviewer sandbox wait failed: "+waitErr.Error(), Cause{Kind: CauseSandbox})
+	}
+	// Observe the verdict as a Gitea fact. Its consequences (approve/revise)
+	// arrive via the pr.review_submitted webhook routes — not from here.
+	if d.ReviewLookup != nil {
+		state, reviewer, found, lerr := d.ReviewLookup(ctx, task.PRRepo, task.PRNumber)
+		if lerr != nil {
+			return d.failTask(task.ID, "review lookup failed: "+lerr.Error(), Cause{Kind: CauseSandbox})
+		}
+		if !found {
+			return d.failTask(task.ID, "no_review: reviewer exited without an observable Gitea review",
+				Cause{Kind: CauseGate, Detail: map[string]any{"pr_number": task.PRNumber}})
+		}
+		if err := d.Store.SetReviewer(task.ID, reviewer); err != nil {
+			log.Printf("cortex: ERROR persisting reviewer on %s: %v", task.ID, err)
+		}
+		log.Printf("cortex: review observed on %s#%d: %s by %s", task.PRRepo, task.PRNumber, state, reviewer)
+	}
+	return nil
 }

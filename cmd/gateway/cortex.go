@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -49,6 +50,8 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 		Store:         g.cortex.Store(),
 		Sandbox:       sandbox.NewK8sSandbox(client, opts.SandboxNS),
 		PRLookup:      g.cortexPRLookup,
+		DiffFetch:     g.cortexDiffFetch,
+		ReviewLookup:  g.cortexReviewLookup,
 		Events:        func(ev cortex.Event) { _, _ = g.cortex.HandleEvent(ev) },
 		AgentImage:    opts.AgentImage,
 		AgentCommand:  []string{"/agent", "-one-shot", "-envelope", "/task/envelope.json", "-workspace", "/work/repo"},
@@ -62,6 +65,15 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 			defer cancel()
 			if err := d.DispatchTask(ctx, g.cortex.Config(), route, taskID); err != nil {
 				log.Printf("cortex: ERROR dispatching %s: %v", taskID, err)
+			}
+		}()
+	}
+	g.cortex.OnReviewerDispatch = func(route *cortex.Route, ev cortex.Event) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+			if err := d.DispatchReviewer(ctx, g.cortex.Config(), route, ev); err != nil {
+				log.Printf("cortex: ERROR reviewer dispatch %s: %v", ev.TaskID, err)
 			}
 		}()
 	}
@@ -162,6 +174,121 @@ func (g *gateway) handleCortexIssuesEvent(body []byte) {
 			log.Printf("cortex: ERROR handling %s: %v", ev.Type, err)
 		}
 	}
+}
+
+// giteaReviewPayload is the subset of Gitea's pull_request_review webhook.
+type giteaReviewPayload struct {
+	Action string `json:"action"`
+	Review struct {
+		Type    string `json:"type"`
+		Content string `json:"content"`
+	} `json:"review"`
+	PullRequest struct {
+		Number int64 `json:"number"`
+	} `json:"pull_request"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+	Sender struct {
+		Login string `json:"login"`
+	} `json:"sender"`
+}
+
+// handleCortexReviewEvent maps a Gitea review webhook to the mechanical
+// pr.review_submitted event. Review content rides as data only.
+func (g *gateway) handleCortexReviewEvent(body []byte) {
+	if g.cortex == nil {
+		return
+	}
+	var p giteaReviewPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		log.Printf("cortex: review webhook: bad payload: %v", err)
+		return
+	}
+	state := ""
+	switch {
+	case strings.Contains(p.Review.Type, "approved"):
+		state = "APPROVED"
+	case strings.Contains(p.Review.Type, "rejected"), strings.Contains(p.Review.Type, "request_changes"):
+		state = "REQUEST_CHANGES"
+	default:
+		return // comment-only reviews are not verdicts
+	}
+	ev := cortex.Event{
+		Type:        cortex.EventPRReviewSubmitted,
+		Repo:        p.Repository.FullName,
+		PRNumber:    p.PullRequest.Number,
+		ReviewState: state,
+		ReviewBody:  p.Review.Content,
+		Actor:       p.Sender.Login,
+	}
+	if _, err := g.cortex.HandleEvent(ev); err != nil {
+		log.Printf("cortex: ERROR handling %s: %v", ev.Type, err)
+	}
+}
+
+// handleCortexPRMergedEvent feeds pr.merged into Cortex (validate-on-merge).
+func (g *gateway) handleCortexPRMergedEvent(repo string, prNumber int64, actor string) {
+	if g.cortex == nil {
+		return
+	}
+	ev := cortex.Event{Type: cortex.EventPRMerged, Repo: repo, PRNumber: prNumber, Actor: actor}
+	if _, err := g.cortex.HandleEvent(ev); err != nil {
+		log.Printf("cortex: ERROR handling %s: %v", ev.Type, err)
+	}
+}
+
+// cortexDiffFetch retrieves the PR's unified diff and head/base refs.
+func (g *gateway) cortexDiffFetch(ctx context.Context, repo string, prNumber int64) (string, string, string, error) {
+	var pr struct {
+		Head struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	status, _, err := giteaGetJSONWithStatus(http.DefaultClient, g.giteaURL, g.giteaToken,
+		fmt.Sprintf("/api/v1/repos/%s/pulls/%d", repo, prNumber), &pr)
+	if err != nil || status != http.StatusOK {
+		return "", "", "", fmt.Errorf("gitea pr %d: status %d err %v", prNumber, status, err)
+	}
+	resp, err := giteaRequest(http.DefaultClient, http.MethodGet, g.giteaURL, g.giteaToken,
+		fmt.Sprintf("/api/v1/repos/%s/pulls/%d.diff", repo, prNumber), nil)
+	if err != nil {
+		return "", "", "", err
+	}
+	defer resp.Body.Close()
+	diff, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", "", "", err
+	}
+	return string(diff), pr.Head.Ref, pr.Base.Ref, nil
+}
+
+// cortexReviewLookup observes the latest review verdict on a PR.
+func (g *gateway) cortexReviewLookup(ctx context.Context, repo string, prNumber int64) (string, string, bool, error) {
+	var reviews []struct {
+		State string `json:"state"`
+		User  struct {
+			Login string `json:"login"`
+		} `json:"user"`
+	}
+	status, _, err := giteaGetJSONWithStatus(http.DefaultClient, g.giteaURL, g.giteaToken,
+		fmt.Sprintf("/api/v1/repos/%s/pulls/%d/reviews", repo, prNumber), &reviews)
+	if err != nil {
+		return "", "", false, err
+	}
+	if status != http.StatusOK {
+		return "", "", false, fmt.Errorf("gitea reviews: status %d", status)
+	}
+	for i := len(reviews) - 1; i >= 0; i-- {
+		switch reviews[i].State {
+		case "APPROVED", "REQUEST_CHANGES":
+			return reviews[i].State, reviews[i].User.Login, true, nil
+		}
+	}
+	return "", "", false, nil
 }
 
 // registerCortexRoutes wires the v2 read surface (observability contract §2;

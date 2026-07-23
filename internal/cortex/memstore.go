@@ -1,6 +1,7 @@
 package cortex
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -102,6 +103,82 @@ func (m *MemStore) ListTasks(f TaskFilter) ([]TaskRecord, error) {
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+func (m *MemStore) SetPR(taskID, prRepo string, prNumber int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("cortex memstore: task %s: not found", taskID)
+	}
+	t.PRRepo, t.PRNumber = prRepo, prNumber
+	t.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemStore) SetGateResult(taskID string, lastResult []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("cortex memstore: task %s: not found", taskID)
+	}
+	var gate map[string]json.RawMessage
+	if err := json.Unmarshal(t.DoneGate, &gate); err != nil || gate == nil {
+		gate = map[string]json.RawMessage{}
+	}
+	gate["last_result"] = json.RawMessage(lastResult)
+	merged, err := json.Marshal(gate)
+	if err != nil {
+		return err
+	}
+	t.DoneGate = merged
+	t.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemStore) SetReviewer(taskID, reviewer string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("cortex memstore: task %s: not found", taskID)
+	}
+	t.Reviewer = reviewer
+	t.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemStore) PrepareRetry(taskID string, failureContext []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("cortex memstore: task %s: not found", taskID)
+	}
+	t.Attempt++
+	t.FailureContext = json.RawMessage(failureContext)
+	t.UpdatedAt = time.Now()
+	return nil
+}
+
+func (m *MemStore) FindTaskByPR(prRepo string, prNumber int64) (*TaskRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *TaskRecord
+	for _, t := range m.tasks {
+		if t.PRRepo == prRepo && t.PRNumber == prNumber {
+			if best == nil || t.CreatedAt.After(best.CreatedAt) {
+				best = t
+			}
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("cortex memstore: task for PR %s#%d: not found", prRepo, prNumber)
+	}
+	cp := *best
+	return &cp, nil
 }
 
 func (m *MemStore) RecordDecision(d Decision) error {

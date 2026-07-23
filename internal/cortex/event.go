@@ -26,6 +26,8 @@ type Event struct {
 	// pr.review_submitted / pr.merged
 	PRNumber    int64  `json:"pr_number,omitempty"`
 	ReviewState string `json:"review_state,omitempty"` // APPROVED | REQUEST_CHANGES
+	ReviewBody  string `json:"review_body,omitempty"`  // data, never interpreted by Cortex
+	Actor       string `json:"actor,omitempty"`        // the Gitea login that caused the event
 
 	// task.gate_passed / task.gate_failed / operator.dispatch
 	RouteID string `json:"route_id,omitempty"` // originating route of the task

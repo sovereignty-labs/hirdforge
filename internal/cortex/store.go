@@ -23,6 +23,7 @@ type TaskRecord struct {
 	IssueTitle  string `json:"issue_title,omitempty"`
 
 	Agent      string `json:"agent,omitempty"`
+	Reviewer   string `json:"reviewer,omitempty"`
 	SandboxID  string `json:"sandbox_id,omitempty"`
 	WorkBranch string `json:"work_branch,omitempty"`
 	PRRepo     string `json:"pr_repo,omitempty"`
@@ -67,6 +68,14 @@ type Store interface {
 	Transition(taskID, to, reason string, cause Cause) error
 	GetTask(id string) (*TaskRecord, []TransitionRecord, error)
 	ListTasks(f TaskFilter) ([]TaskRecord, error)
+	// Non-status mutators (status changes go through Transition ONLY).
+	SetPR(taskID, prRepo string, prNumber int64) error
+	SetGateResult(taskID string, lastResult []byte) error
+	SetReviewer(taskID, reviewer string) error
+	// PrepareRetry bumps attempt and stores the failure context the next
+	// dispatch envelope will carry (D-LESSONS #2). Does not change status.
+	PrepareRetry(taskID string, failureContext []byte) error
+	FindTaskByPR(prRepo string, prNumber int64) (*TaskRecord, error)
 	RecordDecision(d Decision) error
 	ListDecisions(limit int) ([]Decision, error)
 }
@@ -102,6 +111,7 @@ func InitPGStore(dbURL string) (*PGStore, error) {
 			issue_number   BIGINT,
 			issue_title    TEXT,
 			agent          TEXT,
+			reviewer       TEXT,
 			sandbox_id     TEXT,
 			work_branch    TEXT,
 			pr_repo        TEXT,
@@ -114,7 +124,9 @@ func InitPGStore(dbURL string) (*PGStore, error) {
 			created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`ALTER TABLE cortex_tasks ADD COLUMN IF NOT EXISTS reviewer TEXT`,
 		`CREATE INDEX IF NOT EXISTS idx_cortex_tasks_status ON cortex_tasks(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_cortex_tasks_pr ON cortex_tasks(pr_repo, pr_number)`,
 		`CREATE INDEX IF NOT EXISTS idx_cortex_tasks_issue ON cortex_tasks(issue_repo, issue_number)`,
 		`CREATE TABLE IF NOT EXISTS cortex_transitions (
 			id          BIGSERIAL PRIMARY KEY,
@@ -215,13 +227,13 @@ func (s *PGStore) GetTask(id string) (*TaskRecord, []TransitionRecord, error) {
 	var bundleJSON, doneGate []byte
 	var failureCtx, diagnostics sql.NullString
 	var issueNumber, prNumber sql.NullInt64
-	var agent, sandboxID, workBranch, prRepo, issueTitle sql.NullString
+	var agent, reviewer, sandboxID, workBranch, prRepo, issueTitle sql.NullString
 	var timeoutAt sql.NullTime
 	err := s.db.QueryRow(`SELECT id, route_id, status, attempt, issue_repo, issue_number, issue_title,
-		agent, sandbox_id, work_branch, pr_repo, pr_number, bundle, done_gate, failure_context, diagnostics,
+		agent, reviewer, sandbox_id, work_branch, pr_repo, pr_number, bundle, done_gate, failure_context, diagnostics,
 		timeout_at, created_at, updated_at FROM cortex_tasks WHERE id = $1`, id).Scan(
 		&t.ID, &t.RouteID, &t.Status, &t.Attempt, &t.IssueRepo, &issueNumber, &issueTitle,
-		&agent, &sandboxID, &workBranch, &prRepo, &prNumber, &bundleJSON, &doneGate,
+		&agent, &reviewer, &sandboxID, &workBranch, &prRepo, &prNumber, &bundleJSON, &doneGate,
 		&failureCtx, &diagnostics, &timeoutAt, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return nil, nil, err
@@ -229,6 +241,7 @@ func (s *PGStore) GetTask(id string) (*TaskRecord, []TransitionRecord, error) {
 	t.IssueNumber = issueNumber.Int64
 	t.IssueTitle = issueTitle.String
 	t.Agent = agent.String
+	t.Reviewer = reviewer.String
 	t.SandboxID = sandboxID.String
 	t.WorkBranch = workBranch.String
 	t.PRRepo = prRepo.String
@@ -347,6 +360,47 @@ func (s *PGStore) ListDecisions(limit int) ([]Decision, error) {
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+func (s *PGStore) SetPR(taskID, prRepo string, prNumber int64) error {
+	return s.execOne(`UPDATE cortex_tasks SET pr_repo=$1, pr_number=$2, updated_at=NOW() WHERE id=$3`,
+		prRepo, prNumber, taskID)
+}
+
+func (s *PGStore) SetGateResult(taskID string, lastResult []byte) error {
+	return s.execOne(`UPDATE cortex_tasks SET done_gate = jsonb_set(done_gate, '{last_result}', $1::jsonb), updated_at=NOW() WHERE id=$2`,
+		lastResult, taskID)
+}
+
+func (s *PGStore) SetReviewer(taskID, reviewer string) error {
+	return s.execOne(`UPDATE cortex_tasks SET reviewer=$1, updated_at=NOW() WHERE id=$2`, reviewer, taskID)
+}
+
+func (s *PGStore) PrepareRetry(taskID string, failureContext []byte) error {
+	return s.execOne(`UPDATE cortex_tasks SET attempt = attempt + 1, failure_context = $1::jsonb, updated_at=NOW() WHERE id=$2`,
+		failureContext, taskID)
+}
+
+func (s *PGStore) FindTaskByPR(prRepo string, prNumber int64) (*TaskRecord, error) {
+	var id string
+	err := s.db.QueryRow(`SELECT id FROM cortex_tasks WHERE pr_repo=$1 AND pr_number=$2 ORDER BY created_at DESC LIMIT 1`,
+		prRepo, prNumber).Scan(&id)
+	if err != nil {
+		return nil, fmt.Errorf("cortex store: task for PR %s#%d: %w", prRepo, prNumber, err)
+	}
+	t, _, err := s.GetTask(id)
+	return t, err
+}
+
+func (s *PGStore) execOne(q string, args ...any) error {
+	res, err := s.db.Exec(q, args...)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("cortex store: no task matched update")
+	}
+	return nil
 }
 
 func nullableInt64(v int64) any {
