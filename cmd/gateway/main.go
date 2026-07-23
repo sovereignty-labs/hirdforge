@@ -1491,6 +1491,11 @@ func main() {
 	seidrURLFlag := flag.String("seidr-url", "http://seidr.asgard.svc:8082", "Seidr memory service URL")
 	a2aDBURL := flag.String("a2a-db-url", "", "PostgreSQL URL for A2A task store")
 	cortexConfigFlag := flag.String("cortex-config", "", "path to cortex.yaml; empty disables the v2 Cortex module")
+	cortexAgentImage := flag.String("cortex-agent-image", "", "agent image for sandbox Jobs; empty disables the dispatcher")
+	cortexSandboxNS := flag.String("cortex-sandbox-ns", "sandbox", "k8s namespace for sandbox Jobs")
+	cortexCredSecret := flag.String("cortex-cred-secret", "sandbox-git-cred", "k8s secret with sandbox git credentials")
+	cortexCloneBase := flag.String("cortex-clone-base", "https://git.hirdforge.com", "base URL for sandbox clone URLs")
+	cortexBaseBranch := flag.String("cortex-base-branch", "main", "base branch sandbox tasks branch from")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
@@ -1560,6 +1565,13 @@ func main() {
 		}
 		gw.cortex = cortex.New(cfg, store)
 		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
+		gw.initCortexDispatcher(cortexDispatchOptions{
+			AgentImage: strings.TrimSpace(*cortexAgentImage),
+			SandboxNS:  strings.TrimSpace(*cortexSandboxNS),
+			CredSecret: strings.TrimSpace(*cortexCredSecret),
+			CloneBase:  strings.TrimSpace(*cortexCloneBase),
+			BaseBranch: strings.TrimSpace(*cortexBaseBranch),
+		})
 	} else {
 		log.Printf("cortex: disabled (no --cortex-config)")
 	}

@@ -6,14 +6,92 @@ package main
 // entirely disabled and v1 behavior is untouched.
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"git.hirdforge.com/kit/hirdforge/internal/cortex"
+	"git.hirdforge.com/kit/hirdforge/internal/sandbox"
 )
+
+// cortexDispatchOptions carries the gateway flags for the dispatcher.
+type cortexDispatchOptions struct {
+	AgentImage string
+	SandboxNS  string
+	CredSecret string
+	CloneBase  string
+	BaseBranch string
+}
+
+// initCortexDispatcher wires the P1.3 dispatcher: sandbox Jobs, Gitea PR
+// observation, and the gate-event feedback loop into Cortex.HandleEvent.
+// Outside a cluster the dispatcher cannot run; that is a LOUD log line and
+// tasks visibly stay queued — never a silent degrade.
+func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
+	if g.cortex == nil {
+		return
+	}
+	if opts.AgentImage == "" {
+		log.Printf("cortex: DISPATCHER DISABLED — no --cortex-agent-image; queued tasks will not dispatch")
+		return
+	}
+	client, err := sandbox.InClusterClient()
+	if err != nil {
+		log.Printf("cortex: DISPATCHER DISABLED — %v; queued tasks will not dispatch", err)
+		return
+	}
+	d := &cortex.Dispatcher{
+		Store:         g.cortex.Store(),
+		Sandbox:       sandbox.NewK8sSandbox(client, opts.SandboxNS),
+		PRLookup:      g.cortexPRLookup,
+		Events:        func(ev cortex.Event) { _, _ = g.cortex.HandleEvent(ev) },
+		AgentImage:    opts.AgentImage,
+		AgentCommand:  []string{"/agent", "-one-shot", "-envelope", "/task/envelope.json", "-workspace", "/work/repo"},
+		CloneURLBase:  strings.TrimSuffix(opts.CloneBase, "/"),
+		BaseBranch:    opts.BaseBranch,
+		CredentialRef: opts.CredSecret,
+	}
+	g.cortex.OnTaskQueued = func(route *cortex.Route, taskID string) {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+			if err := d.DispatchTask(ctx, g.cortex.Config(), route, taskID); err != nil {
+				log.Printf("cortex: ERROR dispatching %s: %v", taskID, err)
+			}
+		}()
+	}
+	log.Printf("cortex: dispatcher enabled (ns=%s image=%s)", opts.SandboxNS, opts.AgentImage)
+}
+
+// cortexPRLookup observes whether an open PR exists for a head branch — the
+// collect step's Gitea observation (never agent-reported).
+func (g *gateway) cortexPRLookup(ctx context.Context, repo, headBranch string) (int64, bool, error) {
+	var prs []struct {
+		Number int64 `json:"number"`
+		Head   struct {
+			Ref string `json:"ref"`
+		} `json:"head"`
+	}
+	path := fmt.Sprintf("/api/v1/repos/%s/pulls?state=open&limit=50", repo)
+	status, _, err := giteaGetJSONWithStatus(http.DefaultClient, g.giteaURL, g.giteaToken, path, &prs)
+	if err != nil {
+		return 0, false, err
+	}
+	if status != http.StatusOK {
+		return 0, false, fmt.Errorf("gitea pulls: status %d", status)
+	}
+	for _, pr := range prs {
+		if pr.Head.Ref == headBranch {
+			return pr.Number, true, nil
+		}
+	}
+	return 0, false, nil
+}
 
 // giteaIssuesPayload is the subset of Gitea's "issues" webhook payload Cortex
 // consumes. The fired label rides in Label; the issue's full label set rides
