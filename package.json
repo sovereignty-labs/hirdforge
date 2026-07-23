@@ -1,5 +1,5 @@
 {
-  "name": "project_valhalla-ui",
+  "name": "hirdforge-ui",
   "private": true,
   "scripts": {
     "build": "node scripts/build-gateway-ui.mjs"

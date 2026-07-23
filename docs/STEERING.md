@@ -8,8 +8,9 @@ with the Sovereign.
 ## Accuracy note — what "ready" means (don't skip)
 The **v2 plan is ready; the v2 code is not.** The repo holds two things: **v1/Workbench**
 (built, ~11/12 UI phases, deployed-ish on Asgard) and **v2** (this PRD + specs, landed as
-docs, ~zero code). Concretely: module path is still `kitporath/project_valhalla` (D-BRAND
-Phase 0 not done), and `internal/workbench/cortex.go` is the *Workbench* cortex that D-PORT
+docs, ~zero code). Concretely: the module path was still `kitporath/project_valhalla`
+until the Phase-0 rebrand landed (2026-07-23, now `git.hirdforge.com/kit/hirdforge`),
+and `internal/workbench/cortex.go` is the *Workbench* cortex that D-PORT
 says to **replace**, not the v2 deterministic Cortex. So you are starting the **Phase 1
 walking skeleton**, reusing v1's agent loop / lockbox / seidr / gateway shell where the PRD
 allows — not "finishing" a nearly-done thing. Report real state; never inherit a stale
@@ -59,7 +60,7 @@ show real evidence yet, it shows *pending*, never a green checkmark it hasn't ea
 5. **The interlocutor seat = the deep lane (Nemotron‑3), decided.** It's the one seat where
    raw reasoning IQ is the whole job (it plans/scopes/dispatches; it does NOT coordinate —
    Cortex does that, deterministically). Keep instruction-following/speed concerns for the
-   fleet and reviewer seats, not here. Concierge (PRD Phase 4) is this seat's product name.
+   fleet and reviewer seats, not here. Steward (PRD Phase 4, renamed from Concierge at kickoff) is this seat's product name.
 
 6. **Settings is a first-class surface, not a config file.** Sectioned, real controls,
    searchable later: General · Models & lanes · Connections (forge/MCP/Lockbox) · Fleet ·

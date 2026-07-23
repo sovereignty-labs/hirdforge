@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
-	workspacepkg "github.com/kitporath/project_valhalla/pkg/workspace"
+	taskspkg "git.hirdforge.com/kit/hirdforge/pkg/tasks"
+	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
 func (g *gateway) applyWorkspaceEvent(agentName string, evt map[string]interface{}) {

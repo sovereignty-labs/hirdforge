@@ -3,7 +3,7 @@ package mcp
 import (
 	"strings"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 type MCPTool struct {

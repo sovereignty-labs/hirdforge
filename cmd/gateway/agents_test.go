@@ -190,8 +190,8 @@ func TestParseAgents(t *testing.T) {
 			wantLen: 1,
 			check: func(t *testing.T, agents map[string]*Agent) {
 				t.Helper()
-				if got := agents["val"].Warband; got != "default" {
-					t.Fatalf("warband mismatch: got %q, want %q", got, "default")
+				if got := agents["val"].Fleet; got != "default" {
+					t.Fatalf("fleet mismatch: got %q, want %q", got, "default")
 				}
 			},
 		},
@@ -202,7 +202,7 @@ func TestParseAgents(t *testing.T) {
 			wantLen: 2,
 		},
 		{
-			name:    "role and warband",
+			name:    "role and fleet",
 			input:   "val=http://val.valhalla.svc:8081:builder:alpha",
 			wantErr: false,
 			wantLen: 1,
@@ -212,20 +212,20 @@ func TestParseAgents(t *testing.T) {
 				if agent.Role != "builder" {
 					t.Fatalf("role mismatch: got %q, want %q", agent.Role, "builder")
 				}
-				if agent.Warband != "alpha" {
-					t.Fatalf("warband mismatch: got %q, want %q", agent.Warband, "alpha")
+				if agent.Fleet != "alpha" {
+					t.Fatalf("fleet mismatch: got %q, want %q", agent.Fleet, "alpha")
 				}
 			},
 		},
 		{
-			name:    "custom default warband",
+			name:    "custom default fleet",
 			input:   "val=http://val.valhalla.svc:8081",
 			wantErr: false,
 			wantLen: 1,
 			check: func(t *testing.T, agents map[string]*Agent) {
 				t.Helper()
-				if got := agents["val"].Warband; got != "warband-x" {
-					t.Fatalf("warband mismatch: got %q, want %q", got, "warband-x")
+				if got := agents["val"].Fleet; got != "warband-x" {
+					t.Fatalf("fleet mismatch: got %q, want %q", got, "warband-x")
 				}
 			},
 		},
@@ -248,11 +248,11 @@ func TestParseAgents(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defaultWarband := "default"
-			if tt.name == "custom default warband" {
-				defaultWarband = "warband-x"
+			defaultFleet := "default"
+			if tt.name == "custom default fleet" {
+				defaultFleet = "warband-x"
 			}
-			agents, order, err := parseAgents(tt.input, defaultWarband)
+			agents, order, err := parseAgents(tt.input, defaultFleet)
 
 			if tt.wantErr {
 				if err == nil {

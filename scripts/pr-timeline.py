@@ -227,7 +227,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--repos",
-        default="gitea_admin/project_valhalla,kit/valhalla-infra,kit/hirdforge-personas",
+        default="kit/hirdforge,kit/hirdforge,kit/hirdforge-personas",
         help="Comma-separated list of owner/repo names",
     )
     parser.add_argument(

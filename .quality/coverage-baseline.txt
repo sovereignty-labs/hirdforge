@@ -2,11 +2,11 @@
 # Regenerate with: scripts/coverage-ratchet.sh generate
 # Ratchet enforces current >= baseline - 0.5pp by default (see script header).
 # format: <import-path|total> <coverage-percent>
-github.com/kitporath/project_valhalla/cmd/agent 20.0
-github.com/kitporath/project_valhalla/cmd/gateway 16.1
-github.com/kitporath/project_valhalla/cmd/lockbox 3.2
-github.com/kitporath/project_valhalla/pkg/tasklife 89.4
-github.com/kitporath/project_valhalla/pkg/tasks 70.3
-github.com/kitporath/project_valhalla/pkg/tools 19.1
-github.com/kitporath/project_valhalla/pkg/workspace 79.4
+git.hirdforge.com/kit/hirdforge/cmd/agent 20.0
+git.hirdforge.com/kit/hirdforge/cmd/gateway 16.1
+git.hirdforge.com/kit/hirdforge/cmd/lockbox 3.2
+git.hirdforge.com/kit/hirdforge/pkg/tasklife 89.4
+git.hirdforge.com/kit/hirdforge/pkg/tasks 70.3
+git.hirdforge.com/kit/hirdforge/pkg/tools 19.1
+git.hirdforge.com/kit/hirdforge/pkg/workspace 79.4
 total 19.1

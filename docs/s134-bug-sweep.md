@@ -5,7 +5,7 @@
 Hirdforge is a Kubernetes-native multi-agent AI orchestration platform. Agents run as pods in the `asgard` namespace. They communicate via gRPC (`:8082`) and HTTP (`:8081`). A central **gateway** pod (`cmd/gateway/`) serves the UI (`cmd/gateway/index.html`, ~1,850-line single-file React SPA), handles event ingestion from agents, manages WebSocket broadcast to the UI, and coordinates the A2A task store.
 
 **Source repo:** `kit/hirdforge` on `git.hirdforge.com`
-**Go module path:** `github.com/kitporath/project_valhalla`
+**Go module path:** `git.hirdforge.com/kit/hirdforge`
 
 ### Architecture Overview
 

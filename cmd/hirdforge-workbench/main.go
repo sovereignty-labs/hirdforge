@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kitporath/project_valhalla/internal/workbench"
+	"git.hirdforge.com/kit/hirdforge/internal/workbench"
 )
 
 const (

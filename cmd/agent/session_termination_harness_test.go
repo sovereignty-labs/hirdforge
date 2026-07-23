@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 // This is the first full session-loop test: it drives the real

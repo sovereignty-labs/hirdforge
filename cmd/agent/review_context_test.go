@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 func TestDirectPRToolContext(t *testing.T) {

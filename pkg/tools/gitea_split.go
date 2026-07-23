@@ -21,7 +21,7 @@ func (t *createIssueTool) Name() string                     { return "create-iss
 func (t *createIssueTool) Description() string              { return "Create a new issue in a Gitea repository." }
 func (t *createIssueTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":   "Repository name (e.g. hirdforge) or owner/repo",
 		"title":  "Issue title",
 		"body":   "Issue body text",
 		"labels": "Comma-separated label names (optional)",
@@ -70,7 +70,7 @@ func (t *createPRTool) Name() string                  { return "create-pr" }
 func (t *createPRTool) Description() string           { return "Create a pull request in a Gitea repository." }
 func (t *createPRTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":  "Repository name (e.g. hirdforge) or owner/repo",
 		"head":  "Source branch name",
 		"base":  "Target branch (defaults to main)",
 		"title": "PR title",
@@ -134,7 +134,7 @@ func (t *listIssuesTool) Description() string {
 }
 func (t *listIssuesTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":   "Repository name (e.g. hirdforge) or owner/repo",
 		"state":  "Issue state: open, closed, or all (default: open)",
 		"labels": "Comma-separated label names to filter by (optional)",
 	}
@@ -179,7 +179,7 @@ func (t *closeIssueTool) Name() string                    { return "close-issue"
 func (t *closeIssueTool) Description() string             { return "Close an issue in a Gitea repository." }
 func (t *closeIssueTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":  "Repository name (e.g. hirdforge) or owner/repo",
 		"index": "Issue number",
 	}
 }
@@ -213,7 +213,7 @@ func (t *commentTool) Description() string {
 }
 func (t *commentTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":  "Repository name (e.g. hirdforge) or owner/repo",
 		"index": "Issue or PR number",
 		"body":  "Comment text",
 	}
@@ -258,7 +258,7 @@ func (t *createReviewTool) Description() string {
 }
 func (t *createReviewTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":  "Repository name (e.g. hirdforge) or owner/repo",
 		"index": "PR number",
 		"state": "Review state: APPROVED or REQUEST_CHANGES",
 		"body":  "Review text",
@@ -353,7 +353,7 @@ func (t *mergePRTool) Name() string                 { return "merge-pr" }
 func (t *mergePRTool) Description() string          { return "Merge a pull request in a Gitea repository." }
 func (t *mergePRTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":  "Repository name (e.g. hirdforge) or owner/repo",
 		"index": "PR number",
 	}
 }
@@ -385,7 +385,7 @@ func (t *listPRFilesTool) Name() string                     { return "list-pr-fi
 func (t *listPRFilesTool) Description() string              { return "List the files changed in a pull request." }
 func (t *listPRFilesTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":  "Repository name (e.g. hirdforge) or owner/repo",
 		"index": "PR number",
 	}
 }
@@ -426,7 +426,7 @@ func (t *updateLabelsTool) Description() string {
 }
 func (t *updateLabelsTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":   "Repository name (e.g. hirdforge) or owner/repo",
 		"index":  "Issue number",
 		"labels": "Comma-separated label names (replaces all existing labels)",
 	}
@@ -467,7 +467,7 @@ func (t *getIssueTool) Description() string {
 func (t *getIssueTool) Parameters() map[string]string {
 	return map[string]string{
 		"owner": "Repository owner (optional if repo is owner/repo format)",
-		"repo":  "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":  "Repository name (e.g. hirdforge) or owner/repo",
 		"index": "Issue number",
 	}
 }
@@ -533,7 +533,7 @@ func (t *listBranchesTool) Name() string                      { return "list-bra
 func (t *listBranchesTool) Description() string               { return "List all branches in a Gitea repository." }
 func (t *listBranchesTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo": "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo": "Repository name (e.g. hirdforge) or owner/repo",
 	}
 }
 func (t *listBranchesTool) Execute(args map[string]interface{}) ToolResult {

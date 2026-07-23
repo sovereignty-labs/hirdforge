@@ -1,4 +1,4 @@
-module github.com/kitporath/project_valhalla
+module git.hirdforge.com/kit/hirdforge
 
 go 1.25.9
 

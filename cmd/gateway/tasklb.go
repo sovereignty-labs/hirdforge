@@ -27,10 +27,10 @@ type bifrostResult struct {
 	Reason string
 }
 
-func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWarband string) bifrostResult {
+func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredFleet string) bifrostResult {
 	labelAgent := ""
 	tierName := ""
-	targetWarband := normalizeWarbandName(preferredWarband)
+	targetFleet := normalizeFleetName(preferredFleet)
 	for _, label := range taskLabels {
 		if strings.HasPrefix(label, "agent/") && labelAgent == "" {
 			labelAgent = strings.TrimPrefix(label, "agent/")
@@ -54,7 +54,7 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWar
 	all := g.snapshotAgents()
 	capable := make([]bifrostCandidate, 0, len(all))
 	idleCapable := make([]bifrostCandidate, 0, len(all))
-	sameWarbandIdle := make([]bifrostCandidate, 0, len(all))
+	sameFleetIdle := make([]bifrostCandidate, 0, len(all))
 	for _, agent := range all {
 		name := strings.TrimSpace(agent.Name)
 		if name == "" {
@@ -75,7 +75,7 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWar
 			Tools:   append([]string(nil), agent.Tools...),
 			Fitness: 0.5,
 		}
-		agentWarband := normalizeWarbandName(agent.Warband)
+		agentFleet := normalizeFleetName(agent.Fleet)
 		if !bifrostCapable(candidate.Tools, taskLabels, taskBody) {
 			log.Printf("bifrost: filtered incapable agent %s", name)
 			continue
@@ -84,9 +84,9 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWar
 		if !candidate.Active {
 			idleCapable = append(idleCapable, candidate)
 		}
-		if agentWarband == targetWarband {
+		if agentFleet == targetFleet {
 			if !candidate.Active {
-				sameWarbandIdle = append(sameWarbandIdle, candidate)
+				sameFleetIdle = append(sameFleetIdle, candidate)
 			}
 		}
 	}
@@ -96,8 +96,8 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWar
 		return bifrostResult{}
 	}
 	chosenPool := idleCapable
-	if len(sameWarbandIdle) > 0 {
-		chosenPool = sameWarbandIdle
+	if len(sameFleetIdle) > 0 {
+		chosenPool = sameFleetIdle
 	}
 	if len(chosenPool) == 0 {
 		if labelAgent != "" {
@@ -137,8 +137,8 @@ func (g *gateway) selectAgent(taskLabels []string, taskBody string, preferredWar
 	}
 }
 
-func (g *gateway) selectAgentForTask(task webhookIssue, preferredWarband string) (string, string) {
-	result := g.selectAgent(task.Labels, task.Body, preferredWarband)
+func (g *gateway) selectAgentForTask(task webhookIssue, preferredFleet string) (string, string) {
+	result := g.selectAgent(task.Labels, task.Body, preferredFleet)
 	if result.Agent != "" {
 		return result.Agent, result.Reason
 	}

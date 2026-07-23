@@ -4,14 +4,14 @@ import (
 	"sort"
 	"testing"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
-// TestConfigureToolRegistryWarriorProfile pins the exact tool set a builder
+// TestConfigureToolRegistryBuilderProfile pins the exact tool set a builder
 // receives. Regressions in registration gates (auto-register from --peers,
 // silent additions like plan, or the gitea suite leaking through create-pr)
 // are caught here.
-func TestConfigureToolRegistryWarriorProfile(t *testing.T) {
+func TestConfigureToolRegistryBuilderProfile(t *testing.T) {
 	reg := toolpkg.NewRegistry()
 	enabled := map[string]bool{
 		"read":        true,

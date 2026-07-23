@@ -16,8 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	taskspkg "git.hirdforge.com/kit/hirdforge/pkg/tasks"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 type reviewContextTracker struct {

@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	tasklifepkg "github.com/kitporath/project_valhalla/pkg/tasklife"
-	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
-	workspacepkg "github.com/kitporath/project_valhalla/pkg/workspace"
+	tasklifepkg "git.hirdforge.com/kit/hirdforge/pkg/tasklife"
+	taskspkg "git.hirdforge.com/kit/hirdforge/pkg/tasks"
+	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
 func newTaskID() string {

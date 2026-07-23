@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 // repeatProbeTool is the smallest possible registered tool: it has no external

@@ -27,9 +27,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	tasklifepkg "github.com/kitporath/project_valhalla/pkg/tasklife"
-	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	tasklifepkg "git.hirdforge.com/kit/hirdforge/pkg/tasklife"
+	taskspkg "git.hirdforge.com/kit/hirdforge/pkg/tasks"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 const dashboardHTML = `<!doctype html>

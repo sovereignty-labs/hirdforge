@@ -75,7 +75,7 @@ func (t *GitCloneTool) Description() string {
 
 func (t *GitCloneTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":   "Repository name (e.g. project_valhalla) or owner/repo",
+		"repo":   "Repository name (e.g. hirdforge) or owner/repo",
 		"branch": "Branch to checkout (optional, defaults to default branch)",
 	}
 }
@@ -649,7 +649,7 @@ func (t *GitCommitTool) Description() string {
 
 func (t *GitCommitTool) Parameters() map[string]string {
 	return map[string]string{
-		"repo":    "Repository directory name in workspace (e.g. project_valhalla)",
+		"repo":    "Repository directory name in workspace (e.g. hirdforge)",
 		"message": "Commit message",
 		"branch":  "Branch to create/push to (optional, pushes to current branch if omitted)",
 	}

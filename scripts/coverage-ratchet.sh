@@ -1,5 +1,5 @@
 #!/bin/sh
-# Go coverage baseline + non-regression ratchet for project_valhalla.
+# Go coverage baseline + non-regression ratchet for hirdforge.
 #
 # Phase 0 (testing-validation-autonomy spec) closeout: records a per-package
 # coverage baseline and enforces non-regression in CI.

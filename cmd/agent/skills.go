@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 func soulHasLearnedTool(soulContent, toolName string) bool {
@@ -195,7 +195,7 @@ func fetchIntuitiveContext(memoryURL, agentName, messageContent string) string {
 		query = query[:500]
 	}
 	agentResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": agentName, "limit": 3, "collections": []string{agentName, "warband_shared"}})
-	warbandResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": "warband", "n_results": 5})
+	fleetResults := querySeidr(ctx, memoryURL, map[string]interface{}{"query": query, "agent": "warband", "n_results": 5})
 	merged := append([]intuitiveResult{}, agentResults...)
 	seenPrefixes := make([]string, 0, len(agentResults))
 	for _, r := range agentResults {
@@ -203,7 +203,7 @@ func fetchIntuitiveContext(memoryURL, agentName, messageContent string) string {
 			seenPrefixes = append(seenPrefixes, prefix)
 		}
 	}
-	for _, r := range warbandResults {
+	for _, r := range fleetResults {
 		prefix := intuitiveContentPrefix(r.Content)
 		if prefix != "" {
 			duplicate := false

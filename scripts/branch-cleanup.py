@@ -20,7 +20,7 @@ def parse_args():
     )
     parser.add_argument(
         "--repos",
-        default="gitea_admin/project_valhalla,kit/valhalla-infra,kit/hirdforge-personas",
+        default="kit/hirdforge,kit/hirdforge,kit/hirdforge-personas",
         help="Comma-separated repo list (owner/name,...)",
     )
     parser.add_argument(

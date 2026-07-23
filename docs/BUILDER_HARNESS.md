@@ -28,7 +28,7 @@ growth is driven by our own telemetry. We do not port code.
 | **M2 — Coached error results** | Malformed calls / errors continue the loop with coaching (static + optional HEAT lessons through one seam) | **PARTIAL** | `skills.go` only; the tool-result coaching seam not confirmed |
 | **M3 — Edit replacer cascade** | Multi-strategy edit match (start at 3) + rescue telemetry; ambiguity fails with coaching, never guesses | **ABSENT** | no replacer/cascade code found |
 | **M4 — Context budgets & read discipline** | Read/exec budgets, line numbers, read-before-edit enforcement | **PARTIAL** | `tools.go`, `main.go` presence; depth unverified |
-| **M5 — Procedural prompt + model routing** | Soul → operating procedure; per-model-family prompt routing | **PARTIAL** | `model_template.go` (89 lines) present |
+| **M5 — Procedural prompt + model routing** | Persona (was Soul) → operating procedure; per-model-family prompt routing | **PARTIAL** | `model_template.go` (89 lines) present |
 | **M6 — Externalized plan (todo)** | Todo tool + re-anchoring | **ABSENT** | no todo tool |
 | **M7 — Auto-compaction** | Sliding window + summarization (partly obviated by M4/M6) | **ABSENT** | no agent-side compaction |
 
@@ -70,7 +70,7 @@ profile." This folds cleanly into the `cortex.yaml` bundle schema
   coaching; absorbed-fumble telemetry flowing).
 - The MoE question answered with per-model data from nightly runs.
 - One coaching seam, two sources (static + HEAT lessons).
-- Soul shrinkage: identity prose ≤ ~15 lines; the rest is procedure.
+- Persona shrinkage: identity prose ≤ ~15 lines; the rest is procedure.
 - No regression: existing agent tests stay green throughout (CI-enforced).
 
 See `docs/source/builder-harness-spec.md` for the full mechanism designs and

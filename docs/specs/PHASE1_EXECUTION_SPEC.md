@@ -11,10 +11,10 @@ The thinnest end-to-end vertical slice that proves the entire determinism spine
 coordination path — to a merged PR, fully observable and controllable.**
 
 ```
-KWS Gitea issue (labeled)
+git.hirdforge.com Gitea issue (labeled)
   → webhook → Asgard gateway → Cortex matches a route
   → dispatch ONE agent into a reset-to-clean sandbox
-  → agent builds, opens a PR on KWS Gitea
+  → agent builds, opens a PR on git.hirdforge.com Gitea
   → MECHANICAL done-gate (test-command exit code in the sandbox)
   → reviewer route: ONE reviewer agent judges the PR DIFF
   → Lockbox approval authorizes → merge → validated → issue closed
@@ -32,7 +32,7 @@ its own codebase acceptable.
 
 ## Phase 0 prerequisite (do first, no behavior change)
 
-Rebrand per D-BRAND (module path → `git.example.internal/hirdforge/hirdforge`;
+Rebrand per D-BRAND (module path → `git.hirdforge.com/kit/hirdforge`;
 warrior→agent, warband→fleet, chieftain removed; confirm O-BRAND-NAMES), import
 source specs (done), confirm `go build ./...` + existing tests green. Ships as its
 own PR.
@@ -61,7 +61,7 @@ approval, *then* build. These are the spine's contracts:
 ## Tasks (ordered)
 
 **P1.1 — Cortex core (routing + lifecycle).** A Cortex module in the gateway:
-ingest a KWS-Gitea webhook (`issue.labeled`), match the one route, record a
+ingest a git.hirdforge.com Gitea webhook (`issue.labeled`), match the one route, record a
 `queued` task in Postgres. Reuse `webhook.go` HMAC patterns (O-WEBHOOK-SECRET).
 No LLM. *Acceptance: a labeled issue creates a `queued` task with a logged routing
 decision; an unmatched issue logs a no-match and creates nothing.*
@@ -78,9 +78,9 @@ P1.0 dispatch envelope. Reuse the existing `/api/v1/dispatch` mechanism. Status
 one agent into a clean sandbox; the transition and its reason are observable.*
 
 **P1.4 — Agent build → PR.** The agent runs its existing (M1-instrumented) tool
-loop in the sandbox, produces a branch, opens a PR on KWS Gitea, reports the PR
+loop in the sandbox, produces a branch, opens a PR on git.hirdforge.com Gitea, reports the PR
 ref back. Status → `review` only *after* the gate (P1.5). *Acceptance: the agent
-opens a real PR on KWS Gitea from sandbox work; the PR ref lands on the task.*
+opens a real PR on git.hirdforge.com Gitea from sandbox work; the PR ref lands on the task.*
 
 **P1.5 — Mechanical done-gate.** Evaluate the route's `done_gate: test-command` —
 run the repo's test command in the sandbox, trust the exit code. Green → advance;
@@ -126,7 +126,7 @@ down the sandbox and marks failed.*
 
 Skill/memory bundles beyond the one route (Phase 2), builder-harness M3/M6/M7
 (Phase 2/3), retry-on-failure *routing* policy beyond manual retry (Phase 3),
-multiple parallel agents (later), concierge (Phase 4), the pipeline UI (Phase 5 —
+multiple parallel agents (later), steward (Phase 4), the pipeline UI (Phase 5 —
 backend + contract first, D-UISEQ), the researcher role (Phase 6). The skeleton
 proves the plumbing; it does not do valuable work yet.
 

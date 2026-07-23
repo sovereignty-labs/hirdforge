@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	workspacepkg "github.com/kitporath/project_valhalla/pkg/workspace"
+	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
 var thinkTagRE = regexp.MustCompile(`(?s)<think>.*?</think>`)

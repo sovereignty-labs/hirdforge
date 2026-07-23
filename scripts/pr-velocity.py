@@ -185,7 +185,7 @@ def main(argv: List[str]) -> int:
     )
     parser.add_argument(
         "--repos",
-        default="gitea_admin/project_valhalla,kit/valhalla-infra,kit/hirdforge-personas",
+        default="kit/hirdforge,kit/hirdforge,kit/hirdforge-personas",
         help="Comma-separated list of owner/repo names",
     )
     parser.add_argument(

@@ -39,7 +39,7 @@
 - **Dev machine**: workstation (203.0.113.30), RTX 3090
 - **IDE**: VS Code on workstation
 - **Go**: 1.22.5
-- **Repo**: github.com/kitporath/project_valhalla
+- **Repo**: git.hirdforge.com/kit/hirdforge
 - **Inference**: Ollama on localhost:11434, model qwen3:30b
 - **Codex**: Connected to repo, creates PRs merged to main
 - **Workflow**: Claude designs → Codex writes → Kit tests → Claude fixes
