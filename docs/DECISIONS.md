@@ -152,17 +152,24 @@ hirdforge-personas, `soul:` self-improvement PR titles) migrate when the persona
 loading is rebuilt — tracked in AUDIT_DELTA_V2, not renamed blind.
 
 **O-SANDBOX-CONTRACT — The sandbox lifecycle contract.** allocate → checkout →
-run → collect-PR → reset/destroy. Load-bearing (stop-and-ask #2). Draft as a
-standalone contract before Phase 1 dispatch is wired. *Owner: draft at Phase 1
-start, approve before building.*
+run → collect-PR → reset/destroy. Load-bearing (stop-and-ask #2).
+**DRAFTED 2026-07-23** — `docs/specs/contracts/SANDBOX_LIFECYCLE.md` (per-task
+k8s Job in a `hirdforge-sandbox` namespace). *Awaiting Kit's approval before
+building.*
 
 **O-ROUTING-SCHEMA — The `cortex.yaml` routing + dispatch envelope + done-gate
-schema.** The core new contract (stop-and-ask #2). Draft standalone, approve first.
-*Owner: draft at Phase 1 start.*
+schema.** The core new contract (stop-and-ask #2). **DRAFTED 2026-07-23** —
+`docs/specs/contracts/ROUTING_SCHEMA.md`, `DISPATCH_ENVELOPE.md`, and
+`DONE_GATE.md` (ordered first-match routes; structured envelope; gate runs the
+check itself, agent opinion is not an input; reviewer verdict = Gitea PR-review
+webhook, never parsed prose). *Awaiting Kit's approval before building.*
 
 **O-PERSISTENCE — The Postgres lifecycle-tracking schema.** Extends/replaces the
-existing A2A task store per the v2 spec's Task shape. Load-bearing. *Owner: draft
-at Phase 1 start.*
+existing A2A task store per the v2 spec's Task shape. Load-bearing.
+**DRAFTED 2026-07-23** — `docs/specs/contracts/PERSISTENCE.md` (`cortex_tasks` +
+`cortex_transitions` + `cortex_decisions` beside the untouched v1 A2A store;
+transition-with-reason enforced transactionally). *Awaiting Kit's approval
+before building.*
 
 **O-WEBHOOK-SECRET — Webhook auth from `git.hirdforge.com` Gitea → Asgard
 gateway.** HMAC validation reusing existing `webhook.go` patterns. Both ends now
