@@ -21,6 +21,9 @@ type Cortex struct {
 	OnTaskQueued func(route *Route, taskID string)
 	// OnReviewerDispatch runs the reviewer leg for a task already in review.
 	OnReviewerDispatch func(route *Route, ev Event)
+	// OnTaskAdvanced fires after an advance route moved a task (the gateway
+	// hooks Lockbox enqueueing on `approved` and issue-close on `validated`).
+	OnTaskAdvanced func(taskID, to string)
 
 	ring    []Decision
 	ringCap int
@@ -160,6 +163,9 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		}
 		d.TaskID = task.ID
 		d.Reason = fmt.Sprintf("%s -> task %s advanced to %s", reason, task.ID, route.To)
+		if c.OnTaskAdvanced != nil {
+			c.OnTaskAdvanced(task.ID, route.To)
+		}
 	}
 
 	c.recordDecision(d)

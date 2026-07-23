@@ -330,6 +330,12 @@ func main() {
 	state.upstreamMCPURL = strings.TrimSpace(*upstreamMCP)
 	state.googleUserEmail = strings.TrimSpace(*googleUserEmail)
 	state.services["mock"] = &MockService{}
+	if hf := newHirdforgeServiceFromEnv(); hf != nil {
+		state.services["hirdforge"] = hf
+		log.Printf("lockbox: hirdforge merge service enabled (gateway %s)", hf.GatewayURL)
+	} else {
+		log.Printf("lockbox: hirdforge merge service disabled (no HIRDFORGE_GATEWAY_URL)")
+	}
 
 	if strings.TrimSpace(*googleClientID) != "" || strings.TrimSpace(*googleClientSecret) != "" {
 		clients, err := setupGoogleClients(context.Background(), *googleClientID, *googleClientSecret, *googleTokenFile)

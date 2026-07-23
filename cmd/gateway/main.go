@@ -309,6 +309,7 @@ type gateway struct {
 	order             []string
 	a2aStore          *A2ATaskStore
 	cortex            *cortex.Cortex
+	lockboxURL        string
 	reposMu           sync.RWMutex
 	repos             []string
 	eventMu           sync.Mutex
@@ -1496,6 +1497,7 @@ func main() {
 	cortexCredSecret := flag.String("cortex-cred-secret", "sandbox-git-cred", "k8s secret with sandbox git credentials")
 	cortexCloneBase := flag.String("cortex-clone-base", "https://git.hirdforge.com", "base URL for sandbox clone URLs")
 	cortexBaseBranch := flag.String("cortex-base-branch", "main", "base branch sandbox tasks branch from")
+	cortexMergeSecret := flag.String("cortex-merge-secret", envOrDefault("CORTEX_MERGE_SECRET", ""), "shared secret for the Lockbox merge callback")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
@@ -1533,6 +1535,7 @@ func main() {
 		injections:          map[string][]InjectionMessage{},
 		pausedAgents:        map[string]bool{},
 		webhookSecret:       strings.TrimSpace(*webhookSecret),
+		lockboxURL:          strings.TrimSpace(*lockboxURL),
 		taskRepo:            strings.TrimSpace(*taskRepoFlag),
 		giteaURL:            strings.TrimSpace(*giteaURL),
 		giteaToken:          resolveGatewayGiteaToken(*giteaToken),
@@ -1564,6 +1567,7 @@ func main() {
 			die("cortex: store init failed", err)
 		}
 		gw.cortex = cortex.New(cfg, store)
+		gw.cortex.OnTaskAdvanced = gw.cortexOnTaskAdvanced
 		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
 		gw.initCortexDispatcher(cortexDispatchOptions{
 			AgentImage: strings.TrimSpace(*cortexAgentImage),
@@ -1658,6 +1662,7 @@ func main() {
 	registerGatewayMCP(mux, gw)
 	gw.registerWebhookHandlers(mux)
 	registerCortexRoutes(mux, gw)
+	registerCortexInternalRoutes(mux, gw, strings.TrimSpace(*cortexMergeSecret))
 	go func() {
 		time.Sleep(10 * time.Second)
 		gw.ensureGiteaWebhooks()
