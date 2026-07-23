@@ -104,6 +104,23 @@ func registerCortexControlRoutes(mux *http.ServeMux, g *gateway) {
 			_ = lresp.Body.Close()
 		}
 		log.Printf("cortex: operator dispatch -> issue %s#%d labeled %s", req.Repo, issue.Number, req.Label)
+		// Fire the routing event directly. Gitea does NOT emit an issue/label
+		// webhook for label changes made via the /labels API (only UI changes),
+		// so an operator dispatch must trigger Cortex itself rather than wait
+		// for a delivery that never comes. External label adds still arrive via
+		// the webhook; this is the manual entry point owning its own trigger.
+		ev := cortex.Event{
+			Type:        cortex.EventIssueLabeled,
+			Repo:        req.Repo,
+			Label:       req.Label,
+			IssueNumber: issue.Number,
+			IssueTitle:  req.Title,
+			IssueBody:   req.Body,
+			IssueLabels: []string{req.Label},
+		}
+		if _, err := g.cortex.HandleEvent(ev); err != nil {
+			log.Printf("cortex: operator dispatch HandleEvent error: %v", err)
+		}
 		writeJSON(w, http.StatusCreated, map[string]any{"repo": req.Repo, "issue": issue.Number, "label": req.Label})
 	})
 
