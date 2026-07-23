@@ -1,0 +1,26 @@
+# Lean agent image for v2 sandbox Jobs (SANDBOX_LIFECYCLE.md). Unlike
+# Dockerfile.agent (which bundles kubectl/helm/talosctl/crane/yq for the
+# sovereign infra agents — public downloads that the airgapped CI runner
+# cannot reach), the sandbox builder needs only: the agent binary, git, and
+# a Go toolchain for the test-command gate (`go build ./... && go test ./...`).
+# No external downloads → builds in the airgapped CI.
+FROM golang:1.25-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY pkg/ pkg/
+COPY internal/ internal/
+COPY proto/ proto/
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-agent ./cmd/agent/
+
+# Runtime: Go toolchain (the gate compiles+tests) + git, nothing else.
+FROM golang:1.25-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 agent
+COPY --from=build /valhalla-agent /usr/local/bin/valhalla-agent
+USER agent
+WORKDIR /work
+ENTRYPOINT ["valhalla-agent"]
