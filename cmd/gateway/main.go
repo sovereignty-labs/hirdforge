@@ -36,7 +36,7 @@ type Agent struct {
 	Name           string   `json:"name"`
 	URL            string   `json:"url"`
 	Role           string   `json:"role"`
-	Fleet        string   `json:"warband"`
+	Fleet          string   `json:"warband"`
 	Healthy        bool     `json:"healthy"`
 	Model          string   `json:"model"`
 	Tools          []string `json:"tools"`
@@ -336,7 +336,7 @@ type gateway struct {
 	giteaURL          string
 	giteaToken        string
 	seidrURL          string
-	defaultFleet    string
+	defaultFleet      string
 	discordWebhookURL string
 
 	// delegationTimelines stores typed events indexed by session_id.
@@ -1529,7 +1529,7 @@ func main() {
 		giteaURL:            strings.TrimSpace(*giteaURL),
 		giteaToken:          resolveGatewayGiteaToken(*giteaToken),
 		seidrURL:            strings.TrimSpace(*seidrURLFlag),
-		defaultFleet:      defaultFleet,
+		defaultFleet:        defaultFleet,
 		discordWebhookURL:   strings.TrimSpace(*discordWebhookURL),
 		delegationTimelines: make(map[string][]delegationTimelineEvent),
 	}

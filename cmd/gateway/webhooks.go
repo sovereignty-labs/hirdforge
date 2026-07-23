@@ -446,7 +446,7 @@ func (g *gateway) handlePRMerged(pr webhookPR) {
 		Agent:        targetAgent,
 		DispatchedAt: time.Now().UTC(),
 		Repo:         pr.Repo,
-		Fleet:      fleet,
+		Fleet:        fleet,
 		Attempts:     1,
 		TaskTitle:    task.Title,
 		TaskBody:     task.Body,

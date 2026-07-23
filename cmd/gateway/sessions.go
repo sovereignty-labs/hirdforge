@@ -290,7 +290,7 @@ type AgentState struct {
 	Name      string `json:"name"`
 	Paused    bool   `json:"paused"`
 	Active    bool   `json:"active"`
-	Fleet   string `json:"warband"`
+	Fleet     string `json:"warband"`
 	SessionID string `json:"session_id,omitempty"`
 	TaskRef   string `json:"task_ref,omitempty"`
 	Source    string `json:"source,omitempty"`
@@ -309,9 +309,9 @@ func (g *gateway) fleetState(fleetFilter string) []AgentState {
 	g.arMu.RLock()
 	for _, name := range g.order {
 		state := AgentState{
-			Name:    name,
-			Paused:  paused[name],
-			Fleet: g.agentFleet(name),
+			Name:   name,
+			Paused: paused[name],
+			Fleet:  g.agentFleet(name),
 		}
 		if fleetFilter != "" && state.Fleet != fleetFilter {
 			continue
