@@ -1503,6 +1503,7 @@ func main() {
 	cortexModel := flag.String("cortex-model", "qwen", "model/lane for sandbox builder agents")
 	cortexInferenceKey := flag.String("cortex-inference-key", envOrDefault("CORTEX_INFERENCE_KEY", ""), "inference API key for sandbox agents")
 	cortexAgentSoul := flag.String("cortex-agent-soul", "/work/repo/bench/builder/soul.md", "persona file path (inside the cloned repo) for sandbox agents")
+	cortexMaxRounds := flag.Int("cortex-max-tool-rounds", 80, "max tool-loop rounds for sandbox builder agents")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
@@ -1578,15 +1579,16 @@ func main() {
 		}
 		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
 		gw.initCortexDispatcher(cortexDispatchOptions{
-			AgentImage:   strings.TrimSpace(*cortexAgentImage),
-			SandboxNS:    strings.TrimSpace(*cortexSandboxNS),
-			CredSecret:   strings.TrimSpace(*cortexCredSecret),
-			CloneBase:    strings.TrimSpace(*cortexCloneBase),
-			BaseBranch:   strings.TrimSpace(*cortexBaseBranch),
-			InferenceURL: strings.TrimSpace(*cortexInferenceURL),
-			Model:        strings.TrimSpace(*cortexModel),
-			InferenceKey: strings.TrimSpace(*cortexInferenceKey),
-			AgentSoul:    strings.TrimSpace(*cortexAgentSoul),
+			AgentImage:    strings.TrimSpace(*cortexAgentImage),
+			SandboxNS:     strings.TrimSpace(*cortexSandboxNS),
+			CredSecret:    strings.TrimSpace(*cortexCredSecret),
+			CloneBase:     strings.TrimSpace(*cortexCloneBase),
+			BaseBranch:    strings.TrimSpace(*cortexBaseBranch),
+			InferenceURL:  strings.TrimSpace(*cortexInferenceURL),
+			Model:         strings.TrimSpace(*cortexModel),
+			InferenceKey:  strings.TrimSpace(*cortexInferenceKey),
+			AgentSoul:     strings.TrimSpace(*cortexAgentSoul),
+			MaxToolRounds: *cortexMaxRounds,
 		})
 	} else {
 		log.Printf("cortex: disabled (no --cortex-config)")
