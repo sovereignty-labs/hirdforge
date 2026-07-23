@@ -274,9 +274,10 @@ func validateSpec(spec RunSpec) error {
 		return fmt.Errorf("sandbox: spec missing AgentCommand")
 	case spec.CloneURL == "" || spec.BaseBranch == "" || spec.WorkBranch == "":
 		return fmt.Errorf("sandbox: spec missing git checkout fields")
-	case spec.GateCommand == "":
-		return fmt.Errorf("sandbox: spec missing GateCommand (D-GATE: every builder run is gated)")
 	}
+	// GateCommand may be empty ONLY for legs whose mechanical gate lives
+	// elsewhere (the reviewer: a Gitea review webhook). Builder routes are
+	// forced to carry a gate at config-validation time (ROUTING_SCHEMA.md).
 	return nil
 }
 

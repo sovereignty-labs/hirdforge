@@ -16,8 +16,11 @@ type Cortex struct {
 	store Store
 
 	// OnTaskQueued, when set, is invoked after a dispatch route creates a
-	// queued task (the gateway hooks the Dispatcher here, in a goroutine).
+	// queued task, and on a revise re-dispatch (the gateway hooks the
+	// Dispatcher here, in a goroutine).
 	OnTaskQueued func(route *Route, taskID string)
+	// OnReviewerDispatch runs the reviewer leg for a task already in review.
+	OnReviewerDispatch func(route *Route, ev Event)
 
 	ring    []Decision
 	ringCap int
@@ -67,6 +70,46 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 	d.MatchedRoute = route.ID
 
 	switch {
+	case route.Dispatch != nil && route.Dispatch.Role == RoleReviewer && ev.TaskID != "":
+		// Task-scoped reviewer dispatch (P1.6): the reviewer attaches to THE
+		// task — no second task row. Verdict routing arrives later as a
+		// pr.review_submitted webhook.
+		d.TaskID = ev.TaskID
+		d.Reason = fmt.Sprintf("%s -> reviewer dispatch for task %s", reason, ev.TaskID)
+		if c.OnReviewerDispatch != nil {
+			c.OnReviewerDispatch(route, ev)
+		}
+
+	case route.Dispatch != nil && route.Dispatch.Role == RoleBuilder && ev.Type == EventPRReviewSubmitted:
+		// The sanctioned revise path (D-LESSONS #3): REQUEST_CHANGES routes
+		// back to a builder on the SAME task, with the reviewer's feedback as
+		// failure context — never a dead end, never a blind retry.
+		task, err := c.store.FindTaskByPR(ev.Repo, ev.PRNumber)
+		if err != nil {
+			d.Reason = fmt.Sprintf("%s -> no task for PR %s#%d: %v", reason, ev.Repo, ev.PRNumber, err)
+			break
+		}
+		fc, _ := json.Marshal(FailureContext{
+			PriorAgent:       task.Agent,
+			PriorAttempt:     task.Attempt,
+			Reason:           "changes_requested",
+			ReviewerFeedback: nonEmpty(ev.ReviewBody),
+		})
+		if err := c.store.PrepareRetry(task.ID, fc); err != nil {
+			return d, fmt.Errorf("cortex: prepare revise: %w", err)
+		}
+		cause := Cause{Kind: CauseWebhook, Detail: map[string]any{"review_state": ev.ReviewState, "reviewer": ev.Actor}}
+		if err := c.store.Transition(task.ID, StatusFailed,
+			fmt.Sprintf("changes_requested by %s on PR #%d — revise dispatch follows", orDash(ev.Actor), ev.PRNumber),
+			cause); err != nil {
+			return d, fmt.Errorf("cortex: revise transition: %w", err)
+		}
+		d.TaskID = task.ID
+		d.Reason = fmt.Sprintf("%s -> revise dispatch for task %s (attempt %d)", reason, task.ID, task.Attempt+1)
+		if c.OnTaskQueued != nil {
+			c.OnTaskQueued(route, task.ID)
+		}
+
 	case route.Dispatch != nil:
 		bundle := cfg.Bundles[route.Dispatch.Bundle]
 		gateSnapshot := json.RawMessage(`{}`)
@@ -101,10 +144,22 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		}
 
 	case route.Action == ActionAdvance:
-		// Lifecycle-advance routes are wired when their producing mechanics
-		// land (P1.5 gate events, P1.6 review webhook, P1.7 merge webhook).
-		// Until then the decision log says so explicitly — matched, not acted.
-		d.Reason = fmt.Sprintf("%s -> advance to %s (not yet wired in P1.1)", reason, route.To)
+		// Pure lifecycle advance (P1.6/P1.7): find THE task by the PR the
+		// webhook names, transition with the webhook as the mechanical cause.
+		task, err := c.store.FindTaskByPR(ev.Repo, ev.PRNumber)
+		if err != nil {
+			d.Reason = fmt.Sprintf("%s -> advance to %s impossible: %v", reason, route.To, err)
+			break
+		}
+		cause := Cause{Kind: CauseWebhook, Detail: map[string]any{"event": ev.Type, "actor": ev.Actor, "review_state": ev.ReviewState}}
+		why := fmt.Sprintf("%s by %s on PR #%d", ev.Type, orDash(ev.Actor), ev.PRNumber)
+		if err := c.store.Transition(task.ID, route.To, why, cause); err != nil {
+			// An advance that violates the lifecycle table is loud, not silent.
+			d.Reason = fmt.Sprintf("%s -> advance to %s REJECTED: %v", reason, route.To, err)
+			break
+		}
+		d.TaskID = task.ID
+		d.Reason = fmt.Sprintf("%s -> task %s advanced to %s", reason, task.ID, route.To)
 	}
 
 	c.recordDecision(d)
@@ -147,6 +202,20 @@ func (c *Cortex) RecentDecisions(limit int) []Decision {
 
 // Store exposes the underlying store for the gateway's read endpoints.
 func (c *Cortex) Store() Store { return c.store }
+
+func nonEmpty(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return []string{s}
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
 
 func effectiveTimeout(cfg *Config, r *Route) int {
 	if r.TimeoutMinutes > 0 {

@@ -83,20 +83,149 @@ func TestHandleEventNoMatch(t *testing.T) {
 	}
 }
 
-// TestHandleEventAdvanceNotYetWired pins that matched advance routes are
-// logged explicitly as not-yet-wired rather than silently ignored.
-func TestHandleEventAdvanceNotYetWired(t *testing.T) {
+// taskInReview creates a task and walks it legally to review with a PR ref.
+func taskInReview(t *testing.T, store *MemStore, id string, pr int64) {
+	t.Helper()
+	task := &TaskRecord{ID: id, RouteID: "build-on-label", IssueRepo: "kit/hirdforge", IssueNumber: 1}
+	if err := store.CreateTask(task, "matched", Cause{Kind: CauseWebhook}); err != nil {
+		t.Fatal(err)
+	}
+	for _, to := range []string{StatusDispatched, StatusBuilding, StatusReview} {
+		if err := store.Transition(id, to, "step", Cause{Kind: CauseSandbox}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.SetPR(id, "kit/hirdforge", pr); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHandleEventApproveAdvances: APPROVED webhook → review → approved, with
+// the webhook as the mechanical cause.
+func TestHandleEventApproveAdvances(t *testing.T) {
 	cfg := mustConfig(t)
-	c := New(cfg, NewMemStore())
-	d, err := c.HandleEvent(Event{Type: EventPRReviewSubmitted, Repo: "kit/hirdforge", ReviewState: "APPROVED", PRNumber: 3})
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInReview(t, store, "hf-adv", 3)
+
+	d, err := c.HandleEvent(Event{Type: EventPRReviewSubmitted, Repo: "kit/hirdforge", ReviewState: "APPROVED", PRNumber: 3, Actor: "kit"})
 	if err != nil {
 		t.Fatalf("HandleEvent: %v", err)
 	}
-	if d.MatchedRoute != "approve-on-review" {
+	if d.MatchedRoute != "approve-on-review" || d.TaskID != "hf-adv" {
 		t.Fatalf("decision = %+v", d)
 	}
-	if !strings.Contains(d.Reason, "not yet wired") {
-		t.Fatalf("advance without wiring must say so, got %q", d.Reason)
+	task, history, _ := store.GetTask("hf-adv")
+	if task.Status != StatusApproved {
+		t.Fatalf("status = %q", task.Status)
+	}
+	final := history[len(history)-1]
+	if final.Cause.Kind != CauseWebhook || !strings.Contains(final.Reason, "by kit") {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
+// TestHandleEventAdvanceIllegalIsLoud: an advance the lifecycle table forbids
+// is rejected and the decision says so.
+func TestHandleEventAdvanceIllegalIsLoud(t *testing.T) {
+	cfg := mustConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+	task := &TaskRecord{ID: "hf-q", RouteID: "build-on-label", IssueRepo: "kit/hirdforge"}
+	if err := store.CreateTask(task, "m", Cause{Kind: CauseWebhook}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetPR("hf-q", "kit/hirdforge", 4); err != nil {
+		t.Fatal(err)
+	}
+	d, err := c.HandleEvent(Event{Type: EventPRReviewSubmitted, Repo: "kit/hirdforge", ReviewState: "APPROVED", PRNumber: 4})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if !strings.Contains(d.Reason, "REJECTED") {
+		t.Fatalf("illegal advance must be loud, got %q", d.Reason)
+	}
+	got, _, _ := store.GetTask("hf-q")
+	if got.Status != StatusQueued {
+		t.Fatalf("status mutated to %q by an illegal advance", got.Status)
+	}
+}
+
+// TestHandleEventReviewerDispatchIsTaskScoped: gate_passed fires the reviewer
+// against THE task — no second task row.
+func TestHandleEventReviewerDispatchIsTaskScoped(t *testing.T) {
+	cfg := mustConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInReview(t, store, "hf-rev", 5)
+
+	var hookRoute string
+	var hookEv Event
+	c.OnReviewerDispatch = func(route *Route, ev Event) { hookRoute, hookEv = route.ID, ev }
+
+	d, err := c.HandleEvent(Event{Type: EventTaskGatePassed, Repo: "kit/hirdforge", RouteID: "build-on-label", TaskID: "hf-rev", PRNumber: 5})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if d.MatchedRoute != "review-on-gate" || d.TaskID != "hf-rev" {
+		t.Fatalf("decision = %+v", d)
+	}
+	if hookRoute != "review-on-gate" || hookEv.TaskID != "hf-rev" {
+		t.Fatalf("hook = %q %+v", hookRoute, hookEv)
+	}
+	tasks, _ := store.ListTasks(TaskFilter{})
+	if len(tasks) != 1 {
+		t.Fatalf("reviewer dispatch created a second task row: %d", len(tasks))
+	}
+}
+
+// TestHandleEventRevisePath: REQUEST_CHANGES → same task fails with the
+// reviewer feedback as failure context and re-dispatches (D-LESSONS #2+#3).
+func TestHandleEventRevisePath(t *testing.T) {
+	yaml := strings.Replace(validYAML, "routes:", `routes:
+  - id: revise-on-changes-requested
+    on:
+      event: pr.review_submitted
+      state: REQUEST_CHANGES
+    dispatch:
+      role: builder
+      bundle: build-default
+      carry: review-feedback
+    done_gate:
+      type: test-command
+      command: "go test ./..."`, 1)
+	cfg, err := ParseConfig([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInReview(t, store, "hf-fix", 6)
+
+	var redispatched string
+	c.OnTaskQueued = func(route *Route, taskID string) { redispatched = taskID }
+
+	d, err := c.HandleEvent(Event{Type: EventPRReviewSubmitted, Repo: "kit/hirdforge",
+		ReviewState: "REQUEST_CHANGES", PRNumber: 6, Actor: "sindri", ReviewBody: "fix the error path"})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if !strings.Contains(d.Reason, "revise dispatch for task hf-fix (attempt 2)") {
+		t.Fatalf("decision = %+v", d)
+	}
+	if redispatched != "hf-fix" {
+		t.Fatalf("no re-dispatch, got %q", redispatched)
+	}
+	task, history, _ := store.GetTask("hf-fix")
+	if task.Status != StatusFailed || task.Attempt != 2 {
+		t.Fatalf("task = status %q attempt %d", task.Status, task.Attempt)
+	}
+	if !strings.Contains(string(task.FailureContext), "fix the error path") {
+		t.Fatalf("failure context lost the feedback: %s", task.FailureContext)
+	}
+	final := history[len(history)-1]
+	if !strings.Contains(final.Reason, "changes_requested by sindri") {
+		t.Fatalf("final = %+v", final)
 	}
 }
 
