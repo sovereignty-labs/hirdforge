@@ -22,11 +22,15 @@ import (
 
 // cortexDispatchOptions carries the gateway flags for the dispatcher.
 type cortexDispatchOptions struct {
-	AgentImage string
-	SandboxNS  string
-	CredSecret string
-	CloneBase  string
-	BaseBranch string
+	AgentImage   string
+	SandboxNS    string
+	CredSecret   string
+	CloneBase    string
+	BaseBranch   string
+	InferenceURL string
+	Model        string
+	InferenceKey string
+	AgentSoul    string
 }
 
 // initCortexDispatcher wires the P1.3 dispatcher: sandbox Jobs, Gitea PR
@@ -47,14 +51,26 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 		return
 	}
 	d := &cortex.Dispatcher{
-		Store:         g.cortex.Store(),
-		Sandbox:       sandbox.NewK8sSandbox(client, opts.SandboxNS),
-		PRLookup:      g.cortexPRLookup,
-		DiffFetch:     g.cortexDiffFetch,
-		ReviewLookup:  g.cortexReviewLookup,
-		Events:        func(ev cortex.Event) { _, _ = g.cortex.HandleEvent(ev) },
-		AgentImage:    opts.AgentImage,
-		AgentCommand:  []string{"/agent", "-one-shot", "-envelope", "/task/envelope.json", "-workspace", "/work/repo"},
+		Store:        g.cortex.Store(),
+		Sandbox:      sandbox.NewK8sSandbox(client, opts.SandboxNS),
+		PRLookup:     g.cortexPRLookup,
+		DiffFetch:    g.cortexDiffFetch,
+		ReviewLookup: g.cortexReviewLookup,
+		Events:       func(ev cortex.Event) { _, _ = g.cortex.HandleEvent(ev) },
+		AgentImage:   opts.AgentImage,
+		AgentCommand: []string{
+			"valhalla-agent", "-one-shot",
+			"-envelope", "/task/envelope.json",
+			"-workspace", "/work/repo",
+			"-soul", opts.AgentSoul,
+			"-inference-url", opts.InferenceURL,
+			"-model", opts.Model,
+			"-api-key", opts.InferenceKey,
+			"-gitea-url", g.giteaURL,
+			"-tools", "exec,read,write,edit,git-clone,git-commit,git-diff,gitea",
+			"-max-tool-rounds", "40",
+			"-inference-timeout", "300",
+		},
 		CloneURLBase:  strings.TrimSuffix(opts.CloneBase, "/"),
 		BaseBranch:    opts.BaseBranch,
 		CredentialRef: opts.CredSecret,

@@ -1496,9 +1496,13 @@ func main() {
 	cortexAgentImage := flag.String("cortex-agent-image", "", "agent image for sandbox Jobs; empty disables the dispatcher")
 	cortexSandboxNS := flag.String("cortex-sandbox-ns", "sandbox", "k8s namespace for sandbox Jobs")
 	cortexCredSecret := flag.String("cortex-cred-secret", "sandbox-git-cred", "k8s secret with sandbox git credentials")
-	cortexCloneBase := flag.String("cortex-clone-base", "https://git.hirdforge.com", "base URL for sandbox clone URLs")
+	cortexCloneBase := flag.String("cortex-clone-base", "http://gitea-http.gitea.svc.cluster.local:3000", "base URL for sandbox clone URLs")
 	cortexBaseBranch := flag.String("cortex-base-branch", "main", "base branch sandbox tasks branch from")
 	cortexMergeSecret := flag.String("cortex-merge-secret", envOrDefault("CORTEX_MERGE_SECRET", ""), "shared secret for the Lockbox merge callback")
+	cortexInferenceURL := flag.String("cortex-inference-url", "http://203.0.113.20:4000", "inference base URL for sandbox agents (LiteLLM)")
+	cortexModel := flag.String("cortex-model", "qwen", "model/lane for sandbox builder agents")
+	cortexInferenceKey := flag.String("cortex-inference-key", envOrDefault("CORTEX_INFERENCE_KEY", ""), "inference API key for sandbox agents")
+	cortexAgentSoul := flag.String("cortex-agent-soul", "/work/repo/bench/builder/soul.md", "persona file path (inside the cloned repo) for sandbox agents")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
@@ -1574,11 +1578,15 @@ func main() {
 		}
 		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
 		gw.initCortexDispatcher(cortexDispatchOptions{
-			AgentImage: strings.TrimSpace(*cortexAgentImage),
-			SandboxNS:  strings.TrimSpace(*cortexSandboxNS),
-			CredSecret: strings.TrimSpace(*cortexCredSecret),
-			CloneBase:  strings.TrimSpace(*cortexCloneBase),
-			BaseBranch: strings.TrimSpace(*cortexBaseBranch),
+			AgentImage:   strings.TrimSpace(*cortexAgentImage),
+			SandboxNS:    strings.TrimSpace(*cortexSandboxNS),
+			CredSecret:   strings.TrimSpace(*cortexCredSecret),
+			CloneBase:    strings.TrimSpace(*cortexCloneBase),
+			BaseBranch:   strings.TrimSpace(*cortexBaseBranch),
+			InferenceURL: strings.TrimSpace(*cortexInferenceURL),
+			Model:        strings.TrimSpace(*cortexModel),
+			InferenceKey: strings.TrimSpace(*cortexInferenceKey),
+			AgentSoul:    strings.TrimSpace(*cortexAgentSoul),
 		})
 	} else {
 		log.Printf("cortex: disabled (no --cortex-config)")

@@ -31,9 +31,11 @@ func buildJob(ref Ref, spec RunSpec) map[string]any {
 		`set -u
 if [ -n "$(ls -A %s 2>/dev/null)" ]; then echo "DIRTY WORKSPACE — prior-task residue"; exit %d; fi
 echo "workspace clean"
+if [ -f /vault/secrets/netrc ]; then cp /vault/secrets/netrc %s/.netrc && chmod 600 %s/.netrc; fi
 git clone --branch %q %q %s/repo || exit %d
 cd %s/repo && git checkout -b %q && echo "checkout ok: $(git rev-parse HEAD)"`,
 		workspaceMountPath, guardExitDirty,
+		workspaceMountPath, workspaceMountPath,
 		spec.BaseBranch, spec.CloneURL, workspaceMountPath, guardExitCloneFail,
 		workspaceMountPath, spec.WorkBranch)
 
@@ -55,7 +57,7 @@ cd %s/repo && git checkout -b %q && echo "checkout ok: $(git rev-parse HEAD)"`,
 			"name": "gitcred", "secret": map[string]any{"secretName": spec.CredSecret},
 		})
 		volumeMounts = append(volumeMounts, map[string]any{
-			"name": "gitcred", "mountPath": "/task-cred", "readOnly": true,
+			"name": "gitcred", "mountPath": "/vault/secrets", "readOnly": true,
 		})
 	}
 
@@ -70,9 +72,12 @@ cd %s/repo && git checkout -b %q && echo "checkout ok: $(git rev-parse HEAD)"`,
 
 	container := func(name string, command []string) map[string]any {
 		return map[string]any{
-			"name":            name,
-			"image":           spec.AgentImage,
-			"command":         command,
+			"name":    name,
+			"image":   spec.AgentImage,
+			"command": command,
+			// HOME under the shared emptyDir: git reads /work/.netrc, and
+			// the gate's go toolchain gets a writable cache.
+			"env":             []map[string]any{{"name": "HOME", "value": workspaceMountPath}},
 			"volumeMounts":    volumeMounts,
 			"securityContext": securityContext,
 			"workingDir":      workspaceMountPath,
@@ -104,6 +109,9 @@ cd %s/repo && git checkout -b %q && echo "checkout ok: $(git rev-parse HEAD)"`,
 					"restartPolicy":                "Never",
 					"serviceAccountName":           "sandbox-runner",
 					"automountServiceAccountToken": false,
+					// emptyDir is root-owned; fsGroup makes it writable for
+					// the non-root (1000) containers.
+					"securityContext": map[string]any{"fsGroup": 1000},
 					"initContainers": []map[string]any{
 						container(containerGuard, []string{"sh", "-c", guardScript}),
 						container(containerAgent, spec.AgentCommand),
