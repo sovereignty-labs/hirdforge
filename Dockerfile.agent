@@ -18,20 +18,20 @@ COPY proto/ proto/
 RUN go vet ./...
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-agent ./cmd/agent/
 RUN set -eux; \
-    curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" -o /usr/local/bin/kubectl; \
     chmod +x /usr/local/bin/kubectl; \
-    curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tar.gz; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tar.gz; \
     tar -xzf /tmp/helm.tar.gz -C /tmp; \
     install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm; \
-    curl -fsSL "https://github.com/bitnami-labs/sealed-secrets/releases/download/${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION#v}-linux-amd64.tar.gz" -o /tmp/kubeseal.tar.gz; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 "https://github.com/bitnami-labs/sealed-secrets/releases/download/${KUBESEAL_VERSION}/kubeseal-${KUBESEAL_VERSION#v}-linux-amd64.tar.gz" -o /tmp/kubeseal.tar.gz; \
     tar -xzf /tmp/kubeseal.tar.gz -C /tmp kubeseal; \
     install -m 0755 /tmp/kubeseal /usr/local/bin/kubeseal; \
-    curl -fsSL "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-amd64" -o /usr/local/bin/talosctl; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 "https://github.com/siderolabs/talos/releases/download/${TALOSCTL_VERSION}/talosctl-linux-amd64" -o /usr/local/bin/talosctl; \
     chmod +x /usr/local/bin/talosctl; \
-    curl -fsSL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" -o /tmp/crane.tar.gz; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" -o /tmp/crane.tar.gz; \
     tar -xzf /tmp/crane.tar.gz -C /tmp crane; \
     install -m 0755 /tmp/crane /usr/local/bin/crane; \
-    curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq; \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 20 "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq; \
     chmod +x /usr/local/bin/yq; \
     rm -rf /tmp/helm.tar.gz /tmp/kubeseal.tar.gz /tmp/crane.tar.gz /tmp/linux-amd64 /tmp/kubeseal /tmp/crane
 
