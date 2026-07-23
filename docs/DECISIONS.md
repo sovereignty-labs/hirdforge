@@ -99,6 +99,29 @@ confirmed before UI work. The observability/control API surface
 stable contract, not a moving target. High control + observability are wired up
 front (in the backend contract), not bolted on. *2026-07-18.*
 
+**D-AUTONOMY — Autonomous build authority (Kit, 2026-07-23 kickoff).** The v2
+rebuild is executed as autonomously as possible once the Task-0 contracts are
+approved. Concretely granted:
+1. **Merge authority:** in-phase PRs are self-merged by the builder when
+   build/vet/tests are green. Kit reviews at phase boundaries (the CLAUDE.md
+   ritual) and at every stop-and-ask trigger. Doctrine-touching and write-path
+   changes still wait for Kit's merge. `main` remains push-protected — the PR
+   flow itself is unchanged.
+2. **Agent verification is the builder's job:** the builder agents must be
+   verified working against the local model fabric before they carry real v2
+   work. Verification targets: the **`qwen`** and **`qwen-reserved`** lanes
+   (both Qwen3.6-27B dense — the 35B-A3B MoE was already swapped off the fabric
+   2026-07-17 for weak agentic performance, per the LiteLLM config). The
+   BUILDER_HARNESS benchmark gate (14-function refactor ≥8/10 clean) is the bar.
+3. **Lane use:** the model fabric (LiteLLM agent-host:4000 + anvil llama-servers) is
+   free to drive for testing and benchmarks, no restrictions.
+4. **Asgard authority:** full authority to create what the specs require in the
+   cluster (sandbox namespace, NetworkPolicies, secrets, Postgres reuse) — via
+   `asgard-infra` GitOps PRs where that is the convention, direct kubectl where
+   it isn't. Existing Asgard Postgres + the `infrastructure/sandbox/` scaffold
+   are the reuse targets.
+*2026-07-23.*
+
 **D-LESSONS — The four carry-forward lessons are binding constraints.** From
 Workbench, each earned:
 1. **Ground-truth completion** (see D-GATE). Mechanical, never model-judged.

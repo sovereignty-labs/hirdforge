@@ -108,8 +108,11 @@ Everything else: proceed. Prefer acting within spec over asking.
 - **Small PRs, one concern each**, message references the task ID (e.g. `[P1.2]`)
   and any decision ID it executes. The event of removing something (a role, a
   route, a fallback, a test) is always its own commit.
-- **Branch → PR → Kit merges. Never push to `main`.** This is the repo's standing
-  rule and the platform's own model; agents (including you) follow it.
+- **Branch → PR → merge. Never push to `main`.** Per D-AUTONOMY (2026-07-23):
+  in-phase PRs are self-merged when build/vet/tests are green; phase-boundary
+  reviews, stop-and-ask triggers, and doctrine/write-path changes wait for Kit's
+  merge. The PR flow itself — and the platform's own PR-gated model — is
+  unchanged.
 - **Push discipline:** after a task's commits land and tests pass, push the branch
   to `origin` (`git.hirdforge.com/kit/hirdforge`) and open/update the PR.
   The master lives on `git.hirdforge.com`, hosted in Asgard (D-INFRA, corrected
