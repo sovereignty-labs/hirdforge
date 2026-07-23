@@ -38,6 +38,14 @@ expensive part) all exist. What remains is the local-model *reliability* layer:
 M3, M6, M7, and completing M2/M4/M5. These are exactly what the spec scopes as
 small test-first PRs with a benchmark gate.
 
+**Benchmark status (2026-07-23):** the standing benchmark now exists in-repo
+(`bench/builder/`) and the baseline was re-measured on the current fabric:
+**qwen 10/10 clean, qwen-reserved 10/10 clean** — the ≥8/10 bar met *before*
+M2–M7, on the dense Qwen3.6-27B lanes. The spec's ~0/2 was against the 35B-A3B
+MoE, swapped off the fabric 2026-07-17 for weak agentic work — strong evidence
+for the spec's MoE hypothesis (§5). M2–M7 remain scheduled for breadth and
+telemetry, no longer as the gate to using builders at all.
+
 ## Sequencing into the phases
 
 Per the spec's own order (§7), folded into the v2 phases:

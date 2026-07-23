@@ -113,6 +113,9 @@ approved. Concretely granted:
    (both Qwen3.6-27B dense — the 35B-A3B MoE was already swapped off the fabric
    2026-07-17 for weak agentic performance, per the LiteLLM config). The
    BUILDER_HARNESS benchmark gate (14-function refactor ≥8/10 clean) is the bar.
+   **VERIFIED 2026-07-23: qwen 10/10 clean, qwen-reserved 10/10 clean**
+   (`bench/builder/`, all four mechanical checks per round). The bar is met;
+   builders are cleared to carry skeleton work.
 3. **Lane use:** the model fabric (LiteLLM agent-host:4000 + anvil llama-servers) is
    free to drive for testing and benchmarks, no restrictions.
 4. **Asgard authority:** full authority to create what the specs require in the
