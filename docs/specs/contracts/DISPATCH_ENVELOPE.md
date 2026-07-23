@@ -1,6 +1,6 @@
 # Contract 2 — The Dispatch Envelope
 
-**Status: DRAFT, awaiting approval.** The deterministic message Cortex constructs
+**Status: APPROVED 2026-07-23 (Kit, PR #330).** The deterministic message Cortex constructs
 and delivers to exactly one agent. Today's dispatch wraps everything into prose
 and regex-extracts facts back out (`wrapTaskForDispatch`,
 `cmd/gateway/webhooks_support.go:408`; `extractObjectiveSentence`,

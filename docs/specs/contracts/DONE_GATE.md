@@ -1,6 +1,6 @@
 # Contract 5 — The Done-Gate Interface (D-GATE made concrete)
 
-**Status: DRAFT, awaiting approval.** How a route's `done_gate` is evaluated
+**Status: APPROVED 2026-07-23 (Kit, PR #330).** How a route's `done_gate` is evaluated
 mechanically and its result recorded as the transition reason. This is the
 replacement for the v1 failure (`pkg/tasklife.CheckCompletionGates` regex-matches
 agent prose and nudges, `pkg/tasklife/gates.go:9` — still live in the v1 agent

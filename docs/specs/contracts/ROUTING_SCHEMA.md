@@ -1,6 +1,6 @@
 # Contract 1 — `cortex.yaml` Routing Schema (O-ROUTING-SCHEMA)
 
-**Status: DRAFT, awaiting approval.** The core new contract: how events become
+**Status: APPROVED 2026-07-23 (Kit, PR #330).** The core new contract: how events become
 dispatches, deterministically.
 
 ## Semantics (the part that matters)

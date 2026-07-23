@@ -1,0 +1,75 @@
+# Hirdforge v2 Cortex routing config — the Phase 1 walking skeleton.
+# Contract: docs/specs/contracts/ROUTING_SCHEMA.md (approved 2026-07-23).
+# Loaded by the gateway via --cortex-config; ordered, first-match-wins,
+# exact-equality only.
+version: 1
+
+defaults:
+  repo: kit/hirdforge
+  timeout_minutes: 60
+
+bundles:
+  build-default:
+    skills: []          # skill dispatch is Phase 2
+    memory_scopes: []   # skill-scoped Seidr is Phase 2
+    profile: default
+  review-default:
+    skills: []
+    memory_scopes: []
+    profile: default
+
+routes:
+  # THE build route: label an issue agent:build and the skeleton runs.
+  - id: build-on-label
+    on:
+      event: issue.labeled
+      label: agent:build
+    dispatch:
+      role: builder
+      bundle: build-default
+    done_gate:
+      type: test-command
+      command: "go build ./... && go vet ./... && go test ./..."
+      timeout_minutes: 20
+    on_gate_passed: review-on-gate
+    timeout_minutes: 60
+
+  # Reviewer fires only after the mechanical gate passed (P1.6).
+  - id: review-on-gate
+    on:
+      event: task.gate_passed
+      route: build-on-label
+    dispatch:
+      role: reviewer
+      bundle: review-default
+      artifact: pr-diff
+
+  # The sanctioned revise path (D-LESSONS #3) — wired in P1.6.
+  - id: revise-on-changes-requested
+    on:
+      event: pr.review_submitted
+      state: REQUEST_CHANGES
+    dispatch:
+      role: builder
+      bundle: build-default
+      carry: review-feedback
+    done_gate:
+      type: test-command
+      command: "go build ./... && go vet ./... && go test ./..."
+      timeout_minutes: 20
+    on_gate_passed: review-on-gate
+
+  # APPROVE -> approved; waits on Lockbox for the merge (P1.7).
+  - id: approve-on-review
+    on:
+      event: pr.review_submitted
+      state: APPROVED
+    action: advance
+    to: approved
+
+  # Post-merge validation closes the loop (P1.7).
+  - id: validate-on-merge
+    on:
+      event: pr.merged
+    action: advance
+    to: validated
