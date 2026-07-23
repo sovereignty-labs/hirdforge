@@ -1,3 +1,5 @@
 ./cmd/agent/main.go
-./cmd/gateway/main.go
 ./cmd/agent/session.go
+./cmd/gateway/main.go
+./internal/workbench/cortex.go
+./internal/workbench/workbench_test.go

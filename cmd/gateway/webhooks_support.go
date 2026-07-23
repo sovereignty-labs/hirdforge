@@ -60,7 +60,7 @@ type dispatchedTask struct {
 	Agent          string    `json:"agent"`
 	DispatchedAt   time.Time `json:"dispatched_at"`
 	Repo           string    `json:"repo"`
-	Fleet        string    `json:"warband"`
+	Fleet          string    `json:"warband"`
 	Attempts       int       `json:"attempts"`
 	FailedAgents   []string  `json:"failed_agents"`
 	TaskTitle      string    `json:"task_title"`
