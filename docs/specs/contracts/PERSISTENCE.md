@@ -1,6 +1,6 @@
 # Contract 4 — Postgres Persistence (O-PERSISTENCE)
 
-**Status: DRAFT, awaiting approval.** The task-lifecycle store. v2 gets its own
+**Status: APPROVED 2026-07-23 (Kit, PR #330).** The task-lifecycle store. v2 gets its own
 tables beside the existing A2A store (`a2a_tasks`/`a2a_messages`,
 `cmd/gateway/a2a.go:111`) — the v1 flows keep their store untouched until
 cutover; nothing v2 writes can corrupt a live v1 surface. Same database, same

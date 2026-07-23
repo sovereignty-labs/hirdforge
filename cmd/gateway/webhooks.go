@@ -59,6 +59,12 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	giteaEvent := strings.TrimSpace(r.Header.Get("X-Gitea-Event"))
+	if giteaEvent == "issues" {
+		// v2 Cortex ingest (P1.1). No v1 path consumes issues events.
+		g.handleCortexIssuesEvent(body)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "cortex"})
+		return
+	}
 	if giteaEvent != "pull_request" && giteaEvent != "pull_request_review" {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
 		return

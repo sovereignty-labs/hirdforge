@@ -343,7 +343,7 @@ func (g *gateway) ensureGiteaWebhooks() {
 				"content_type": "json",
 				"secret":       g.webhookSecret,
 			},
-			"events": []string{"pull_request", "pull_request_review"},
+			"events": []string{"pull_request", "pull_request_review", "issues"},
 		}
 		bodyJSON, err := json.Marshal(payload)
 		if err != nil {

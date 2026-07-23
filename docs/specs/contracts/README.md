@@ -1,9 +1,9 @@
-# Phase 1 Task 0 — The Load-Bearing Contracts (DRAFT, awaiting Kit's approval)
+# Phase 1 Task 0 — The Load-Bearing Contracts (APPROVED)
 
-**Status: DRAFT.** Per CLAUDE.md stop-and-ask #2 and PHASE1_EXECUTION_SPEC Task 0,
-these five contracts are drafted standalone and presented for approval **before any
-P1 code is written**. Nothing in this directory is binding until Kit approves it;
-approval is recorded by merging the PR and flipping each doc's status line.
+**Status: APPROVED 2026-07-23 (Kit merged PR #330).** Per CLAUDE.md stop-and-ask
+#2 and PHASE1_EXECUTION_SPEC Task 0, these five contracts were drafted
+standalone and approved **before any P1 code was written**. They are now
+binding; amending one is a PR + Kit review, never a silent code-side deviation.
 
 Grounded in the code as it exists post-Phase-0 (`phase0/rebrand`), via a full
 reconnaissance of `cmd/gateway`, `cmd/agent`, `cmd/lockbox`, `pkg/tasks`,

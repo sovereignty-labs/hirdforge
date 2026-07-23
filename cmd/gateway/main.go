@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"git.hirdforge.com/kit/hirdforge/internal/cortex"
 	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
@@ -307,6 +308,7 @@ type gateway struct {
 	agents            map[string]*Agent
 	order             []string
 	a2aStore          *A2ATaskStore
+	cortex            *cortex.Cortex
 	reposMu           sync.RWMutex
 	repos             []string
 	eventMu           sync.Mutex
@@ -1488,6 +1490,7 @@ func main() {
 	taskRepoFlag := flag.String("task-repo", "kit/hirdforge-tasks", "Gitea repo for task board issues")
 	seidrURLFlag := flag.String("seidr-url", "http://seidr.asgard.svc:8082", "Seidr memory service URL")
 	a2aDBURL := flag.String("a2a-db-url", "", "PostgreSQL URL for A2A task store")
+	cortexConfigFlag := flag.String("cortex-config", "", "path to cortex.yaml; empty disables the v2 Cortex module")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
@@ -1542,6 +1545,23 @@ func main() {
 		log.Printf("a2a: task store initialized")
 	} else {
 		log.Printf("a2a: task store disabled (no --a2a-db-url)")
+	}
+	if path := strings.TrimSpace(*cortexConfigFlag); path != "" {
+		cfg, err := cortex.LoadConfig(path)
+		if err != nil {
+			die("cortex: config load failed", err)
+		}
+		if strings.TrimSpace(*a2aDBURL) == "" {
+			die("cortex: requires --a2a-db-url (the lifecycle store is Postgres)", nil)
+		}
+		store, err := cortex.InitPGStore(*a2aDBURL)
+		if err != nil {
+			die("cortex: store init failed", err)
+		}
+		gw.cortex = cortex.New(cfg, store)
+		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
+	} else {
+		log.Printf("cortex: disabled (no --cortex-config)")
 	}
 	gw.addEvent("agent_start", "gateway", fmt.Sprintf("Gateway started with %d agents", len(order)))
 	gw.refreshRepos()
@@ -1625,6 +1645,7 @@ func main() {
 	gw.registerHealthEndpoints(mux)
 	registerGatewayMCP(mux, gw)
 	gw.registerWebhookHandlers(mux)
+	registerCortexRoutes(mux, gw)
 	go func() {
 		time.Sleep(10 * time.Second)
 		gw.ensureGiteaWebhooks()

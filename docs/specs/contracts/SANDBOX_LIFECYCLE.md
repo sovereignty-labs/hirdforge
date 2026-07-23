@@ -1,6 +1,6 @@
 # Contract 3 — Sandbox Lifecycle (O-SANDBOX-CONTRACT)
 
-**Status: DRAFT, awaiting approval.** Every agent runs in a reset-to-clean
+**Status: APPROVED 2026-07-23 (Kit, PR #330).** Every agent runs in a reset-to-clean
 isolated environment (D-SANDBOX: rebuild the fast ephemeral pattern natively —
 hours-to-days, not months). On Asgard k8s the native translation of the
 ephemeral-VM pattern is a **per-task Job**: fresh pod + fresh `emptyDir` ⇒
