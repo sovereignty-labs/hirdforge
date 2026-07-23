@@ -290,15 +290,15 @@ type AgentState struct {
 	Name      string `json:"name"`
 	Paused    bool   `json:"paused"`
 	Active    bool   `json:"active"`
-	Warband   string `json:"warband"`
+	Fleet   string `json:"warband"`
 	SessionID string `json:"session_id,omitempty"`
 	TaskRef   string `json:"task_ref,omitempty"`
 	Source    string `json:"source,omitempty"`
 	Since     int64  `json:"since,omitempty"`
 }
 
-func (g *gateway) fleetState(warbandFilter string) []AgentState {
-	warbandFilter = strings.TrimSpace(warbandFilter)
+func (g *gateway) fleetState(fleetFilter string) []AgentState {
+	fleetFilter = strings.TrimSpace(fleetFilter)
 	states := make([]AgentState, 0, len(g.order))
 	paused := make(map[string]bool, len(g.order))
 	g.injectionMu.Lock()
@@ -311,9 +311,9 @@ func (g *gateway) fleetState(warbandFilter string) []AgentState {
 		state := AgentState{
 			Name:    name,
 			Paused:  paused[name],
-			Warband: g.agentWarband(name),
+			Fleet: g.agentFleet(name),
 		}
-		if warbandFilter != "" && state.Warband != warbandFilter {
+		if fleetFilter != "" && state.Fleet != fleetFilter {
 			continue
 		}
 		if ar, ok := g.activeRequests[name]; ok {

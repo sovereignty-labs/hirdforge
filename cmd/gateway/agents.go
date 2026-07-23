@@ -34,15 +34,15 @@ func (g *gateway) getAgent(name string) (*Agent, bool) {
 	return &cp, true
 }
 
-func (g *gateway) agentWarband(name string) string {
+func (g *gateway) agentFleet(name string) string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	if agent, ok := g.agents[strings.TrimSpace(name)]; ok && agent != nil {
-		if warband := strings.TrimSpace(agent.Warband); warband != "" {
-			return warband
+		if fleet := strings.TrimSpace(agent.Fleet); fleet != "" {
+			return fleet
 		}
 	}
-	return normalizeWarbandName(g.defaultWarband)
+	return normalizeFleetName(g.defaultFleet)
 }
 
 func (g *gateway) updateAgent(updated Agent) {
@@ -76,14 +76,14 @@ func (g *gateway) refreshAgentHealth() {
 	for _, n := range g.order {
 		urls[n] = g.agents[n].URL
 		roles[n] = g.agents[n].Role
-		warbands[n] = g.agents[n].Warband
+		warbands[n] = g.agents[n].Fleet
 	}
 	g.mu.RUnlock()
 
 	for _, name := range names {
 		updated := Agent{Name: name, URL: urls[name], Tools: []string{}}
 		updated.Role = roles[name]
-		updated.Warband = warbands[name]
+		updated.Fleet = warbands[name]
 		h, err := queryAgentHealth(client, urls[name])
 		if err == nil {
 			updated.Healthy = true
