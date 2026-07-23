@@ -326,13 +326,21 @@ func (g *gateway) ensureGiteaWebhooks() {
 		found := false
 		for _, hook := range hooks {
 			config, _ := hook["config"].(map[string]interface{})
-			if strings.TrimSpace(fmt.Sprint(config["url"])) == webhookEndpointURL {
-				found = true
-				break
+			if strings.TrimSpace(fmt.Sprint(config["url"])) != webhookEndpointURL {
+				continue
 			}
+			found = true
+			// Reconcile events: an existing hook created before the v2 Cortex
+			// ingest won't subscribe to issue events, so a labeled issue never
+			// reaches the router. Patch it to include them rather than skipping
+			// (the bug that made the first dogfood need a manual webhook POST).
+			if !hookHasIssueEvents(hook) {
+				g.patchHookAddIssueEvents(client, fullRepo, hook)
+			}
+			break
 		}
 		if found {
-			log.Printf("webhook: existing Gitea webhook already configured for %s", fullRepo)
+			log.Printf("webhook: existing Gitea webhook reconciled for %s", fullRepo)
 			continue
 		}
 		payload := map[string]interface{}{
@@ -464,4 +472,54 @@ func blankAsNone(s string) string {
 		return "none"
 	}
 	return s
+}
+
+// hookHasIssueEvents reports whether a hook already subscribes to the issue
+// events the v2 Cortex router needs.
+func hookHasIssueEvents(hook map[string]interface{}) bool {
+	events, _ := hook["events"].([]interface{})
+	for _, e := range events {
+		switch strings.TrimSpace(fmt.Sprint(e)) {
+		case "issues", "issue_label":
+			return true
+		}
+	}
+	return false
+}
+
+// patchHookAddIssueEvents adds issues+issue_label to an existing hook's event
+// set, preserving whatever it already had.
+func (g *gateway) patchHookAddIssueEvents(client *http.Client, fullRepo string, hook map[string]interface{}) {
+	id, ok := hook["id"]
+	if !ok {
+		return
+	}
+	seen := map[string]bool{}
+	var events []string
+	if cur, ok := hook["events"].([]interface{}); ok {
+		for _, e := range cur {
+			s := strings.TrimSpace(fmt.Sprint(e))
+			if s != "" && !seen[s] {
+				seen[s] = true
+				events = append(events, s)
+			}
+		}
+	}
+	for _, e := range []string{"issues", "issue_label"} {
+		if !seen[e] {
+			events = append(events, e)
+		}
+	}
+	body, err := json.Marshal(map[string]interface{}{"events": events, "active": true})
+	if err != nil {
+		return
+	}
+	path := fmt.Sprintf("/api/v1/repos/%s/hooks/%v", fullRepo, id)
+	resp, err := giteaRequest(client, http.MethodPatch, g.giteaURL, g.giteaToken, path, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("webhook: patch hook %v failed for %s: %v", id, fullRepo, err)
+		return
+	}
+	resp.Body.Close()
+	log.Printf("webhook: added issue events to hook %v on %s", id, fullRepo)
 }

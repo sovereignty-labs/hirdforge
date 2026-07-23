@@ -59,8 +59,11 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	giteaEvent := strings.TrimSpace(r.Header.Get("X-Gitea-Event"))
-	if giteaEvent == "issues" {
-		// v2 Cortex ingest (P1.1). No v1 path consumes issues events.
+	if giteaEvent == "issues" || giteaEvent == "issue_label" {
+		// v2 Cortex ingest (P1.1). Gitea fires `issue_label` when a label is
+		// added/removed via the API and `issues` (action label_updated) for
+		// UI label changes — both carry the label event Cortex routes on. No
+		// v1 path consumes either.
 		g.handleCortexIssuesEvent(body)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "cortex"})
 		return
