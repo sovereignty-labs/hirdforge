@@ -27,15 +27,32 @@ func buildConfigMap(ref Ref, spec RunSpec) map[string]any {
 // Isolation: sandbox-runner SA with no token automounted, non-root, no
 // privilege escalation, all caps dropped, seccomp RuntimeDefault.
 func buildJob(ref Ref, spec RunSpec) map[string]any {
+	// Auth for the HTTP clone/push. git over HTTP does NOT consult .netrc —
+	// it uses credential helpers — so we prime the `store` helper from the
+	// mounted token (never inline in the envelope; DISPATCH_ENVELOPE.md). The
+	// credential base is derived from the clone URL's scheme+host so it also
+	// covers the agent's later `git push origin`. The token is written only to
+	// the 0600 credentials file, never echoed.
 	guardScript := fmt.Sprintf(
 		`set -u
 if [ -n "$(ls -A %s 2>/dev/null)" ]; then echo "DIRTY WORKSPACE — prior-task residue"; exit %d; fi
 echo "workspace clean"
-if [ -f /vault/secrets/netrc ]; then cp /vault/secrets/netrc %s/.netrc && chmod 600 %s/.netrc; fi
+export HOME=%s
+git config --global user.email "agent@hirdforge.local"
+git config --global user.name "hirdforge-agent"
+if [ -f /vault/secrets/gitea-token ]; then
+  TOKEN=$(cat /vault/secrets/gitea-token)
+  CRED_BASE=$(printf '%%s' %q | sed -E 's|^(https?://)([^/]+).*|\1|')
+  CRED_HOST=$(printf '%%s' %q | sed -E 's|^https?://([^/]+).*|\1|')
+  git config --global credential.helper store
+  printf '%%s%%s:%%s@%%s\n' "$CRED_BASE" "%s" "$TOKEN" "$CRED_HOST" > %s/.git-credentials
+  chmod 600 %s/.git-credentials
+fi
 git clone --branch %q %q %s/repo || exit %d
 cd %s/repo && git checkout -b %q && echo "checkout ok: $(git rev-parse HEAD)"`,
 		workspaceMountPath, guardExitDirty,
-		workspaceMountPath, workspaceMountPath,
+		workspaceMountPath,
+		spec.CloneURL, spec.CloneURL, gitCredUsername, workspaceMountPath, workspaceMountPath,
 		spec.BaseBranch, spec.CloneURL, workspaceMountPath, guardExitCloneFail,
 		workspaceMountPath, spec.WorkBranch)
 

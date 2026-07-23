@@ -77,6 +77,11 @@ const (
 	managedByValue     = "cortex"
 	envelopeMountPath  = "/task"
 	workspaceMountPath = "/work"
+	// gitCredUsername is the Gitea account that owns the sandbox push token —
+	// the live `warband` service account (a D-BRAND-flagged external
+	// convention kept until Seidr/persona rebuild). Paired with the token
+	// from the mounted sandbox-git-cred secret for HTTP clone/push auth.
+	gitCredUsername = "warband"
 )
 
 // Allocate creates the per-task ConfigMap (envelope) and the Job. The Job's
