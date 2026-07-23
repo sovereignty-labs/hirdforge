@@ -22,15 +22,16 @@ import (
 
 // cortexDispatchOptions carries the gateway flags for the dispatcher.
 type cortexDispatchOptions struct {
-	AgentImage   string
-	SandboxNS    string
-	CredSecret   string
-	CloneBase    string
-	BaseBranch   string
-	InferenceURL string
-	Model        string
-	InferenceKey string
-	AgentSoul    string
+	AgentImage    string
+	SandboxNS     string
+	CredSecret    string
+	CloneBase     string
+	BaseBranch    string
+	InferenceURL  string
+	Model         string
+	InferenceKey  string
+	AgentSoul     string
+	MaxToolRounds int
 }
 
 // initCortexDispatcher wires the P1.3 dispatcher: sandbox Jobs, Gitea PR
@@ -68,7 +69,7 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 			"-api-key", opts.InferenceKey,
 			"-gitea-url", g.giteaURL,
 			"-tools", "exec,read,write,edit,git-clone,git-commit,git-diff,gitea",
-			"-max-tool-rounds", "40",
+			"-max-tool-rounds", strconv.Itoa(opts.MaxToolRounds),
 			"-inference-timeout", "300",
 		},
 		CloneURLBase:  strings.TrimSuffix(opts.CloneBase, "/"),
