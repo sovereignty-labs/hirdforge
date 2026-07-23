@@ -1,6 +1,14 @@
 # Contract 3 — Sandbox Lifecycle (O-SANDBOX-CONTRACT)
 
-**Status: APPROVED 2026-07-23 (Kit, PR #330).** Every agent runs in a reset-to-clean
+**Status: APPROVED 2026-07-23 (Kit, PR #330). AMENDED (pending Kit's approval,
+P1.2 PR): the gate-execution mechanism changed from exec-into-a-pause-sidecar
+to k8s container sequencing — see §Interface. Rationale: pod `exec` requires
+SPDY/WebSocket machinery (hand-rolled protocol or a client-go dependency);
+ordered containers achieve the same guarantee — the gate runs in the same
+clean pod, after the agent, on the same workspace — with plain REST and
+exit codes as OS facts.**
+
+Every agent runs in a reset-to-clean
 isolated environment (D-SANDBOX: rebuild the fast ephemeral pattern natively —
 hours-to-days, not months). On Asgard k8s the native translation of the
 ephemeral-VM pattern is a **per-task Job**: fresh pod + fresh `emptyDir` ⇒
@@ -45,24 +53,36 @@ record.
   (rides Phases 1→3 per the PRD), declared via `runtimeClassName` when adopted —
   the contract doesn't change.
 
-## Interface (what Phase-1 code implements)
+## Interface (what Phase-1 code implements — as amended)
 
 ```go
 type Sandbox interface {
-    Allocate(ctx, task TaskRef, env Envelope) (SandboxRef, error) // Job created
-    Wait(ctx, ref SandboxRef) (RunResult, error)                  // blocks until pod terminal
-    Exec(ctx, ref SandboxRef, cmd []string, timeout) (ExecResult, error) // done-gate hook
-    Destroy(ctx, ref SandboxRef) error                            // idempotent
+    Allocate(ctx, spec RunSpec) (Ref, error)      // ConfigMap(envelope) + Job created
+    Wait(ctx, ref *Ref) (RunResult, error)        // blocks until the Job is terminal
+    GateOutput(ctx, ref Ref) ([]byte, error)      // gate container log tail (≤4KiB) — the evidence
+    Destroy(ctx, ref Ref) error                   // idempotent; cascades Job→pod, deletes ConfigMap
 }
-type RunResult struct{ ExitCode int; StartedAt, FinishedAt time.Time; HeadSHA string }
-type ExecResult struct{ ExitCode int; Output []byte /* tail-capped */ }
+type RunResult struct {
+    CleanCheckOK, CheckoutOK bool                 // guard container facts
+    AgentExitCode, GateExitCode int               // OS facts, per container
+    Phase string                                  // succeeded | failed | deadline
+    StartedAt, FinishedAt time.Time
+}
 ```
 
-`Exec` exists solely so the done-gate can run the test command in the *same
-clean environment the work happened in* — the gate is not run on the gateway
-host. Implementation: k8s exec into the still-running pod (the agent container
-exits, a lightweight `pause` sidecar holds the pod for gate + collect, then
-destroy).
+**The container sequence IS the lifecycle.** The Job's pod runs, in order:
+1. init `guard-checkout` — asserts `/work` is empty (exit 90 = dirty, the
+   mechanical reset-to-clean proof), clones at `base_branch`, creates the
+   work branch (exit 91 = clone failure).
+2. init `agent` — the one-shot agent invocation against the mounted envelope.
+3. main `gate` — the route's gate command in `/work/repo`, **after** the agent
+   exited, in the same clean environment the work happened in. Its exit code
+   and log tail are the `GateResult` inputs (DONE_GATE.md).
+
+`backoffLimit: 0` — a failed pod is never blindly restarted by k8s; recovery
+is a Cortex retry dispatch carrying failure context (D-LESSONS #2).
+Implemented in `internal/sandbox` over the repo's existing dependency-free
+raw-REST k8s pattern (`cmd/gateway/cluster.go`); no client-go.
 
 ## Failure semantics (loud, never silent)
 
