@@ -24,6 +24,9 @@ type Cortex struct {
 	// OnTaskAdvanced fires after an advance route moved a task (the gateway
 	// hooks Lockbox enqueueing on `approved` and issue-close on `validated`).
 	OnTaskAdvanced func(taskID, to string)
+	// OnDecision fires for every recorded decision (the cortex.decision
+	// live stream; the ring + table remain the poll/rehydrate sources).
+	OnDecision func(Decision)
 
 	ring    []Decision
 	ringCap int
@@ -183,7 +186,11 @@ func (c *Cortex) recordDecision(d Decision) {
 	if len(c.ring) > c.ringCap {
 		c.ring = c.ring[len(c.ring)-c.ringCap:]
 	}
+	onDecision := c.OnDecision
 	c.mu.Unlock()
+	if onDecision != nil {
+		onDecision(d)
+	}
 	log.Printf("cortex: %s", d.Reason)
 }
 

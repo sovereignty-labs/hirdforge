@@ -68,6 +68,7 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 			}
 		}()
 	}
+	g.cortexSandboxDestroy = makeSandboxDestroyer(client, opts.SandboxNS)
 	g.cortex.OnReviewerDispatch = func(route *cortex.Route, ev cortex.Event) {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
@@ -329,22 +330,5 @@ func registerCortexRoutes(mux *http.ServeMux, g *gateway) {
 			tasks = []cortex.TaskRecord{}
 		}
 		writeJSON(w, http.StatusOK, tasks)
-	})
-	mux.HandleFunc("/api/v1/cortex/tasks/", func(w http.ResponseWriter, r *http.Request) {
-		if g.cortex == nil {
-			http.Error(w, "cortex disabled", http.StatusNotFound)
-			return
-		}
-		id := strings.TrimPrefix(r.URL.Path, "/api/v1/cortex/tasks/")
-		if id == "" {
-			http.Error(w, "missing task id", http.StatusBadRequest)
-			return
-		}
-		task, history, err := g.cortex.Store().GetTask(id)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"task": task, "history": history})
 	})
 }
