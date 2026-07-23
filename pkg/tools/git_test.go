@@ -74,6 +74,28 @@ func TestGitCommitToolKeepsExistingRemoteBranchName(t *testing.T) {
 	assertRemoteBranch(t, repoDir, "feat/existing")
 }
 
+// TestGitCommitToolKeepsFileOriginWhenNoHost pins the sandbox regression: a
+// token present (e.g. resolved from /vault/secrets) but an empty GiteaURL must
+// NOT rewrite a working file:// origin to a hostless "http:///owner/repo.git",
+// which fails the push. This failed the v2 sandbox gate while passing on hosts
+// with no ambient token.
+func TestGitCommitToolKeepsFileOriginWhenNoHost(t *testing.T) {
+	workspace, repoDir := setupWorkspaceRepo(t)
+	writeFile(t, filepath.Join(repoDir, "notes.txt"), "no host\n")
+
+	// Token set, GiteaURL empty — the exact sandbox condition.
+	tool := NewGitCommitTool(workspace, "", "ambient-token-value", "chuck")
+	res := tool.Execute(map[string]interface{}{
+		"repo":    "project",
+		"message": "test commit",
+		"branch":  "feat/add-docs",
+	})
+	if res.Error != "" {
+		t.Fatalf("git-commit clobbered the file origin: %s (%s)", res.Error, res.Output)
+	}
+	assertRemoteBranch(t, repoDir, "chuck/feat-add-docs")
+}
+
 func TestGitCloneToolAppendsRepoContextFromSeidr(t *testing.T) {
 	t.Parallel()
 
