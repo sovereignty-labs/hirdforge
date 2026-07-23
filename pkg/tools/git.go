@@ -671,7 +671,13 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: fmt.Sprintf("repo %s not found in workspace — clone it first", repo)}
 	}
 
-	if t.Token != "" {
+	// Only rewrite origin to a credentialed URL when we can actually build a
+	// valid one. Token alone is insufficient: the token is resolved from the
+	// environment (e.g. /vault/secrets/gitea-token), so with an empty GiteaURL
+	// buildPushURL yields a hostless "http:///owner/repo.git" that clobbers a
+	// working origin and breaks the push. Requiring a real host keeps the tool
+	// hermetic when GiteaURL is unset (tests, or a pre-cloned file origin).
+	if t.Token != "" && hostFromURL(t.GiteaURL) != "" {
 		pushURL := t.buildPushURL(repo)
 		runGit(repoDir, []string{"git", "remote", "set-url", "origin", pushURL}, 5*time.Second)
 	}
