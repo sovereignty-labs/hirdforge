@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"git.hirdforge.com/kit/hirdforge/internal/sandbox"
 )
@@ -16,6 +17,8 @@ type fakeSandbox struct {
 	gateLog   string
 	destroyed bool
 	allocErr  error
+	jobExists bool
+	existsErr error
 }
 
 func (f *fakeSandbox) Allocate(_ context.Context, spec sandbox.RunSpec) (sandbox.Ref, error) {
@@ -35,6 +38,9 @@ func (f *fakeSandbox) GateOutput(_ context.Context, _ sandbox.Ref) ([]byte, erro
 func (f *fakeSandbox) Destroy(_ context.Context, _ sandbox.Ref) error {
 	f.destroyed = true
 	return nil
+}
+func (f *fakeSandbox) Exists(_ context.Context, _ sandbox.Ref) (bool, error) {
+	return f.jobExists, f.existsErr
 }
 
 func newDispatchFixture(t *testing.T, fs *fakeSandbox, prFound bool) (*Dispatcher, *Config, *Route, string, *MemStore, *[]Event) {
@@ -238,5 +244,105 @@ func TestBuildEnvelopeDeterministic(t *testing.T) {
 		if string(aj) != string(bj) {
 			t.Fatal("envelope assembly is not deterministic")
 		}
+	}
+}
+
+// TestReconcileFailsOrphanWhenJobGone: a task stuck at building whose sandbox
+// Job is gone (gateway restarted) is failed loudly, not left a zombie.
+func TestReconcileFailsOrphanWhenJobGone(t *testing.T) {
+	cfg := mustConfig(t)
+	store := NewMemStore()
+	taskInBuilding(t, store, "hf-orph", "build-on-label")
+	fs := &fakeSandbox{jobExists: false}
+	var events []Event
+	d := &Dispatcher{Store: store, Sandbox: fs, Events: func(e Event) { events = append(events, e) },
+		CloneURLBase: "http://g", BaseBranch: "main"}
+
+	d.ReconcileOnStartup(context.Background(), cfg, "sandbox")
+
+	task, _, _ := store.GetTask("hf-orph")
+	if task.Status != StatusFailed {
+		t.Fatalf("orphan not failed: %s", task.Status)
+	}
+	reasons := historyReasons(t, store, "hf-orph")
+	if !strings.Contains(reasons[len(reasons)-1], "orphaned") {
+		t.Fatalf("reason = %q", reasons[len(reasons)-1])
+	}
+}
+
+// TestReconcileReattachesWhenJobExists: a still-running Job is re-attached and
+// finalized (here: green gate -> review), recovering the lost waiter.
+func TestReconcileReattachesWhenJobExists(t *testing.T) {
+	cfg := mustConfig(t)
+	store := NewMemStore()
+	taskInBuilding(t, store, "hf-reatt", "build-on-label")
+	fs := &fakeSandbox{jobExists: true,
+		result:  sandbox.RunResult{CleanCheckOK: true, CheckoutOK: true, GateExitCode: 0, Phase: "succeeded"},
+		gateLog: "ok"}
+	d := &Dispatcher{Store: store, Sandbox: fs,
+		PRLookup: func(_ context.Context, _, _ string) (int64, bool, error) { return 7, true, nil },
+		Events:   func(Event) {}, CloneURLBase: "http://g", BaseBranch: "main"}
+
+	d.ReconcileOnStartup(context.Background(), cfg, "sandbox")
+	// re-attach runs in a goroutine; wait briefly for it to finalize.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if tk, _, _ := store.GetTask("hf-reatt"); tk.Status == StatusReview {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	tk, _, _ := store.GetTask("hf-reatt")
+	t.Fatalf("re-attach did not finalize to review: %s", tk.Status)
+}
+
+// TestWatchdogFailsPastTimeout: any active task past timeout_at is failed.
+func TestWatchdogFailsPastTimeout(t *testing.T) {
+	store := NewMemStore()
+	taskInBuilding(t, store, "hf-to", "build-on-label")
+	past := time.Now().Add(-time.Minute)
+	if tk, _, _ := store.GetTask("hf-to"); tk != nil {
+		tk.TimeoutAt = &past
+		// write back through the mem map
+	}
+	// MemStore stores pointers; set timeout via a direct helper.
+	setMemTimeout(store, "hf-to", past)
+	d := &Dispatcher{Store: store, Sandbox: &fakeSandbox{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	go d.RunTimeoutWatchdog(ctx, 20*time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if tk, _, _ := store.GetTask("hf-to"); tk.Status == StatusFailed {
+			cancel()
+			reasons := historyReasons(t, store, "hf-to")
+			if !strings.Contains(reasons[len(reasons)-1], "timeout") {
+				t.Fatalf("reason = %q", reasons[len(reasons)-1])
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	t.Fatal("watchdog did not fail the past-timeout task")
+}
+
+func taskInBuilding(t *testing.T, store *MemStore, id, routeID string) {
+	t.Helper()
+	task := &TaskRecord{ID: id, RouteID: routeID, IssueRepo: "kit/hirdforge", IssueNumber: 1}
+	if err := store.CreateTask(task, "m", Cause{Kind: CauseWebhook}); err != nil {
+		t.Fatal(err)
+	}
+	for _, to := range []string{StatusDispatched, StatusBuilding} {
+		if err := store.Transition(id, to, "step", Cause{Kind: CauseSandbox}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func setMemTimeout(store *MemStore, id string, at time.Time) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if tk, ok := store.tasks[id]; ok {
+		tk.TimeoutAt = &at
 	}
 }

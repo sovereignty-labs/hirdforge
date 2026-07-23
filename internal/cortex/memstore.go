@@ -181,6 +181,18 @@ func (m *MemStore) FindTaskByPR(prRepo string, prNumber int64) (*TaskRecord, err
 	return &cp, nil
 }
 
+func (m *MemStore) ListActive() ([]TaskRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []TaskRecord
+	for _, t := range m.tasks {
+		if t.Status != StatusValidated && t.Status != StatusFailed {
+			out = append(out, *t)
+		}
+	}
+	return out, nil
+}
+
 func (m *MemStore) RecordDecision(d Decision) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

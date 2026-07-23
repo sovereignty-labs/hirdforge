@@ -96,6 +96,14 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 		}()
 	}
 	log.Printf("cortex: dispatcher enabled (ns=%s image=%s)", opts.SandboxNS, opts.AgentImage)
+
+	// Robustness against gateway restarts (PERSISTENCE.md: no silent zombies).
+	// The sandbox Jobs outlive the gateway, but the in-memory waiter goroutines
+	// do not — so on startup reconcile in-flight tasks (re-attach where the Job
+	// survives, fail loudly where it's gone), and run a timeout watchdog that
+	// reaps any task stuck past its deadline.
+	go d.ReconcileOnStartup(context.Background(), g.cortex.Config(), opts.SandboxNS)
+	go d.RunTimeoutWatchdog(context.Background(), time.Minute)
 }
 
 // cortexPRLookup observes whether an open PR exists for a head branch — the

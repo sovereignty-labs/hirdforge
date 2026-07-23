@@ -95,6 +95,18 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, cfg *Config, route *Route
 		return err
 	}
 
+	return d.awaitAndFinalize(ctx, route, task, env, ref)
+}
+
+// awaitAndFinalize waits for a task's sandbox to terminate, then collects the
+// PR, evaluates the mechanical gate, and records the outcome. It is called by
+// DispatchTask and by the startup reconciler re-attaching to an in-flight task
+// whose waiter goroutine died with a gateway restart — the sandbox Job outlives
+// the gateway, so the work is not lost, only its watcher.
+func (d *Dispatcher) awaitAndFinalize(ctx context.Context, route *Route, task *TaskRecord, env *Envelope, ref sandbox.Ref) error {
+	taskID := task.ID
+	gate := route.DoneGate
+
 	res, waitErr := d.Sandbox.Wait(ctx, &ref)
 	defer func() {
 		if derr := d.Sandbox.Destroy(context.WithoutCancel(ctx), ref); derr != nil {
@@ -289,4 +301,100 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, cfg *Config, route *R
 		log.Printf("cortex: review observed on %s#%d: %s by %s", task.PRRepo, task.PRNumber, state, reviewer)
 	}
 	return nil
+}
+
+// ReconcileOnStartup recovers tasks orphaned by a gateway restart: their
+// sandbox Job (and thus their work) outlives the gateway, but the in-memory
+// waiter goroutine that would collect the result died. For each in-flight task
+// (dispatched/building) it re-attaches a waiter if the Job still exists, or
+// fails it loudly if the Job is gone (no silent zombies — PERSISTENCE.md).
+// Review/approved tasks are left to their external events + the timeout
+// watchdog. Runs once at startup; safe to call with no active tasks.
+func (d *Dispatcher) ReconcileOnStartup(ctx context.Context, cfg *Config, namespace string) {
+	active, err := d.Store.ListActive()
+	if err != nil {
+		log.Printf("cortex: reconcile: ListActive failed: %v", err)
+		return
+	}
+	for i := range active {
+		task := active[i]
+		if task.Status != StatusDispatched && task.Status != StatusBuilding {
+			continue // review/approved/merged wait on webhooks + the watchdog
+		}
+		route := cfg.RouteByID(task.RouteID)
+		if route == nil || route.Dispatch == nil {
+			_ = d.failTask(task.ID, "reconcile: task's route no longer exists", Cause{Kind: CauseSandbox})
+			continue
+		}
+		ref := sandbox.RefForTask(namespace, task.ID)
+		exists, err := d.Sandbox.Exists(ctx, ref)
+		if err != nil {
+			log.Printf("cortex: reconcile: Exists(%s) failed: %v — leaving for the watchdog", task.ID, err)
+			continue
+		}
+		if !exists {
+			log.Printf("cortex: reconcile: task %s orphaned (sandbox gone after restart) — failing", task.ID)
+			_ = d.failTaskWithEvent(ctx, route, task.ID,
+				"orphaned: sandbox gone after gateway restart — retry to resume",
+				Cause{Kind: CauseSandbox, Detail: map[string]any{"reconcile": true}})
+			continue
+		}
+		// Re-attach: the Job is still around, so rebuild the envelope and wait.
+		env, err := BuildEnvelope(cfg, route, EnvelopeParams{
+			Task:          &task,
+			CloneURL:      d.CloneURLBase + "/" + task.IssueRepo + ".git",
+			BaseBranch:    d.BaseBranch,
+			CredentialRef: d.CredentialRef,
+		})
+		if err != nil {
+			_ = d.failTask(task.ID, "reconcile: envelope rebuild failed: "+err.Error(), Cause{Kind: CauseSandbox})
+			continue
+		}
+		log.Printf("cortex: reconcile: re-attaching to in-flight task %s (%s)", task.ID, ref.String())
+		routeCopy, taskCopy, envCopy := route, task, env
+		go func() {
+			rctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+			defer cancel()
+			if err := d.awaitAndFinalize(rctx, routeCopy, &taskCopy, envCopy, ref); err != nil {
+				log.Printf("cortex: reconcile: re-attach finalize %s: %v", taskCopy.ID, err)
+			}
+		}()
+	}
+}
+
+// RunTimeoutWatchdog periodically fails any active task past its timeout_at —
+// the safety net PERSISTENCE.md promises, so a task can never sit non-terminal
+// forever (e.g. a stalled reviewer, or an orphan the reconciler could not
+// re-attach). Blocks until ctx is done; run it in a goroutine.
+func (d *Dispatcher) RunTimeoutWatchdog(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			active, err := d.Store.ListActive()
+			if err != nil {
+				log.Printf("cortex: watchdog: ListActive failed: %v", err)
+				continue
+			}
+			for i := range active {
+				t := active[i]
+				if t.TimeoutAt == nil || now.Before(*t.TimeoutAt) {
+					continue
+				}
+				log.Printf("cortex: watchdog: task %s past timeout (%s, status %s) — failing", t.ID, t.TimeoutAt.Format(time.RFC3339), t.Status)
+				if err := d.Store.Transition(t.ID, StatusFailed,
+					"timeout: task exceeded its deadline (watchdog)",
+					Cause{Kind: CauseTimeout, Detail: map[string]any{"watchdog": true, "was": t.Status}}); err != nil {
+					// A losing race with normal finalization is fine — it's terminal now.
+					log.Printf("cortex: watchdog: transition %s: %v", t.ID, err)
+				}
+			}
+		}
+	}
 }
