@@ -68,6 +68,9 @@ type Store interface {
 	Transition(taskID, to, reason string, cause Cause) error
 	GetTask(id string) (*TaskRecord, []TransitionRecord, error)
 	ListTasks(f TaskFilter) ([]TaskRecord, error)
+	// ListActive returns all tasks in a non-terminal status (for the startup
+	// reconciler and the timeout watchdog).
+	ListActive() ([]TaskRecord, error)
 	// Non-status mutators (status changes go through Transition ONLY).
 	SetPR(taskID, prRepo string, prNumber int64) error
 	SetGateResult(taskID string, lastResult []byte) error
@@ -320,6 +323,38 @@ func (s *PGStore) ListTasks(f TaskFilter) ([]TaskRecord, error) {
 		t.IssueNumber = issueNumber.Int64
 		t.Agent = agent.String
 		t.PRNumber = prNumber.Int64
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *PGStore) ListActive() ([]TaskRecord, error) {
+	rows, err := s.db.Query(`SELECT id, route_id, status, attempt, issue_repo, issue_number, issue_title,
+		agent, work_branch, pr_repo, pr_number, timeout_at, created_at, updated_at
+		FROM cortex_tasks WHERE status NOT IN ('validated','failed') ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TaskRecord
+	for rows.Next() {
+		var t TaskRecord
+		var issueNumber, prNumber sql.NullInt64
+		var agent, workBranch, prRepo, issueTitle sql.NullString
+		var timeoutAt sql.NullTime
+		if err := rows.Scan(&t.ID, &t.RouteID, &t.Status, &t.Attempt, &t.IssueRepo, &issueNumber, &issueTitle,
+			&agent, &workBranch, &prRepo, &prNumber, &timeoutAt, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		t.IssueNumber = issueNumber.Int64
+		t.IssueTitle = issueTitle.String
+		t.Agent = agent.String
+		t.WorkBranch = workBranch.String
+		t.PRRepo = prRepo.String
+		t.PRNumber = prNumber.Int64
+		if timeoutAt.Valid {
+			t.TimeoutAt = &timeoutAt.Time
+		}
 		out = append(out, t)
 	}
 	return out, rows.Err()

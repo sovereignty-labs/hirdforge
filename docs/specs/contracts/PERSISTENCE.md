@@ -97,6 +97,24 @@ through the existing WebSocket fan-out (`broadcastPayload`,
 `cmd/gateway/websocket.go:63`); the tables are the poll/rehydrate fallback
 (contract §4).
 
+## Restart robustness (reconcile + watchdog)
+
+The sandbox Jobs are durable k8s objects that outlive the gateway; only the
+in-memory waiter goroutine that collects a task's result is ephemeral. So a
+gateway restart mid-dispatch must not strand a task at `dispatched`/`building`
+forever (the "no silent zombies" promise above). Two mechanisms enforce it:
+
+- **Startup reconciler** — on boot, Cortex lists non-terminal tasks and, for
+  each in-flight one, checks whether its sandbox Job still exists. If it does,
+  a fresh waiter is re-attached (`awaitAndFinalize`) and the task finalizes
+  normally; if the Job is gone, the task is failed loudly
+  (`reason=orphaned: sandbox gone after gateway restart — retry to resume`).
+- **Timeout watchdog** — a periodic sweep fails any active task past its
+  `timeout_at`, the backstop for anything the reconciler cannot re-attach (a
+  stalled reviewer, an orphan whose Job was GC'd). Every reap is an event.
+
+Both are pure mechanics — no model output, only k8s facts and the clock.
+
 ## Migration note
 
 No data migrates from `a2a_tasks` — different lifecycle, different semantics;

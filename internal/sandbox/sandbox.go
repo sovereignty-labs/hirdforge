@@ -52,6 +52,9 @@ type Sandbox interface {
 	Wait(ctx context.Context, ref *Ref) (RunResult, error)
 	GateOutput(ctx context.Context, ref Ref) ([]byte, error)
 	Destroy(ctx context.Context, ref Ref) error
+	// Exists reports whether the Job for ref is still present in the cluster
+	// (used by the startup reconciler to decide re-attach vs. orphan-fail).
+	Exists(ctx context.Context, ref Ref) (bool, error)
 }
 
 // K8sSandbox implements Sandbox against a Kubernetes API.
@@ -244,6 +247,19 @@ func (s *K8sSandbox) GateOutput(ctx context.Context, ref Ref) ([]byte, error) {
 		return nil, fmt.Errorf("sandbox: gate log: %s", resp.Status)
 	}
 	return readCapped(resp.Body, 4<<10) // ≤4KiB excerpt per the contract
+}
+
+// Exists reports whether the Job still exists (404 => gone).
+func (s *K8sSandbox) Exists(ctx context.Context, ref Ref) (bool, error) {
+	_, err := s.Client.doJSON(ctx, "GET",
+		fmt.Sprintf("/apis/batch/v1/namespaces/%s/jobs/%s", ref.Namespace, ref.JobName), nil)
+	if err != nil {
+		if isNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Destroy deletes the Job (cascading to its pod) and the envelope ConfigMap.
