@@ -230,6 +230,16 @@ func routeIDWillExist(routes []Route, id string) bool {
 	return false
 }
 
+// RouteByID returns the route with the given id, or nil.
+func (c *Config) RouteByID(id string) *Route {
+	for i := range c.Routes {
+		if c.Routes[i].ID == id {
+			return &c.Routes[i]
+		}
+	}
+	return nil
+}
+
 // EffectiveRepo resolves a route's repo constraint: the route's own, else the
 // config default, else "" (unconstrained).
 func (c *Config) EffectiveRepo(r *Route) string {

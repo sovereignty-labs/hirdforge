@@ -281,6 +281,16 @@ func validateSpec(spec RunSpec) error {
 	return nil
 }
 
+// RefForTask reconstructs the deterministic Ref for a task id — the cancel
+// path's teardown handle when no live Ref is at hand.
+func RefForTask(namespace, taskID string) Ref {
+	return Ref{
+		Namespace: namespace,
+		JobName:   "hf-task-" + sanitizeName(taskID),
+		CMName:    "hf-task-" + sanitizeName(taskID) + "-envelope",
+	}
+}
+
 // sanitizeName makes a task id a valid k8s resource name segment.
 func sanitizeName(id string) string {
 	s := strings.ToLower(id)

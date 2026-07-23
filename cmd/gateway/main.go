@@ -304,43 +304,44 @@ type agentHealthResponse struct {
 }
 
 type gateway struct {
-	mu                sync.RWMutex
-	agents            map[string]*Agent
-	order             []string
-	a2aStore          *A2ATaskStore
-	cortex            *cortex.Cortex
-	lockboxURL        string
-	reposMu           sync.RWMutex
-	repos             []string
-	eventMu           sync.Mutex
-	events            []Event
-	eventCap          int
-	k8s               *k8sState
-	wsMu              sync.Mutex
-	wsConns           []*wsClient
-	sessionStore      *sessionStore
-	projector         *workspacepkg.Projector
-	settings          *settingsStore
-	notifMu           sync.Mutex
-	notifications     []Notification
-	notifCap          int
-	lastSessionMu     sync.RWMutex
-	lastSession       map[string]string
-	arMu              sync.RWMutex
-	activeRequests    map[string]*ActiveRequest
-	arEpoch           uint64
-	webhookDedup      sync.Map
-	delegateResults   sync.Map
-	injectionMu       sync.Mutex
-	injections        map[string][]InjectionMessage // keyed by agent name
-	pausedAgents      map[string]bool
-	webhookSecret     string
-	taskRepo          string
-	giteaURL          string
-	giteaToken        string
-	seidrURL          string
-	defaultFleet      string
-	discordWebhookURL string
+	mu                   sync.RWMutex
+	agents               map[string]*Agent
+	order                []string
+	a2aStore             *A2ATaskStore
+	cortex               *cortex.Cortex
+	cortexSandboxDestroy func(taskID string)
+	lockboxURL           string
+	reposMu              sync.RWMutex
+	repos                []string
+	eventMu              sync.Mutex
+	events               []Event
+	eventCap             int
+	k8s                  *k8sState
+	wsMu                 sync.Mutex
+	wsConns              []*wsClient
+	sessionStore         *sessionStore
+	projector            *workspacepkg.Projector
+	settings             *settingsStore
+	notifMu              sync.Mutex
+	notifications        []Notification
+	notifCap             int
+	lastSessionMu        sync.RWMutex
+	lastSession          map[string]string
+	arMu                 sync.RWMutex
+	activeRequests       map[string]*ActiveRequest
+	arEpoch              uint64
+	webhookDedup         sync.Map
+	delegateResults      sync.Map
+	injectionMu          sync.Mutex
+	injections           map[string][]InjectionMessage // keyed by agent name
+	pausedAgents         map[string]bool
+	webhookSecret        string
+	taskRepo             string
+	giteaURL             string
+	giteaToken           string
+	seidrURL             string
+	defaultFleet         string
+	discordWebhookURL    string
 
 	// delegationTimelines stores typed events indexed by session_id.
 	// Access is protected by dtlMu.
@@ -1566,8 +1567,11 @@ func main() {
 		if err != nil {
 			die("cortex: store init failed", err)
 		}
-		gw.cortex = cortex.New(cfg, store)
+		gw.cortex = cortex.New(cfg, &broadcastingStore{Store: store, gw: gw})
 		gw.cortex.OnTaskAdvanced = gw.cortexOnTaskAdvanced
+		gw.cortex.OnDecision = func(d cortex.Decision) {
+			gw.broadcastPayload(map[string]any{"type": "cortex.decision", "decision": d})
+		}
 		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
 		gw.initCortexDispatcher(cortexDispatchOptions{
 			AgentImage: strings.TrimSpace(*cortexAgentImage),
@@ -1663,6 +1667,7 @@ func main() {
 	gw.registerWebhookHandlers(mux)
 	registerCortexRoutes(mux, gw)
 	registerCortexInternalRoutes(mux, gw, strings.TrimSpace(*cortexMergeSecret))
+	registerCortexControlRoutes(mux, gw)
 	go func() {
 		time.Sleep(10 * time.Second)
 		gw.ensureGiteaWebhooks()
