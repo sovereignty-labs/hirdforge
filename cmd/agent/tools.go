@@ -16,10 +16,10 @@ import (
 	"sync"
 	"time"
 
-	mcppkg "github.com/kitporath/project_valhalla/pkg/mcp"
-	tasklifepkg "github.com/kitporath/project_valhalla/pkg/tasklife"
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
-	a2apb "github.com/kitporath/project_valhalla/proto/a2a"
+	mcppkg "git.hirdforge.com/kit/hirdforge/pkg/mcp"
+	tasklifepkg "git.hirdforge.com/kit/hirdforge/pkg/tasklife"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
+	a2apb "git.hirdforge.com/kit/hirdforge/proto/a2a"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

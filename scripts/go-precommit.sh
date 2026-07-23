@@ -1,5 +1,5 @@
 #!/bin/sh
-# Go pre-commit validation for project_valhalla
+# Go pre-commit validation for hirdforge
 # Runs go vet, go build on all binaries (agent, gateway, lockbox), and gofmt checks
 # Usage: ./scripts/go-precommit.sh [--all]
 # Exit 0 if all pass, non-zero if any fail

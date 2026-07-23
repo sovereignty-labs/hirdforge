@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 // fakePRURL is the PR URL the fake tool "creates"; it flows tool output ->

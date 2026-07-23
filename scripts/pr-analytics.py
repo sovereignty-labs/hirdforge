@@ -6,8 +6,8 @@ import sys
 import urllib.request
 
 REPOS = [
-    "gitea_admin/project_valhalla",
-    "kit/valhalla-infra",
+    "kit/hirdforge",
+    "kit/hirdforge",
     "kit/hirdforge-personas",
 ]
 

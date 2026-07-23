@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 // fakePRTool records the args it was Execute'd with so the test can assert

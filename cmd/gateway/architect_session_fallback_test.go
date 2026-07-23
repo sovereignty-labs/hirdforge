@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	workspacepkg "github.com/kitporath/project_valhalla/pkg/workspace"
+	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
 func TestApplyWorkspaceEventDelegateFallsBackToActiveSession(t *testing.T) {

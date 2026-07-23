@@ -67,7 +67,7 @@ Carry forward the four lessons (D-LESSONS), not the modules. Exception: if
 wins), revisit Workbench's aggregate logic then — advanced mode, not baseline, and
 even then git-branch merging obviates most of it. *2026-07-18.*
 
-**D-BRAND — Rebrand (Phase 0).** Module path `github.com/kitporath/project_valhalla`
+**D-BRAND — Rebrand (Phase 0).** Module path `git.hirdforge.com/kit/hirdforge`
 → **`git.example.internal/hirdforge/hirdforge`** (matches the master home; a module path is
 an internal identifier, not a fetched URL — GitHub was never a candidate). Drop the
 Valhalla-military flavor: **warrior→agent** (the binary is already `cmd/agent`),

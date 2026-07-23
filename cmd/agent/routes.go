@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	tasklifepkg "github.com/kitporath/project_valhalla/pkg/tasklife"
-	taskspkg "github.com/kitporath/project_valhalla/pkg/tasks"
+	tasklifepkg "git.hirdforge.com/kit/hirdforge/pkg/tasklife"
+	taskspkg "git.hirdforge.com/kit/hirdforge/pkg/tasks"
 )
 
 type serverDeps struct {

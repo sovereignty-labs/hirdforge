@@ -15,8 +15,8 @@ import urllib.error
 
 # Target repos for cleanup
 REPOS = [
-    "gitea_admin/project_valhalla",
-    "kit/valhalla-infra",
+    "kit/hirdforge",
+    "kit/hirdforge",
     "kit/hirdforge-personas",
     "kit/hirdforge-tasks",
 ]

@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	workspacepkg "github.com/kitporath/project_valhalla/pkg/workspace"
+	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
 const agentRequestTimeout = 120 * time.Second

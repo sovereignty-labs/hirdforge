@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 // TestConfigureToolRegistryWarriorProfile pins the exact tool set a builder

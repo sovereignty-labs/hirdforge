@@ -7,7 +7,7 @@ import (
 	"net"
 	"strings"
 
-	a2apb "github.com/kitporath/project_valhalla/proto/a2a"
+	a2apb "git.hirdforge.com/kit/hirdforge/proto/a2a"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

@@ -17,7 +17,7 @@ import (
 	"strings"
 	"time"
 
-	toolpkg "github.com/kitporath/project_valhalla/pkg/tools"
+	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
 )
 
 func soulHasLearnedTool(soulContent, toolName string) bool {
