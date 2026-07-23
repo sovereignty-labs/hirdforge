@@ -1,9 +1,13 @@
 # Lean agent image for v2 sandbox Jobs (SANDBOX_LIFECYCLE.md). Unlike
-# Dockerfile.agent (which bundles kubectl/helm/talosctl/crane/yq for the
-# sovereign infra agents — public downloads that the airgapped CI runner
-# cannot reach), the sandbox builder needs only: the agent binary, git, and
-# a Go toolchain for the test-command gate (`go build ./... && go test ./...`).
-# No external downloads → builds in the airgapped CI.
+# Dockerfile.agent (which bundles kubectl/helm/talosctl/crane/yq via public
+# downloads the airgapped CI runner cannot reach), the sandbox builder needs
+# only the agent binary, git, and a Go toolchain for the test-command gate.
+#
+# The cluster is airgapped from proxy.golang.org, so the gate's `go build/
+# test ./...` cannot download modules at task time. We bake the module cache
+# (populated by `go mod download` in CI, which has proxy access) into the
+# runtime image and run the gate with GOFLAGS=-mod=mod GOPROXY=off — the
+# sandbox repo is this same module, so every dependency resolves offline.
 FROM golang:1.25-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -13,14 +17,22 @@ COPY pkg/ pkg/
 COPY internal/ internal/
 COPY proto/ proto/
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-agent ./cmd/agent/
+# Warm the build cache too so the gate's first compile is fast and offline.
+RUN go build ./... && go vet ./... 2>/dev/null || true
 
-# Runtime: Go toolchain (the gate compiles+tests) + git, nothing else.
 FROM golang:1.25-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 1000 agent
+# Bake the module + build caches so the gate runs fully offline.
+COPY --from=build /go/pkg/mod /go/pkg/mod
+COPY --from=build /root/.cache/go-build /home/agent/.cache/go-build
 COPY --from=build /valhalla-agent /usr/local/bin/valhalla-agent
+RUN chown -R agent:agent /go/pkg/mod /home/agent/.cache
+ENV GOFLAGS=-mod=mod
+ENV GOPROXY=off
+ENV GOCACHE=/home/agent/.cache/go-build
 USER agent
 WORKDIR /work
 ENTRYPOINT ["valhalla-agent"]
