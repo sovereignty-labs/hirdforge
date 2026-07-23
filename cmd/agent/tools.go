@@ -1177,6 +1177,9 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	}
 	rememberExec := &rememberTool{memoryURL: deps.memoryURL, agentName: deps.agentName}
 	memoryEditExec := &memoryEditTool{memoryURL: deps.memoryURL}
+	if deps.enabled["todo"] {
+		reg.Register(&todoTool{})
+	}
 	if deps.enabled["exec"] {
 		reg.Register(toolpkg.NewExecTool())
 	}

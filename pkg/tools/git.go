@@ -625,6 +625,12 @@ func fileLooksBinary(path string) (bool, error) {
 	return bytes.IndexByte(buf[:n], 0) >= 0, nil
 }
 
+// GitCommitNoChangesPrefix marks a git-commit result where staging found no
+// changes. The agent loop keys off this prefix to treat the no-op as a wobble
+// signal (M6 re-anchor) rather than letting the model read "nothing to commit"
+// as a completed commit — the exact misread the P2.0 baseline exposed.
+const GitCommitNoChangesPrefix = "No changes to commit"
+
 type GitCommitTool struct {
 	WorkDir   string
 	GiteaURL  string
@@ -707,7 +713,9 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 
 	statusRes := runGit(repoDir, []string{"git", "status", "--porcelain"}, 10*time.Second)
 	if statusRes.Error == "" && strings.TrimSpace(statusRes.Output) == "" {
-		return ToolResult{Output: "Nothing to commit. Did you forget to use the write tool or exec to create/modify files? Use `exec: git status` to check workspace state."}
+		return ToolResult{Output: GitCommitNoChangesPrefix + " — nothing was committed and no work was saved. This is NOT done. " +
+			"Your edits are not in the '" + repo + "' working tree: either you have not written them yet, or you edited files outside '" + repo + "'. " +
+			"Recover: run `exec: git -C " + repo + " status` and `exec: ls " + repo + "`, make sure your changes are in '" + repo + "/', then call git-commit again. Do not report success until git-commit confirms a commit."}
 	}
 	if err := validateStagedFilesForCommit(repoDir); err != nil {
 		return ToolResult{Error: err.Error()}

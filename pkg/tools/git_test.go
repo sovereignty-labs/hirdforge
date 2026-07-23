@@ -55,6 +55,30 @@ func TestGitCommitToolPrefixesNewBranches(t *testing.T) {
 	assertRemoteBranch(t, repoDir, "chuck/feat-add-docs")
 }
 
+// TestGitCommitToolNoChangesCoaches pins the M6/M2 fix: when nothing is staged,
+// git-commit must not read as a completed commit. It returns the coaching prefix
+// the agent loop keys off (a wobble signal / re-anchor) with recovery steps that
+// name the repo dir — the P2.0 baseline showed the model misreading the old bare
+// "Nothing to commit" as done and stopping before the PR.
+func TestGitCommitToolNoChangesCoaches(t *testing.T) {
+	workspace, _ := setupWorkspaceRepo(t)
+	// No file written — the working tree is clean.
+	tool := NewGitCommitTool(workspace, "", "", "chuck")
+	res := tool.Execute(map[string]interface{}{
+		"repo":    "project",
+		"message": "nothing here",
+	})
+	if !strings.HasPrefix(strings.TrimSpace(res.Output), GitCommitNoChangesPrefix) {
+		t.Fatalf("expected output to start with %q, got: %q (err %q)", GitCommitNoChangesPrefix, res.Output, res.Error)
+	}
+	if !strings.Contains(res.Output, "project") {
+		t.Errorf("coaching should name the repo dir 'project': %q", res.Output)
+	}
+	if !strings.Contains(strings.ToLower(res.Output), "not") {
+		t.Errorf("coaching should make clear this is NOT done: %q", res.Output)
+	}
+}
+
 func TestGitCommitToolKeepsExistingRemoteBranchName(t *testing.T) {
 	workspace, repoDir := setupWorkspaceRepo(t)
 	createRemoteBranch(t, repoDir, "feat/existing")
