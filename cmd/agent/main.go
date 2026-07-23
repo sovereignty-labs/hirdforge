@@ -2189,6 +2189,8 @@ func main() {
 	apiKey := flag.String("api-key", "", "API key for inference backend (optional)")
 	maxContext := flag.Int("max-context", 20, "max number of user/assistant message pairs to keep (0 disables trimming)")
 	hunterMode := flag.Bool("hunter-mode", false, "Run as ephemeral hunter: execute task, write to memory, exit")
+	oneShotFlag := flag.Bool("one-shot", false, "Run one sandbox task from an envelope and exit (P1.4)")
+	envelopeFlag := flag.String("envelope", "/task/envelope.json", "envelope path for --one-shot")
 	intuitionFlag := flag.Bool("intuition", false, "Enable Seidr intuitive recall (injects stale context; off by default")
 	episodicFlag := flag.Bool("episodic", false, "Enable episodic state loading/injection/persist")
 	bootstrapFlag := flag.Bool("bootstrap", false, "Enable session bootstrap and reflection context injection")
@@ -2413,6 +2415,10 @@ func main() {
 		giteaTool:        giteaTool,
 		reviewTracker:    reviewTracker,
 	})
+	if *oneShotFlag {
+		os.Exit(runOneShot(processConversation, *envelopeFlag))
+	}
+
 	a2aRuntime := newA2ARuntime(agentName, *gatewayURL, processConversation)
 
 	mux := http.NewServeMux()
