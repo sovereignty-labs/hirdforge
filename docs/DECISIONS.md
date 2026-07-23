@@ -14,7 +14,7 @@ Companion to HIRDFORGE_V2_PRD.md (plan of record) and the source specs in
 **D-SKELETON — Walking skeleton first.** The first build target is a thin
 end-to-end vertical slice: one agent → Cortex router → mechanically-gated reviewer
 → one PR, dogfooded on this repo. It proves the entire determinism spine in the
-smallest slice; the researcher role, fleet scaling, sandbox hardening, concierge,
+smallest slice; the researcher role, fleet scaling, sandbox hardening, steward,
 and UI all layer on afterward. Rationale: earliest honest "it works" signal and
 the fastest demoable loop. *2026-07-18.*
 
@@ -26,15 +26,21 @@ runtime dependency on the KWS/omniagent deployment. The k8s scaffold existed
 execution was never built. Estimate corrected from "months (native gVisor from
 scratch)" to "hours-to-days (proven pattern)." *2026-07-18.*
 
-**D-INFRA — Two substrates, un-bundled.** Git and compute are separate homes:
-- **Git side — KWS Gitea (`git.example.internal`), master → forge.example.internal failover mirror.**
-  Repo, PRs, webhooks, CI. The platform wires into KWS Gitea: the gateway receives
-  webhooks *from* it and opens PRs *on* it.
+**D-INFRA — Traditional hirdforge topology, single home.** *(Corrected 2026-07-23,
+approved by Kit at the v2 kickoff; supersedes the original two-substrate wording
+that put the master on KWS `git.example.internal`.)*
+- **Git master — `git.hirdforge.com` (Gitea, hosted in Asgard).** Repo, PRs,
+  webhooks, CI. The platform wires into this Gitea: the gateway receives webhooks
+  *from* it and opens PRs *on* it. KWS wiring is dropped; there is no
+  forge.example.internal mirror in the loop.
 - **Compute side — Asgard k8s.** Gateway, agents, sandboxes, Postgres, Seidr run
-  here (reuse existing Asgard Postgres/Seidr).
-The original round-1 question compounded "where does it run" with "what Gitea does
-it wire into"; those have different answers and must never be merged again.
-**Open dependency:** KWS Gitea CI-runner availability — see O-CI. *2026-07-18.*
+  here (reuse existing Asgard Postgres/Seidr). Deploys ride the existing
+  `git.hirdforge.com` Gitea CI/CD pipeline (webhooks → CI → deploy).
+- **Build/dev — agent-host.** Control + building consolidated on agent-host.
+The round-1 lesson stands: "where does it run" and "what Gitea does it wire into"
+are separate questions — they now happen to share the Asgard answer.
+**Open dependency:** CI-runner availability on `git.hirdforge.com` — see O-CI.
+*2026-07-18; corrected 2026-07-23.*
 
 **D-WITNESS — Platform-first; Witness is a separate downstream project.** Hirdforge
 is built as a fully general autonomous-build platform, start to finish. A
@@ -67,16 +73,19 @@ Carry forward the four lessons (D-LESSONS), not the modules. Exception: if
 wins), revisit Workbench's aggregate logic then — advanced mode, not baseline, and
 even then git-branch merging obviates most of it. *2026-07-18.*
 
-**D-BRAND — Rebrand (Phase 0).** Module path `git.hirdforge.com/kit/hirdforge`
-→ **`git.example.internal/hirdforge/hirdforge`** (matches the master home; a module path is
-an internal identifier, not a fetched URL — GitHub was never a candidate). Drop the
-Valhalla-military flavor: **warrior→agent** (the binary is already `cmd/agent`),
-**warband→fleet**, **chieftain→removed** (Cortex replaces it). Keep the component
-names that are already good products: **Cortex, Seidr, Lockbox, concierge,
-hirdforge**. The actual rename (go.mod + every import + vocabulary) is Phase 0
-build work; the docs describe the target state. **Confirm-able:** whether Seidr,
-SOUL, and concierge keep their names — flagged, low-churn find-replace if changed.
-*2026-07-18.*
+**D-BRAND — Rebrand (Phase 0).** Module path `github.com/kitporath/project_valhalla`
+→ **`git.hirdforge.com/kit/hirdforge`** (matches the master home per the corrected
+D-INFRA; a module path is an internal identifier, not a fetched URL — GitHub was
+never a candidate). Drop the Valhalla-military flavor: **warrior→agent** (the
+binary is already `cmd/agent`), **warband→fleet**, **chieftain→removed** (Cortex
+replaces it). Keep the component names that are already good products: **Cortex,
+Seidr, Lockbox, hirdforge**. Names resolved at kickoff (see O-BRAND-NAMES):
+**Seidr stays; SOUL → Persona; Concierge → Steward.** The actual rename (go.mod +
+every import + vocabulary) is Phase 0 build work. Live v1 external conventions
+(`soul.md` paths in hirdforge-personas, the `warband_shared` Seidr collection, the
+`warband` Gitea service account, `json:"warband"` wire fields) are **not** renamed
+until the component that owns each is rebuilt — see AUDIT_DELTA_V2.
+*2026-07-18; module path + names finalized 2026-07-23.*
 
 **D-CONTROL — Control surface = dispatch / retry / cancel.** The operator control
 verbs wired up front are: manually dispatch a task, retry a failed one, cancel an
@@ -105,16 +114,19 @@ Workbench, each earned:
 
 ## Open items
 
-**O-CI — Does KWS Gitea have working CI runners?** The platform wires into KWS
-Gitea (D-INFRA), so a route whose `done_gate` is `ci-status` needs runners *there*.
-Asgard's Gitea has runners, but the platform does not use Asgard's Gitea. Not
-blocking — D-GATE is per-route, so the walking skeleton can use `test-command`
-(sandbox exit code) instead. *Owner: confirm during Phase 0/1 infra setup; log the
-answer here.* *2026-07-18.*
+**O-CI — Does `git.hirdforge.com` Gitea have working CI runners?** *(Retargeted by
+the D-INFRA correction — the KWS question is moot.)* The platform wires into
+`git.hirdforge.com`, so a route whose `done_gate` is `ci-status` needs runners
+there. Evidence suggests yes (the repo's `.gitea/workflows/` and its CI-rebuild
+history ran against this master) — confirm live during Phase 1 infra setup and log
+the answer here. Not blocking — D-GATE is per-route, so the walking skeleton uses
+`test-command` (sandbox exit code). *2026-07-18; retargeted 2026-07-23.*
 
-**O-BRAND-NAMES — Confirm Seidr / SOUL / concierge names.** D-BRAND keeps them by
-default; Kit may redline. Trivial find-replace if changed, but do it in Phase 0
-before the vocabulary is spread across docs and code. *Owner: Kit, at Phase 0.*
+**O-BRAND-NAMES — RESOLVED 2026-07-23 (Kit, at kickoff).** **Seidr stays.
+SOUL → Persona. Concierge → Steward.** Applied across the v2 docs in Phase 0.
+Live v1 conventions that carry the old names (`soul.md` files in
+hirdforge-personas, `soul:` self-improvement PR titles) migrate when the persona
+loading is rebuilt — tracked in AUDIT_DELTA_V2, not renamed blind.
 
 **O-SANDBOX-CONTRACT — The sandbox lifecycle contract.** allocate → checkout →
 run → collect-PR → reset/destroy. Load-bearing (stop-and-ask #2). Draft as a
@@ -129,6 +141,7 @@ schema.** The core new contract (stop-and-ask #2). Draft standalone, approve fir
 existing A2A task store per the v2 spec's Task shape. Load-bearing. *Owner: draft
 at Phase 1 start.*
 
-**O-WEBHOOK-SECRET — Webhook auth from KWS Gitea → Asgard gateway.** HMAC
-validation reusing existing `webhook.go` patterns; confirm the secret provisioning
-path across the two substrates. *Owner: Phase 1 infra.*
+**O-WEBHOOK-SECRET — Webhook auth from `git.hirdforge.com` Gitea → Asgard
+gateway.** HMAC validation reusing existing `webhook.go` patterns. Both ends now
+live in Asgard (corrected D-INFRA), which simplifies secret provisioning —
+confirm the path anyway. *Owner: Phase 1 infra. Retargeted 2026-07-23.*

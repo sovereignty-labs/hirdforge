@@ -5,7 +5,7 @@ is Kit working with Claude. This document is that loop, abstracted from a real f
 session (2026-07-22) into the eight moves the product must make feel natural — and the
 cross-cutting properties without which it feels like a toy. It is the human-experience
 layer of `HIRDFORGE_V2_PRD.md`; where the PRD says *how coordination stays reliable*,
-this says *how the work should feel to the operator*. The UI, the Concierge, and the
+this says *how the work should feel to the operator*. The UI, the Steward, and the
 control surface are all judged against this.
 
 ## The eight moves

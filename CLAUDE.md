@@ -111,8 +111,9 @@ Everything else: proceed. Prefer acting within spec over asking.
 - **Branch → PR → Kit merges. Never push to `main`.** This is the repo's standing
   rule and the platform's own model; agents (including you) follow it.
 - **Push discipline:** after a task's commits land and tests pass, push the branch
-  to `origin` (KWS: `git.example.internal/hirdforge/hirdforge`) and open/update the PR.
-  Masters live on KWS; forge.example.internal is a failover mirror.
+  to `origin` (`git.hirdforge.com/kit/hirdforge`) and open/update the PR.
+  The master lives on `git.hirdforge.com`, hosted in Asgard (D-INFRA, corrected
+  2026-07-23). Build/dev happens on agent-host.
 - **Audit delta:** maintain `docs/audit/AUDIT_DELTA_V2.md` — a running list of
   source-spec statements your changes have made stale, so ground truth stays
   current without re-auditing.
@@ -135,9 +136,14 @@ Execute **docs/specs/PHASE1_EXECUTION_SPEC.md** — the walking skeleton: one ag
 → Cortex router → mechanically-gated reviewer → one PR, end to end, dogfooded on
 this repo. Phases 0–6 are defined in the PRD; Phase 1 is the first build.
 
-## Infra summary (the two-substrate split — see DECISIONS D-INFRA)
+## Infra summary (single home — see DECISIONS D-INFRA, corrected 2026-07-23)
 
-- **Git side (KWS master → forge.example.internal failover mirror):** repo, PRs, webhooks,
-  CI. The platform wires into KWS Gitea (`git.example.internal`).
-- **Compute side (Asgard k8s):** gateway, agents, sandboxes, Postgres, Seidr. The
-  gateway *runs* on Asgard but receives webhooks *from* and opens PRs *on* KWS.
+- **Git master:** `git.hirdforge.com` (Gitea, hosted in Asgard) — repo, PRs,
+  webhooks, CI. Deploys ride the existing Gitea CI/CD pipeline (webhooks → CI →
+  deploy), the way hirdforge has always shipped. The old "masters on KWS /
+  `git.example.internal`" wording is stale and superseded.
+- **Compute side (Asgard k8s):** gateway, agents, sandboxes, Postgres, Seidr.
+- **Build/dev:** on agent-host (control + building consolidated there).
+- **Model/lane fabric:** LiteLLM on agent-host:4000 + per-host llama-servers managed
+  by anvil (gpu-host/agent-host/inference-host/workstation) — the fabric STEERING §4 says the forge owns
+  from its own UI.

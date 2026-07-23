@@ -54,7 +54,7 @@ All under `/api/v1/cortex/` on the gateway.
 
 | Endpoint | Effect |
 |---|---|
-| `POST /dispatch` | Operator creates + dispatches a task directly (creates the issue on KWS Gitea + triggers the route). The manual entry point. |
+| `POST /dispatch` | Operator creates + dispatches a task directly (creates the issue on git.hirdforge.com Gitea + triggers the route). The manual entry point. |
 | `POST /tasks/{id}/retry` | Re-dispatch a `failed` task. The new dispatch carries the prior failure as context (D-LESSONS #2). Emits a loud event. |
 | `POST /tasks/{id}/cancel` | Cancel an in-flight task: signal the agent, tear down its sandbox, mark `failed(reason=cancelled)`. Emits an event. |
 

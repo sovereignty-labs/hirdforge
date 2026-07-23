@@ -57,7 +57,7 @@ route, track, dispatch, or self-certify completion.
 | **Sandbox** | Reset-to-clean isolated execution environment per task. | Native rebuild of the fast ephemeral-VM pattern (D-SANDBOX). Was scaffolded (empty `agent-testing` namespace, gVisor TODO), never built. |
 | **Reviewer** | An agent dispatched with a review bundle to judge a PR — a gate *on top of* the mechanical done-gate, never instead of it. | Wire per Phase 3; PR-review endpoints exist. |
 | **Researcher** | A general research/coding agent role (search/read-broadly/propose). NOT a Witness Judge in this build (D-WITNESS). | Greenfield role + tools; Phase later. |
-| **Concierge** | Conversational front-door agent: turns operator conversation into issues. Not Norse; kept as a name. | Phase 4. Deferred out of the walking skeleton. |
+| **Steward** (was Concierge) | Conversational front-door agent: turns operator conversation into issues. Renamed at kickoff (O-BRAND-NAMES). | Phase 4. Deferred out of the walking skeleton. |
 | **Seidr** | Skill-scoped memory (RAG). Its own named component; kept. | Reuse; collection-naming convention only, no API change. |
 | **Lockbox** | Human approval gate authorizing PR merge. | Unchanged. |
 | **Gateway** | Hosts Cortex, the fleet registry, health, WebSocket event streaming, MCP surface, the pipeline UI. Runs on Asgard. | Reuse + add Cortex module + observability/control endpoints. |
@@ -69,9 +69,10 @@ route, track, dispatch, or self-certify completion.
   mechanically-gated reviewer → one PR, end to end, then widen.
 - **D-SANDBOX — Native sandbox.** Rebuild the fast ephemeral-VM pattern into
   hirdforge's dispatch; no runtime dependency on the KWS/omniagent deployment.
-- **D-INFRA — Two substrates.** Git (repo/PRs/webhooks/CI) on **KWS** Gitea
-  (`git.example.internal`, master → forge.example.internal mirror). Compute (gateway/agents/
-  sandboxes/Postgres/Seidr) on **Asgard** k8s.
+- **D-INFRA — Single home (corrected 2026-07-23).** Git master =
+  **`git.hirdforge.com`** (Gitea, hosted in Asgard): repo, PRs, webhooks, CI;
+  deploys ride its existing CI/CD pipeline. Compute (gateway/agents/sandboxes/
+  Postgres/Seidr) on **Asgard** k8s. Build/dev on **agent-host**. KWS wiring dropped.
 - **D-WITNESS — Platform-first.** Build hirdforge fully as a general platform;
   a customized Witness adaptation is a separate downstream project. No Witness
   seams in the core.
@@ -81,10 +82,11 @@ route, track, dispatch, or self-certify completion.
 - **D-PORT — Build Cortex anew, borrow lessons not code.** Workbench's cortex is
   an in-process fan-out/aggregate/apply engine for a hostless desktop app; v2's
   is a Gitea-leaning router. Carry the four lessons (below), not the modules.
-- **D-BRAND — Rebrand.** Module path → `git.example.internal/hirdforge/hirdforge`. Drop
+- **D-BRAND — Rebrand.** Module path → `git.hirdforge.com/kit/hirdforge`. Drop
   the Valhalla-military flavor (warrior→agent, warband→fleet, chieftain→removed);
-  keep the good component names (Cortex, Seidr, Lockbox, concierge, hirdforge).
-  Seidr/SOUL/concierge names are confirm-able. Rebrand is Phase 0.
+  keep the good component names (Cortex, Seidr, Lockbox, hirdforge). Names
+  resolved 2026-07-23: Seidr stays, SOUL→Persona, Concierge→Steward. Rebrand is
+  Phase 0.
 - **D-CONTROL — Control surface = dispatch / retry / cancel** up front. No
   pause/override/live-intervene yet (seams left, not built).
 
@@ -115,7 +117,7 @@ route, track, dispatch, or self-certify completion.
 - **Phase 3 — Review & validation routing.** PR-event routes, retry-on-failure
   routing with failure context, the revise path. Full issue→build→review→merge→
   validate with zero LLM coordination.
-- **Phase 4 — Concierge.** Conversation → issue creation; status queries.
+- **Phase 4 — Steward.** Conversation → issue creation; status queries.
 - **Phase 5 — Pipeline UI.** Deep wireframe against the frozen observability
   contract, then the board / Cortex log / task detail / controls.
 - **Phase 6 — Researcher role + Seidr validation loop.** The general research
