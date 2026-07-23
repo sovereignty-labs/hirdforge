@@ -15,6 +15,10 @@ type Cortex struct {
 	cfg   *Config
 	store Store
 
+	// OnTaskQueued, when set, is invoked after a dispatch route creates a
+	// queued task (the gateway hooks the Dispatcher here, in a goroutine).
+	OnTaskQueued func(route *Route, taskID string)
+
 	ring    []Decision
 	ringCap int
 }
@@ -92,6 +96,9 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		}
 		d.TaskID = task.ID
 		d.Reason = fmt.Sprintf("%s -> task %s queued", reason, task.ID)
+		if c.OnTaskQueued != nil {
+			c.OnTaskQueued(route, task.ID)
+		}
 
 	case route.Action == ActionAdvance:
 		// Lifecycle-advance routes are wired when their producing mechanics
