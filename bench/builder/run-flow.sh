@@ -109,7 +109,7 @@ for ROUND in $(seq 1 "$RUNS"); do
     -api-key "$LITELLM_KEY" \
     -model "$LANE" \
     -model-template qwen \
-    -tools exec,read,write,edit,git-commit,create-pr \
+    -tools todo,exec,read,write,edit,git-commit,create-pr \
     -gitea-url "http://127.0.0.1:$GITEA_PORT" \
     -soul "$BENCH_DIR/soul.md" \
     -agent-name bench-builder \

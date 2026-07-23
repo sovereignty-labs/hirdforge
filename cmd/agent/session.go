@@ -477,6 +477,9 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			return context.WithTimeout(parent, time.Duration(deps.inferenceTimeout)*time.Second)
 		}
 		hadToolCalls := false
+		// M6: the externalized plan is session-scoped; drop it when the session
+		// ends so the in-memory store does not accumulate stale lists.
+		defer sessionTodos.clear(sessionID)
 		defer func() {
 			if !hadToolCalls {
 				return
@@ -742,7 +745,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				case "broadcast":
 					result = broadcastExecValue.Execute(args)
 				default:
-					if tc.Function.Name == "recall" {
+					if tc.Function.Name == "recall" || tc.Function.Name == "todo" {
 						args["_session_id"] = sessionID
 					}
 					if t, ok := deps.reg.Get(tc.Function.Name); ok {
@@ -1016,11 +1019,18 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		var toolCallSignatures []string
 		repeatedToolCallDetected := false
 		toolErrorsExhausted := false
+		// M6 wobble tracking: reanchorPending fires an immediate plan re-anchor
+		// on drift signals (repetition, two consecutive tool failures, an
+		// exhausted tool error, or a git-commit no-op the model might misread as
+		// done). consecutiveToolFailures resets on any success.
+		consecutiveToolFailures := 0
+		reanchorPending := false
 		executeToolCalls := func(calls []toolCall) {
 			for _, tc := range calls {
 				toolCallSignatures = append(toolCallSignatures, toolCallSignature(tc.Function.Name, tc.Function.Arguments))
 				if !repeatedToolCallDetected && hasRepeatedToolCallLoop(toolCallSignatures, repeatedToolCallThreshold) {
 					repeatedToolCallDetected = true
+					reanchorPending = true
 					logJSON("warn", "repeated_tool_call_loop", map[string]interface{}{
 						"agent":       deps.agentName,
 						"session_id":  sessionID,
@@ -1030,8 +1040,23 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					})
 				}
 				result := executeOneToolCall(tc)
-				if result.Error != "" && shouldRetryTool(tc.Function.Name) {
-					toolErrorsExhausted = true
+				if result.Error != "" {
+					consecutiveToolFailures++
+					if consecutiveToolFailures >= 2 {
+						reanchorPending = true
+					}
+					if shouldRetryTool(tc.Function.Name) {
+						toolErrorsExhausted = true
+						reanchorPending = true
+					}
+				} else {
+					consecutiveToolFailures = 0
+					// A git-commit that found nothing to stage is a silent
+					// dead-end the model tends to read as "done"; re-anchor.
+					if tc.Function.Name == "git-commit" &&
+						strings.HasPrefix(strings.TrimSpace(result.Output), toolpkg.GitCommitNoChangesPrefix) {
+						reanchorPending = true
+					}
 				}
 			}
 		}
@@ -1039,8 +1064,38 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		var toolLoopExitReason terminationReason
 		var lastNoToolAssistantContent string
 		var toolLoopRounds int
+		// M6 re-anchoring state.
+		planningReminderSent := false
+		roundsSinceAnchor := 0
 		for i := 0; i < deps.maxToolRounds; i++ {
 			toolLoopRounds = i + 1
+			// M6: keep the goal pinned. Once the task is underway, nudge the model
+			// to externalize its plan (once), then re-surface that plan on a cheap
+			// cadence and — harder — immediately on a wobble signal. A model that
+			// never wrote a todo gets no re-anchor noise; the terminal gate below
+			// still catches an early stop.
+			if i > 0 {
+				switch {
+				case !planningReminderSent && requestRequiresCompletionSignal(content) && !sessionTodos.hasItems(sessionID):
+					messages = append(messages, message{Role: "user", Content: planningReminder()})
+					planningReminderSent = true
+					roundsSinceAnchor = 0
+				case reanchorPending || roundsSinceAnchor >= reanchorCadence:
+					if reminder := reanchorReminder(sessionID); reminder != "" {
+						messages = append(messages, message{Role: "user", Content: reminder})
+						logJSON("info", "todo_reanchor", map[string]interface{}{
+							"agent": deps.agentName, "session_id": sessionID, "task_id": taskID,
+							"round": i + 1, "wobble": reanchorPending,
+						})
+						roundsSinceAnchor = 0
+					} else {
+						roundsSinceAnchor++
+					}
+				default:
+					roundsSinceAnchor++
+				}
+				reanchorPending = false
+			}
 			if deps.maxContext > 0 && len(messages)-1 > int(float64(deps.maxContext)*0.8) {
 				trimmed := progressiveTrim(messages[1:], deps.maxContext)
 				messages = append([]message{messages[0]}, trimmed...)
@@ -1081,28 +1136,38 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				lastNoToolAssistantContent = strings.TrimSpace(stripThinkTags(assistant.Content))
 				toolLoopExitReason = classifyModelTurn(lastNoToolAssistantContent)
 
-				if strings.TrimSpace(taskID) == "" && hadToolCalls {
+				// Terminal gate (M6): the model tried to stop. It may only stop on
+				// a terminal outcome — a PR, a reasoned FAILED, a justified NOOP,
+				// or (failing open) a specific question. This now fires in TASK
+				// mode too (the dogfood/benchmark path), and engages whenever the
+				// request demands a deliverable OR the model still has an open
+				// todo item. Anti-dilution: the nudge states the full outcome
+				// space and re-surfaces the plan — never "just make a PR".
+				gateEngaged := hadToolCalls &&
+					(requestRequiresCompletionSignal(content) || sessionTodos.hasOpenItems(sessionID))
+				if gateEngaged {
 					logJSON("info", "completion_gate_check", map[string]interface{}{
 						"agent":       deps.agentName,
 						"session_id":  sessionID,
 						"task_id":     taskID,
 						"content_len": len(lastNoToolAssistantContent),
 					})
-					if requestRequiresCompletionSignal(content) && !contentHasCompletionSignal(lastNoToolAssistantContent) {
+					if !contentHasTerminalOutcome(lastNoToolAssistantContent) {
 						if completionNudges.hasExhausted(sessionID) {
 							lastNoToolAssistantContent = "FAILED: completion gate exhausted"
 							toolLoopExitReason = terminationNoActionableOutput
 							logJSON("warn", "completion_gate_failed", map[string]interface{}{
-								"agent":      deps.agentName,
-								"session_id": sessionID,
-								"task_id":    taskID,
-								"nudges":     maxCompletionNudges,
+								"agent":       deps.agentName,
+								"session_id":  sessionID,
+								"task_id":     taskID,
+								"nudges":      maxCompletionNudges,
+								"todo_remain": sessionTodos.remaining(sessionID),
 							})
 							break
 						}
 						completionNudges.recordError(sessionID)
 						nudgeCount := completionNudges.increment(sessionID)
-						nudgeMsg := "You are not done. Continue from the current workspace. Do not reclone. You must either create/report the PR, or report FAILED: <reason>, or NOOP: <evidence>. Do not switch scope."
+						nudgeMsg := terminalNudge(sessionID)
 						logJSON("info", "completion_nudge_sent", map[string]interface{}{
 							"agent":       deps.agentName,
 							"session_id":  sessionID,
@@ -1142,6 +1207,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					"last_no_tool_content_chars": len(lastNoToolAssistantContent),
 					"repeated_tool_call":         repeatedToolCallDetected,
 					"tool_errors_exhausted":      toolErrorsExhausted,
+					"todo_remain":                sessionTodos.remaining(sessionID),
 				})
 				_ = emit(sseChunk{Type: "content", Content: "tool call limit reached", Done: false})
 			}
@@ -1158,6 +1224,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				"last_no_tool_content_chars": len(lastNoToolAssistantContent),
 				"repeated_tool_call":         repeatedToolCallDetected,
 				"tool_errors_exhausted":      toolErrorsExhausted,
+				"todo_remain":                sessionTodos.remaining(sessionID),
 			})
 		}
 

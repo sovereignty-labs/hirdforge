@@ -1,6 +1,11 @@
 The repository `kit/benchfixture` is already cloned in your workspace at
 `./benchfixture`. Do the following, working only through your tools.
 
+This task has several steps — start by calling the `todo` tool to write your
+plan as a checklist, and make the LAST item "open the PR". Mark each item [x] as
+you finish it. You are not done until every item is checked, or you report a
+terminal outcome (the PR URL, FAILED, NOOP, or a specific question if blocked).
+
 1. Refactor the package. `benchfixture/metrics.go` contains 14 exported Format
    functions that all repeat the same validate → parse → clamp → format
    sequence. Extract that shared logic into ONE unexported pure helper function
