@@ -157,7 +157,17 @@ func (t *ExecTool) Execute(args map[string]interface{}) ToolResult {
 	defer cancel()
 
 	start := time.Now()
-	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	// Root exec in the workspace, consistent with read/write/edit. Without this,
+	// exec runs in the agent process's cwd — which is the workspace only in the
+	// production sandbox (WORKDIR=/workspace); under the benchmark harness the
+	// process cwd is elsewhere, so every relative ls/cat/sed/git the model runs
+	// fails and it can never find or change the repo. Empty WorkDir preserves the
+	// old default-cwd behavior for non-workspace callers.
+	if t.WorkDir != "" {
+		cmd.Dir = t.WorkDir
+	}
+	out, err := cmd.CombinedOutput()
 	duration := time.Since(start)
 	byteCount := len(out)
 	exitCode := 0
