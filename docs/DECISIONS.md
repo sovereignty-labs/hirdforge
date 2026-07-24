@@ -227,6 +227,30 @@ value isn't covered by the bump regex, so the sandbox agent image is pinned by
 hand; (d) **in-cluster GOPROXY** — the baked module cache breaks if a task adds
 a dependency (offline `go test`). Full detail in
 `PHASE2_EXECUTION_SPEC.md#deferred-phase-1-hardening`. *Owner: Phase 2.*
+**Update 2026-07-24:** (c) bit again deploying `sha-1072175` — the `update-infra`
+CI job was *skipped* (it `needs: build-agent`, gated off by O-FAT-AGENT-IMAGE),
+so BOTH the gateway image and `CORTEX_AGENT_IMAGE` were hand-bumped in asgard
+PR #565. Teaching the bump to also rewrite the `value:` env (not just `image:`
+lines) is the fix; until then, deploys touching the sandbox agent are two-line
+manual edits.
+
+**O-BUILDER-WRITE-RELIABILITY — LANDED 2026-07-24.** Three root-cause fixes for
+the builder's write leg, found by dogfooding the live sandbox and proven live on
+`sha-1072175` (green production PR #394 from one issue+label, autonomously):
+(1) **repo identity from the origin remote** (#390) — in the root layout the
+agent called the repo the bare name `"repo"`, so git-commit pushed to
+`gitea_admin/<repo>` while create-pr targeted `kit/hirdforge` → every create-pr
+404'd and the builder looped to the deadline; tools now derive owner/name from
+`origin` and never rewrite the `agent/<task>` work branch. (2) **idempotent
+dispatch** (#391) — Gitea fires one label as two webhooks (`labeled` +
+`label_updated`); dispatch now creates one task per `(repo, issue, route)`.
+(3) **fail-open guardrail** (#392) — a tool stuck failing the same way 3× forces
+fix-once-or-report-`FAILED`, so the builder escalates with a proposed solution
+instead of chasing the artifact (the "not PR-or-bust" doctrine, mechanised).
+**Still open:** the dedup guard is a process mutex sufficient for the
+single-replica gateway; if the gateway ever scales past 1, add a partial unique
+index on `cortex_tasks (issue_repo, issue_number, route_id) WHERE <non-terminal>`
+as the multi-replica-safe enforcement. *Owner: whoever scales the gateway.*
 
 **O-CI — RESOLVED 2026-07-23.** `git.hirdforge.com` Gitea has working CI runners
 (the Quality Gates + build workflows run against it; branch protection enforces
