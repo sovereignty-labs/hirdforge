@@ -68,7 +68,7 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 			"-model", opts.Model,
 			"-api-key", opts.InferenceKey,
 			"-gitea-url", g.giteaURL,
-			"-tools", "exec,read,write,edit,git-clone,git-commit,git-diff,gitea",
+			"-tools", "todo,exec,read,write,edit,git-clone,git-commit,git-diff,gitea",
 			"-max-tool-rounds", strconv.Itoa(opts.MaxToolRounds),
 			"-inference-timeout", "300",
 		},
