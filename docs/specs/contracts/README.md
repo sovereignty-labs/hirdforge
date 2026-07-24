@@ -16,6 +16,8 @@ reconnaissance of `cmd/gateway`, `cmd/agent`, `cmd/lockbox`, `pkg/tasks`,
 | 3 | Sandbox lifecycle | [SANDBOX_LIFECYCLE.md](SANDBOX_LIFECYCLE.md) | O-SANDBOX-CONTRACT |
 | 4 | Postgres persistence | [PERSISTENCE.md](PERSISTENCE.md) | O-PERSISTENCE |
 | 5 | Done-gate interface | [DONE_GATE.md](DONE_GATE.md) | (D-GATE made concrete) |
+| 7 | Harness profile | [PROFILE.md](PROFILE.md) | O-PROFILE — **DRAFT, awaiting Kit (P2.6/7)** |
+| 8 | Skill + memory-scope loading | [SKILL_BUNDLE.md](SKILL_BUNDLE.md) | O-SKILL-BUNDLE — **DRAFT, awaiting Kit (P2.6)** |
 
 ## The three design calls that ripple through all five (decide these first)
 
