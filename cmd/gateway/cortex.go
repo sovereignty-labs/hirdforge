@@ -244,11 +244,17 @@ func (g *gateway) handleCortexReviewEvent(body []byte) {
 		log.Printf("cortex: review webhook: bad payload: %v", err)
 		return
 	}
+	// Gitea's review payload type/casing varies by version (e.g.
+	// "pull_request_review_approved", "APPROVED", "PullRequestReviewApproved").
+	// Match case-insensitively across both the review type and the action so a
+	// verdict is never silently dropped. (Agent reviews are also driven directly
+	// from DispatchReviewer's API observation; this covers human UI reviews.)
+	rt := strings.ToLower(p.Review.Type + " " + p.Action)
 	state := ""
 	switch {
-	case strings.Contains(p.Review.Type, "approved"):
+	case strings.Contains(rt, "approved"):
 		state = "APPROVED"
-	case strings.Contains(p.Review.Type, "rejected"), strings.Contains(p.Review.Type, "request_changes"):
+	case strings.Contains(rt, "rejected"), strings.Contains(rt, "request_changes"), strings.Contains(rt, "changes_requested"):
 		state = "REQUEST_CHANGES"
 	default:
 		return // comment-only reviews are not verdicts

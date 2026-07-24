@@ -364,8 +364,12 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, cfg *Config, route *R
 	if waitErr != nil {
 		return d.failTask(task.ID, "reviewer sandbox wait failed: "+waitErr.Error(), Cause{Kind: CauseSandbox})
 	}
-	// Observe the verdict as a Gitea fact. Its consequences (approve/revise)
-	// arrive via the pr.review_submitted webhook routes — not from here.
+	// Observe the verdict as a Gitea fact via the reliable API read (review.state),
+	// then DRIVE the consequence (approve/revise) from that observation rather than
+	// depending on the pr.review_submitted webhook — whose payload parsing is
+	// fragile across Gitea versions. The webhook route still fires for HUMAN UI
+	// reviews (no dispatcher in that path); when both fire for an agent review the
+	// second advance is a harmless rejected lifecycle transition.
 	if d.ReviewLookup != nil {
 		state, reviewer, found, lerr := d.ReviewLookup(ctx, task.PRRepo, task.PRNumber)
 		if lerr != nil {
@@ -378,7 +382,14 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, cfg *Config, route *R
 		if err := d.Store.SetReviewer(task.ID, reviewer); err != nil {
 			log.Printf("cortex: ERROR persisting reviewer on %s: %v", task.ID, err)
 		}
-		log.Printf("cortex: review observed on %s#%d: %s by %s", task.PRRepo, task.PRNumber, state, reviewer)
+		log.Printf("cortex: review observed on %s#%d: %s by %s — advancing", task.PRRepo, task.PRNumber, state, reviewer)
+		d.emit(Event{
+			Type:        EventPRReviewSubmitted,
+			Repo:        task.PRRepo,
+			PRNumber:    task.PRNumber,
+			ReviewState: state,
+			Actor:       reviewer,
+		})
 	}
 	return nil
 }
