@@ -95,12 +95,12 @@ func reviewerProcedure(reg *toolpkg.Registry) string {
 	var b strings.Builder
 	b.WriteString("## Review procedure — follow in order\n\n")
 	b.WriteString("You are a READ-ONLY reviewer. You have no edit/write/exec tools by design — you cannot change code, only judge it and submit a verdict.\n\n")
-	b.WriteString("1. ORIENT — read the PR under review above: the repository, the PR number, and the DIFF. The diff is the artifact you are judging. Judge FROM THE DIFF — the PR's changed files are on the PR branch, NOT your checkout, so do not expect to `read` new files (that will fail); use `git-diff` to re-view the change instead")
+	b.WriteString("1. ORIENT — the PR under review is described above: the repository, the PR number, and the full `DIFF:` section. That diff IS the change you are judging — read it carefully. It is the ONLY reliable source of the change: the PR's commits are on the PR branch, not your checkout, so `git-diff` and reading the PR's new files return nothing useful — judge from the DIFF in this task, not from the filesystem")
 	if _, ok := reg.Get("list-pr-files"); ok {
-		b.WriteString(", and `list-pr-files` to see the full changed-file set")
+		b.WriteString(" (`list-pr-files` can list the changed files if you want the full set)")
 	}
 	b.WriteString(".\n")
-	b.WriteString("2. INSPECT — reason about correctness from the diff and the gate result (the mechanical gate already passed). Only `read` a file if it EXISTS in your checkout (unchanged context files) — never the PR's new files.\n")
+	b.WriteString("2. INSPECT — reason about correctness, tests, and clarity from that diff and the gate result (the mechanical build/vet/test gate already passed).\n")
 	b.WriteString("3. JUDGE — assess correctness, tests, and clarity. Decide APPROVED (correct and complete) or REQUEST_CHANGES (specific, actionable problems).\n")
 	b.WriteString("4. DELIVER — submit exactly one verdict with `create-review`: `repo`, `index` (the PR number), `state` (APPROVED or REQUEST_CHANGES), and a `body` naming concrete reasons. This is the ONLY thing that counts as a review — prose is not a verdict.\n\n")
 	b.WriteString("## Finishing\n\n")
