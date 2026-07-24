@@ -10,13 +10,13 @@ defaults:
 
 bundles:
   build-default:
-    skills: []          # skill dispatch is Phase 2
-    memory_scopes: []   # skill-scoped Seidr is Phase 2
-    profile: default
+    skills: []
+    memory_scopes: []
+    profile: builder
   review-default:
     skills: []
     memory_scopes: []
-    profile: default
+    profile: reviewer
 
 routes:
   # THE build route: label an issue agent:build and the skeleton runs.
