@@ -140,6 +140,23 @@ Workbench, each earned:
 
 ## Open items
 
+**O-CI-RUNNER-WEDGE — The single Gitea act_runner can wedge indefinitely and
+stall all CI.** Observed 2026-07-24: a `quality` job hung ~106 min past its
+`timeout-minutes: 10` — the runner did NOT enforce the job timeout — while the
+runner is a single replica at `maxParallel=1`, so every queued workflow stalled
+behind it (twice in one evening). Mitigated: `.gitea/workflows/quality.yaml` now
+wraps every network-touching step (apk / apt / git / go install / pip / and the
+package-loading analysis steps) in the `timeout` binary, so an upstream hang
+fails fast and legibly instead of blocking CI. **Still open:** (1) single
+serialized runner is a throughput + availability SPOF as merge frequency rises —
+consider a 2nd replica or `maxParallel>1`; (2) root cause of the intermittent
+hang itself (flaky egress to proxy.golang.org / registry? DNS?) is unconfirmed —
+the timeouts contain the symptom, not the cause; (3) `dind-storage` is an
+`emptyDir`, so a runner restart cold-drops the image cache (recovers by
+re-pulling, but slow). Operational lesson logged: restarting the runner while
+jobs are queued races the dind sidecar startup and can fail the dispatched job —
+re-trigger affected runs afterward. *2026-07-24.*
+
 **O-FAT-AGENT-IMAGE — The v1 `valhalla-agent` image cannot be built by the
 airgapped CI runners.** `Dockerfile.agent` pulls kubectl/helm/kubeseal/talosctl/
 crane/yq from the public internet; the Gitea runners have none, so the
