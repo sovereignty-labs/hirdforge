@@ -656,6 +656,12 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		if tmpl := strings.TrimRight(deps.modelTemplate, "\n"); strings.TrimSpace(tmpl) != "" {
 			systemContent = tmpl + "\n\n" + systemContent
 		}
+		// M5: the persona says who the agent is; the procedure says how the work
+		// is done. Injected after the identity so the mechanical sequence is
+		// stated by the harness rather than left implicit in persona prose.
+		if procedure := builderProcedure(deps.reg); procedure != "" {
+			systemContent += "\n\n" + procedure
+		}
 		if peersBlock := buildPeerSystemBlock(deps.peers, deps.peerRoles); peersBlock != "" {
 			systemContent += "\n\n" + peersBlock
 		}
@@ -1055,6 +1061,12 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					// dead-end the model tends to read as "done"; re-anchor.
 					if tc.Function.Name == "git-commit" &&
 						strings.HasPrefix(strings.TrimSpace(result.Output), toolpkg.GitCommitNoChangesPrefix) {
+						reanchorPending = true
+					}
+					// Reaching for shell git to mutate a repo means the model is
+					// off the verified path; re-anchor it onto the plan.
+					if tc.Function.Name == "exec" &&
+						strings.HasPrefix(strings.TrimSpace(result.Output), toolpkg.ExecGitRedirectPrefix) {
 						reanchorPending = true
 					}
 				}

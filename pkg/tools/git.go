@@ -631,6 +631,51 @@ func fileLooksBinary(path string) (bool, error) {
 // as a completed commit — the exact misread the P2.0 baseline exposed.
 const GitCommitNoChangesPrefix = "No changes to commit"
 
+// workspaceRepoDirs lists the immediate subdirectories of workDir that are git
+// repositories. Used to coach a model that guessed a wrong repo path.
+func workspaceRepoDirs(workDir string) []string {
+	entries, err := os.ReadDir(workDir)
+	if err != nil {
+		return nil
+	}
+	var repos []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(workDir, e.Name(), ".git")); err == nil {
+			repos = append(repos, e.Name())
+		}
+	}
+	sort.Strings(repos)
+	return repos
+}
+
+// RepoNotFoundMessage builds a self-correcting error for a repo argument that
+// does not resolve. Naming the repositories that ARE present turns the single
+// most common observed builder failure — guessing a plausible-but-wrong repo
+// path (e.g. "bench/builder/fixture" instead of "benchfixture") — from a
+// dead-end into a coached retry.
+func RepoNotFoundMessage(workDir, repo string) string {
+	repos := workspaceRepoDirs(workDir)
+	switch len(repos) {
+	case 0:
+		return fmt.Sprintf("repo %q not found in the workspace, and no git repository is present — clone it first.", repo)
+	case 1:
+		return fmt.Sprintf("repo %q not found in the workspace. The workspace contains exactly one repository: %q. Retry with repo: %q.", repo, repos[0], repos[0])
+	default:
+		return fmt.Sprintf("repo %q not found in the workspace. Available repositories: %s. Retry with one of these.", repo, strings.Join(quoteAll(repos), ", "))
+	}
+}
+
+func quoteAll(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = strconv.Quote(s)
+	}
+	return out
+}
+
 type GitCommitTool struct {
 	WorkDir   string
 	GiteaURL  string
@@ -674,7 +719,7 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 
 	repoDir := filepath.Join(t.WorkDir, repo)
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
-		return ToolResult{Error: fmt.Sprintf("repo %s not found in workspace — clone it first", repo)}
+		return ToolResult{Error: RepoNotFoundMessage(t.WorkDir, repo)}
 	}
 
 	// Only rewrite origin to a credentialed URL when we can actually build a
@@ -877,7 +922,7 @@ func (t *GitDiffTool) Execute(args map[string]interface{}) ToolResult {
 
 	repoDir := filepath.Join(t.WorkDir, repo)
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
-		return ToolResult{Error: fmt.Sprintf("repo %s not found in workspace — clone it first", repo)}
+		return ToolResult{Error: RepoNotFoundMessage(t.WorkDir, repo)}
 	}
 
 	// Fetch all remote refs so branch comparisons work
