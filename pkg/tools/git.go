@@ -814,9 +814,18 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 		return res
 	}
 
-	target := "current branch"
-	if branch != "" {
-		target = branch
+	target := branch
+	if target == "" {
+		// No branch was passed: git-commit pushed HEAD (the checked-out work
+		// branch). Resolve and name it so the caller (create-pr's head) is
+		// unambiguous — "current branch" left the model guessing and it invented
+		// a wrong branch name, which the collect step could not find.
+		if headRes := runGit(repoDir, []string{"git", "rev-parse", "--abbrev-ref", "HEAD"}, 10*time.Second); headRes.Error == "" {
+			target = strings.TrimSpace(headRes.Output)
+		}
+		if target == "" {
+			target = "current branch"
+		}
 	}
 	out := fmt.Sprintf("Committed: %s", message)
 	if diff := strings.TrimSpace(diffStatRes.Output); diff != "" {

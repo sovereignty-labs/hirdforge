@@ -270,3 +270,32 @@ func runGitCmd(t *testing.T, dir string, args ...string) string {
 	}
 	return string(out)
 }
+
+// TestGitCommitToolNoBranchNamesTheWorkBranch pins the P3.0b fix: with no branch
+// arg, git-commit pushes the checked-out work branch and NAMES it in the output
+// ("Pushed to <branch>", not "current branch") so create-pr's head is
+// unambiguous. The vague "current branch" led the model to invent a wrong branch
+// the collect step could not find (no_pr).
+func TestGitCommitToolNoBranchNamesTheWorkBranch(t *testing.T) {
+	workspace, repoDir := setupWorkspaceRepo(t)
+	// Put the checkout on a work branch, as the sandbox guard does.
+	runGitCmd(t, repoDir, "git", "checkout", "-b", "agent/hf-work-123")
+	writeFile(t, filepath.Join(repoDir, "notes.txt"), "work branch commit\n")
+
+	tool := NewGitCommitTool(workspace, "", "", "Builder")
+	res := tool.Execute(map[string]interface{}{
+		"repo":    "project",
+		"message": "add notes",
+		// no "branch" arg — commit to the current work branch
+	})
+	if res.Error != "" {
+		t.Fatalf("git-commit failed: %s", res.Error)
+	}
+	if !strings.Contains(res.Output, "Pushed to agent/hf-work-123") {
+		t.Fatalf("output must name the actual work branch, got: %q", res.Output)
+	}
+	if strings.Contains(res.Output, "current branch") {
+		t.Fatalf("output must not say the vague 'current branch': %q", res.Output)
+	}
+	assertRemoteBranch(t, repoDir, "agent/hf-work-123")
+}
