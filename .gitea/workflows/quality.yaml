@@ -8,27 +8,34 @@ on:
 
 jobs:
   quality:
-    timeout-minutes: 10
+    # NOTE: `timeout-minutes` is a backstop, not the real guard — this act_runner
+    # was observed running a hung quality job for 100+ minutes past this limit
+    # (2026-07-24), wedging the single serialized runner and stalling every queued
+    # workflow. The reliable enforcement is the per-step `timeout` binary below:
+    # every network-touching step (apk / git / go install / go test) is bounded so
+    # an occasional upstream hang fails FAST and legibly instead of blocking CI
+    # indefinitely. See docs/DECISIONS.md O-CI-RUNNER-WEDGE.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     container: golang:1.25-alpine
 
     steps:
       - name: Install base packages
-        run: apk add --no-cache git ca-certificates bash
+        run: timeout 180 apk add --no-cache git ca-certificates bash
 
       - name: Clone repository at workflow SHA
         run: |
           rm -rf /src
-          git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src
+          timeout 180 git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src
           cd /src
-          git fetch origin ${{ github.sha }}
+          timeout 120 git fetch origin ${{ github.sha }}
           git checkout ${{ github.sha }}
 
       - name: Install static analysis tools
         run: |
           cd /src
-          GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
-          GOBIN=/usr/local/bin go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+          timeout 300 env GOBIN=/usr/local/bin go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          timeout 300 env GOBIN=/usr/local/bin go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
 
       - name: Check gofmt formatting
         run: |
@@ -43,7 +50,7 @@ jobs:
       - name: Run staticcheck
         run: |
           cd /src
-          staticcheck ./...
+          timeout 420 staticcheck ./...
 
       - name: Run gocyclo
         run: |
@@ -54,12 +61,12 @@ jobs:
       - name: Run go vet
         run: |
           cd /src
-          go vet ./...
+          timeout 420 go vet ./...
 
       - name: Run go tests
         run: |
           cd /src
-          go test ./... -count=1
+          timeout 600 go test ./... -count=1
 
       - name: Coverage non-regression ratchet
         run: |
@@ -105,29 +112,31 @@ jobs:
     # Seidr Python quality lane: ruff lint + pytest smoke tests. Always runs —
     # the tests are network/DB/GPU/inference-free and complete in well under a
     # second. Tooling and import deps are pinned in seidr/requirements-dev.txt.
-    timeout-minutes: 10
+    # See the quality job above: per-step `timeout` is the real guard against a
+    # hung network step wedging the shared runner; timeout-minutes is a backstop.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     container: python:3.12-slim
 
     steps:
       - name: Install base packages
         run: |
-          apt-get update -qq
-          apt-get install -y -qq --no-install-recommends git ca-certificates
+          timeout 180 apt-get update -qq
+          timeout 180 apt-get install -y -qq --no-install-recommends git ca-certificates
           rm -rf /var/lib/apt/lists/*
 
       - name: Clone repository at workflow SHA
         run: |
           rm -rf /src
-          git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src
+          timeout 180 git clone http://gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge.git /src
           cd /src
-          git fetch origin ${{ github.sha }}
+          timeout 120 git fetch origin ${{ github.sha }}
           git checkout ${{ github.sha }}
 
       - name: Install Seidr dev tooling (pinned)
         run: |
           cd /src/seidr
-          pip install --no-cache-dir -r requirements-dev.txt
+          timeout 300 pip install --no-cache-dir -r requirements-dev.txt
 
       - name: Ruff lint (Seidr)
         run: |
