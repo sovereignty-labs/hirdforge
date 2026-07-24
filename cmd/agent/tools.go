@@ -1181,7 +1181,15 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		reg.Register(&todoTool{})
 	}
 	if deps.enabled["exec"] {
-		reg.Register(toolpkg.NewExecTool())
+		execTool := toolpkg.NewExecTool()
+		// Builder profile policy: when the structured git-commit tool is
+		// available, mutating shell git is redirected to it (the verified push
+		// path). Agents without git-commit are unaffected.
+		if deps.enabled["git-commit"] {
+			execTool.RedirectGitWrites = true
+			execTool.WorkDir = deps.workspace
+		}
+		reg.Register(execTool)
 	}
 	if deps.enabled["http"] {
 		reg.Register(toolpkg.NewHTTPTool())
