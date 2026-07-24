@@ -105,6 +105,69 @@ func looksLikePersonaPath(p string) bool {
 	return false
 }
 
+// pathNotFoundMessage coaches a not-found read/edit. When a file with the same
+// basename exists elsewhere in the workspace, it names the ACTUAL path — so a
+// model that guessed a plausible-but-wrong path (the dominant observed fumble:
+// asking for "bench/builder/fixture/metrics.go" when the workspace holds
+// "benchfixture/metrics.go") self-corrects on the first failure instead of
+// retrying the wrong path until it gives up. Falls back to listing the top-level
+// entries. The walk is bounded so a huge workspace can't blow up the message.
+func pathNotFoundMessage(workDir, requested string) string {
+	base := filepath.Base(requested)
+	var matches []string
+	scanned := 0
+	_ = filepath.WalkDir(workDir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" || d.Name() == "node_modules" || d.Name() == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		scanned++
+		if scanned > 20000 {
+			return filepath.SkipAll
+		}
+		if d.Name() == base {
+			if rel, e := filepath.Rel(workDir, p); e == nil {
+				matches = append(matches, rel)
+			}
+			if len(matches) >= 5 {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+
+	msg := fmt.Sprintf("Error: %s not found in the workspace.", requested)
+	if len(matches) > 0 {
+		msg += fmt.Sprintf(" A file named %q exists at: %s — did you mean that path? Retry `read` with the correct path.", base, strings.Join(matches, ", "))
+		return msg
+	}
+	if entries, err := os.ReadDir(workDir); err == nil {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.Name() == ".git" {
+				continue
+			}
+			n := e.Name()
+			if e.IsDir() {
+				n += "/"
+			}
+			names = append(names, n)
+			if len(names) >= 20 {
+				break
+			}
+		}
+		if len(names) > 0 {
+			msg += " The workspace top level contains: " + strings.Join(names, ", ") + "."
+		}
+	}
+	return msg
+}
+
 // ReadTool reads workspace files.
 type ReadTool struct {
 	WorkDir string
@@ -174,12 +237,7 @@ func (t *ReadTool) Execute(args map[string]interface{}) ToolResult {
 	info, err := os.Stat(absPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			parentDir := filepath.Dir(path)
-			if parentDir == "." || parentDir == "" {
-				parentDir = "/workspace"
-			}
-			filename := filepath.Base(path)
-			msg := fmt.Sprintf("Error: %s not found. Use `exec: ls %s` to see available files, or `exec: find /workspace -name '%s'` to search.", path, parentDir, filename)
+			msg := pathNotFoundMessage(t.WorkDir, path)
 			if looksLikePersonaPath(path) {
 				msg += fmt.Sprintf(" This path looks like a persona file. Persona files live in the personas repo, not the agent workspace — clone it first with `git-clone kit/hirdforge-personas`, then read `hirdforge-personas/%s`.", path)
 			}
@@ -409,6 +467,9 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 	}
 	data, err := os.ReadFile(absPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return ToolResult{Error: pathNotFoundMessage(t.WorkDir, path)}
+		}
 		return ToolResult{Error: err.Error()}
 	}
 	if bytesLookBinary(data) {
