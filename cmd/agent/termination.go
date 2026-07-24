@@ -72,6 +72,21 @@ const repeatedToolCallThreshold = 3
 
 func (r terminationReason) String() string { return string(r) }
 
+// IsAbnormal reports whether the loop ended for a degraded reason that warrants
+// a structured handoff report (M1's abnormal-exit summary) rather than silence.
+// Context exhaustion is deliberately excluded — the context is already over the
+// window, so asking for one more message would just fail again; and the pure
+// error/cancel reasons return early with an error before any summary phase.
+func (r terminationReason) IsAbnormal() bool {
+	switch r {
+	case terminationMaxTurns, terminationRepeatedToolCall,
+		terminationToolErrorsExhausted, terminationNoActionableOutput:
+		return true
+	default:
+		return false
+	}
+}
+
 // Valid reports whether r is one of the canonical reasons.
 func (r terminationReason) Valid() bool {
 	for _, x := range allTerminationReasons {

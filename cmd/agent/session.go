@@ -1240,6 +1240,19 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			})
 		}
 
+		// M1: on an abnormal exit, steer the final tools-disabled turn into a
+		// structured handoff report (why / done / remaining / next + a terminal
+		// marker) instead of silence or a bare truncation. Carries the M6 plan.
+		if toolLoopExitReason.IsAbnormal() {
+			messages = append(messages, message{Role: "user", Content: abnormalExitSummaryRequest(sessionID, toolLoopExitReason)})
+			logJSON("info", "abnormal_exit_summary_requested", map[string]interface{}{
+				"agent":      deps.agentName,
+				"session_id": sessionID,
+				"task_id":    taskID,
+				"reason":     toolLoopExitReason.String(),
+			})
+		}
+
 		var full strings.Builder
 		hadXMLToolCalls := false
 		streamIterationHadToolCalls := false

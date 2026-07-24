@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -128,6 +130,117 @@ func TestM6ReanchorResurfacesPlan(t *testing.T) {
 		t.Error("expected the re-surfaced plan to carry the todo items")
 	}
 	sessionTodos.clear("sess-m6-reanchor")
+}
+
+// reanchorEvents returns the todo_reanchor log records (for asserting on the
+// cadence-vs-wobble distinction).
+func (c *logCapture) reanchorEvents() []map[string]interface{} {
+	var out []map[string]interface{}
+	for _, rec := range c.entries() {
+		if rec["msg"] == "todo_reanchor" {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// terminationEvent returns the first session_termination record with the given
+// reason, or nil.
+func (c *logCapture) terminationEvent(reason terminationReason) map[string]interface{} {
+	for _, rec := range c.entries() {
+		if rec["msg"] == sessionTerminationMsg && rec["reason"] == reason.String() {
+			return rec
+		}
+	}
+	return nil
+}
+
+// TestM6ReanchorFiresOnCadence proves the spec's cadence path (distinct from the
+// wobble path in TestM6ReanchorResurfacesPlan): with a plan written and NO drift
+// signal, the plan is still re-surfaced every reanchorCadence rounds.
+func TestM6ReanchorFiresOnCadence(t *testing.T) {
+	logs := captureLogs(t)
+	// todo, then > reanchorCadence DISTINCT successful tool calls (no repetition,
+	// no failures → no wobble), then a terminal outcome.
+	resps := []stubResponse{
+		stubToolCall("todo", `{"items":"[ ] step one\n[ ] open the PR"}`),
+	}
+	for n := 1; n <= reanchorCadence+1; n++ {
+		resps = append(resps, stubToolCall("noop", `{"n":"`+strconv.Itoa(n)+`"}`))
+	}
+	resps = append(resps, stubContent("NOOP: nothing to do."))
+	srv := newStubInferenceServer(t, resps...)
+
+	deps := harnessDeps(srv)
+	deps.maxToolRounds = reanchorCadence + 4
+	deps.reg.Register(&todoTool{})
+	deps.reg.Register(&fakeNoopTool{})
+	deps.workspace = t.TempDir()
+
+	proc := newConversationProcessor(deps)
+	// Non-PR request: the planning reminder branch stays out of the way, so the
+	// re-anchor we observe is purely cadence-driven.
+	if _, err := proc(context.Background(), "sess-m6-cadence", "task-cadence",
+		"Tidy up the package.", nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cadenceSeen := false
+	for _, ev := range logs.reanchorEvents() {
+		if w, ok := ev["wobble"].(bool); ok && !w {
+			cadenceSeen = true
+		}
+	}
+	if !cadenceSeen {
+		t.Errorf("expected a cadence-driven re-anchor (wobble=false); events: %v", logs.reanchorEvents())
+	}
+	if !srv.anyRequestContains("Your current plan") {
+		t.Error("cadence re-anchor should have re-surfaced the plan")
+	}
+	sessionTodos.clear("sess-m6-cadence")
+}
+
+// TestM6AbnormalExitCarriesTodo proves the spec's "abnormal exits enumerate
+// remaining items": a run that writes a plan and then exhausts its turns records
+// the still-open items on the max_turns termination event.
+func TestM6AbnormalExitCarriesTodo(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newStubInferenceServer(t,
+		stubToolCall("todo", `{"items":"[x] read files\n[ ] extract helper\n[ ] open the PR"}`),
+		stubToolCall("noop", `{"n":"1"}`), // keep calling tools → never terminates
+	)
+	deps := harnessDeps(srv)
+	deps.maxToolRounds = 3 // small, so it hits max_turns before repetition (>=3 identical) trips
+	deps.reg.Register(&todoTool{})
+	deps.reg.Register(&fakeNoopTool{})
+	deps.workspace = t.TempDir()
+
+	proc := newConversationProcessor(deps)
+	if _, err := proc(context.Background(), "sess-m6-abnormal", "task-abnormal",
+		"Refactor and open a PR.", nil, nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ev := logs.terminationEvent(terminationMaxTurns)
+	if ev == nil {
+		t.Fatalf("expected a max_turns termination; reasons: %v", logs.terminationReasons())
+	}
+	remain, ok := ev["todo_remain"].([]interface{})
+	if !ok || len(remain) == 0 {
+		t.Fatalf("abnormal exit must enumerate remaining todo items; got todo_remain=%v", ev["todo_remain"])
+	}
+	// The completed item must not be listed; the two open ones must be.
+	joined := ""
+	for _, r := range remain {
+		joined += " " + fmt.Sprint(r)
+	}
+	if !strings.Contains(joined, "extract helper") || !strings.Contains(joined, "open the PR") {
+		t.Errorf("remaining should list the open items, got: %v", remain)
+	}
+	if strings.Contains(joined, "read files") {
+		t.Errorf("completed item must not appear in remaining: %v", remain)
+	}
+	sessionTodos.clear("sess-m6-abnormal")
 }
 
 // TestM6FailOpenQuestionIsTerminal proves the anti-dilution property: when the
