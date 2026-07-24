@@ -355,9 +355,18 @@ func (t *WriteTool) Verify(args map[string]interface{}, result ToolResult) error
 	return nil
 }
 
-// EditTool replaces an exact string match in a workspace file.
+// EditRescueMarker tags an edit result that a non-exact replacer strategy
+// rescued. The agent loop keys off it to fire an M6 re-anchor (a rescue is a
+// wobble signal — the model's precision is slipping).
+const EditRescueMarker = "matched via "
+
+// EditTool replaces a string match in a workspace file via the M3 replacer
+// cascade (exact → whitespace-normalized → indentation-flexible).
 type EditTool struct {
 	WorkDir string
+	// OnRescue, if set, is called when a non-exact strategy absorbs an imprecise
+	// old_str — the M3 rescue-telemetry seam. sample is a short diff-shaped hint.
+	OnRescue func(strategy, path, sample string)
 }
 
 func NewEditTool(workDir string) *EditTool {
@@ -416,16 +425,15 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 	}
 
 	content := string(data)
-	occurrences := strings.Count(content, oldStr)
-	if occurrences == 0 {
-		return ToolResult{Error: "old_str not found in file. Use the read tool to check the current content."}
-	}
-	if occurrences > 1 {
-		return ToolResult{Error: fmt.Sprintf("old_str appears %d times. Make it more specific to match exactly once.", occurrences)}
+	res, matchErr := applyReplacerCascade(content, oldStr, newStr)
+	if matchErr != nil {
+		if me, ok := matchErr.(*editMatchError); ok && me.ambiguous {
+			return ToolResult{Error: fmt.Sprintf("old_str matches %d places. Add more surrounding context so it matches exactly once — do not shorten it.", me.count)}
+		}
+		return ToolResult{Error: "old_str not found in file. Re-`read` the file and copy the target text exactly (mind whitespace and indentation)."}
 	}
 
-	updated := strings.Replace(content, oldStr, newStr, 1)
-	if err := atomicWriteFile(absPath, []byte(updated), 0644); err != nil {
+	if err := atomicWriteFile(absPath, []byte(res.Updated), 0644); err != nil {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
@@ -433,7 +441,29 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 	// file must read again. This is what breaks the multi-edit cascade where a
 	// later edit targets text an earlier edit already moved.
 	sessionReads.invalidate(sessionID, absPath)
-	return ToolResult{Output: fmt.Sprintf("Edited %s: replaced %d bytes with %d bytes", path, len(oldStr), len(newStr))}
+
+	// M3 rescue telemetry: a non-exact strategy absorbed an imprecise old_str.
+	out := fmt.Sprintf("Edited %s: replaced %d bytes with %d bytes", path, len(oldStr), len(newStr))
+	if res.Strategy != "exact" {
+		out += fmt.Sprintf(" (%s%s-normalized strategy — old_str was imprecise but unambiguous)", EditRescueMarker, res.Strategy)
+		if t.OnRescue != nil {
+			t.OnRescue(res.Strategy, path, firstLine(oldStr))
+		}
+	}
+	return ToolResult{Output: out}
+}
+
+// firstLine returns the first line of s, trimmed and capped, for a compact
+// rescue-telemetry sample.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) > 120 {
+		s = s[:120]
+	}
+	return s
 }
 
 func autoStageWrittenFile(absPath string) {

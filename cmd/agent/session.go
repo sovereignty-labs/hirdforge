@@ -1062,16 +1062,9 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					}
 				} else {
 					consecutiveToolFailures = 0
-					// A git-commit that found nothing to stage is a silent
-					// dead-end the model tends to read as "done"; re-anchor.
-					if tc.Function.Name == "git-commit" &&
-						strings.HasPrefix(strings.TrimSpace(result.Output), toolpkg.GitCommitNoChangesPrefix) {
-						reanchorPending = true
-					}
-					// Reaching for shell git to mutate a repo means the model is
-					// off the verified path; re-anchor it onto the plan.
-					if tc.Function.Name == "exec" &&
-						strings.HasPrefix(strings.TrimSpace(result.Output), toolpkg.ExecGitRedirectPrefix) {
+					// A successful tool result can still signal drift (git-commit
+					// no-op, redirected shell git, M3 edit rescue) → re-anchor.
+					if toolResultSignalsWobble(tc.Function.Name, result.Output) {
 						reanchorPending = true
 					}
 				}
