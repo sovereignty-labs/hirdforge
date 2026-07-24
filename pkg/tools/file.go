@@ -12,6 +12,18 @@ import (
 
 const maxFileSize = 1024 * 1024
 
+// M4 read budgets (BUILDER_HARNESS §M4). Tool output must never flood the
+// context — the 14-function refactor died behind a wall of grep/sed output, and
+// long tasks degrade as the original instruction recedes. Reads are line-
+// numbered, capped, and paged; every truncation is announced so nothing is
+// model-invisible. Budgets are struct fields (config, not constants) so they can
+// be tuned from telemetry.
+const (
+	defaultReadMaxLines   = 2000
+	defaultReadMaxBytes   = 50 * 1024
+	defaultReadMaxLineLen = 2000
+)
+
 // atomicWriteFile writes data to a temp file in the same directory as path and
 // then renames it over path, so a crash or kill mid-write leaves either the
 // previous contents or the new contents — never a truncated file. The temp
@@ -96,10 +108,40 @@ func looksLikePersonaPath(p string) bool {
 // ReadTool reads workspace files.
 type ReadTool struct {
 	WorkDir string
+	// Budgets (config, not constants). Zero falls back to the defaults.
+	MaxLines   int
+	MaxBytes   int
+	MaxLineLen int
 }
 
 func NewReadTool(workDir string) *ReadTool {
-	return &ReadTool{WorkDir: workDir}
+	return &ReadTool{
+		WorkDir:    workDir,
+		MaxLines:   defaultReadMaxLines,
+		MaxBytes:   defaultReadMaxBytes,
+		MaxLineLen: defaultReadMaxLineLen,
+	}
+}
+
+func (t *ReadTool) maxLines() int {
+	if t.MaxLines > 0 {
+		return t.MaxLines
+	}
+	return defaultReadMaxLines
+}
+
+func (t *ReadTool) maxBytes() int {
+	if t.MaxBytes > 0 {
+		return t.MaxBytes
+	}
+	return defaultReadMaxBytes
+}
+
+func (t *ReadTool) maxLineLen() int {
+	if t.MaxLineLen > 0 {
+		return t.MaxLineLen
+	}
+	return defaultReadMaxLineLen
 }
 
 func (t *ReadTool) Name() string {
@@ -112,7 +154,9 @@ func (t *ReadTool) Description() string {
 
 func (t *ReadTool) Parameters() map[string]string {
 	return map[string]string{
-		"path": "File path relative to workspace",
+		"path":   "File path relative to workspace",
+		"offset": "Optional: 1-based line number to start from, for paging a large file.",
+		"limit":  "Optional: maximum number of lines to return.",
 	}
 }
 
@@ -154,7 +198,76 @@ func (t *ReadTool) Execute(args map[string]interface{}) ToolResult {
 	if bytesLookBinary(data) {
 		return ToolResult{Error: fmt.Sprintf("Error: binary file detected at %s. Use `exec: file %s` to check file type, or `exec: xxd %s | head -20` for hex inspection.", path, path, path)}
 	}
-	return ToolResult{Output: string(data)}
+	// M4: record that the agent now knows this file's current content, so a
+	// later edit can be checked against it (read-before-edit + staleness).
+	sessionReads.record(stringifyArg(args, "_session_id"), absPath, contentHash(data))
+
+	offset := intArg(args, "offset")
+	limit := intArg(args, "limit")
+	return ToolResult{Output: t.formatRead(string(data), offset, limit)}
+}
+
+// formatRead renders file content as a line-numbered, paged, budgeted view.
+// Every line is prefixed "N: " (1-based absolute line number — NOT part of the
+// file; the edit tool matches raw content, so strip the prefix when building
+// old_str). Over-long lines are cut with a marker. Output stops at the line or
+// byte budget, and any truncation is announced with the offset to continue —
+// nothing is silently dropped.
+func (t *ReadTool) formatRead(content string, offset, limit int) string {
+	lines := strings.Split(content, "\n")
+	// A trailing newline yields a final empty element; drop it so line counts match.
+	if n := len(lines); n > 0 && lines[n-1] == "" && strings.HasSuffix(content, "\n") {
+		lines = lines[:n-1]
+	}
+	total := len(lines)
+	if total == 0 {
+		return "(empty file)"
+	}
+
+	start := 0
+	if offset > 1 {
+		start = offset - 1
+	}
+	if start >= total {
+		return fmt.Sprintf("[read: offset %d is past end of file — the file has %d line(s)]", offset, total)
+	}
+
+	lineBudget := t.maxLines()
+	if limit > 0 && limit < lineBudget {
+		lineBudget = limit
+	}
+
+	var b strings.Builder
+	byteBudget := t.maxBytes()
+	maxLL := t.maxLineLen()
+	emitted := 0
+	truncatedByBytes := false
+	i := start
+	for ; i < total && emitted < lineBudget; i++ {
+		line := lines[i]
+		if len(line) > maxLL {
+			line = line[:maxLL] + fmt.Sprintf("…[line truncated, %d more chars]", len(lines[i])-maxLL)
+		}
+		rendered := fmt.Sprintf("%d: %s\n", i+1, line)
+		if b.Len() > 0 && b.Len()+len(rendered) > byteBudget {
+			truncatedByBytes = true
+			break
+		}
+		b.WriteString(rendered)
+		emitted++
+	}
+	lastShown := start + emitted // 1-based line number of the last shown line == this (0-based next)
+	out := strings.TrimRight(b.String(), "\n")
+
+	if i < total {
+		reason := "line limit"
+		if truncatedByBytes {
+			reason = "size limit"
+		}
+		out += fmt.Sprintf("\n\n[read: showing lines %d-%d of %d (%s reached). Continue with offset=%d]",
+			start+1, lastShown, total, reason, lastShown+1)
+	}
+	return out
 }
 
 // WriteTool writes workspace files.
@@ -202,6 +315,9 @@ func (t *WriteTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
+	// M4: the agent knows what it just wrote — establish that as ground truth so
+	// an immediate edit doesn't demand a redundant read.
+	sessionReads.record(stringifyArg(args, "_session_id"), absPath, contentHash([]byte(content)))
 	output := fmt.Sprintf("wrote %d bytes to %s", len(content), path)
 	lineCount := 0
 	if content != "" {
@@ -253,7 +369,7 @@ func (t *EditTool) Name() string {
 }
 
 func (t *EditTool) Description() string {
-	return "Edit a file by replacing an exact string match. old_str must appear exactly once in the file."
+	return "Edit a file by replacing an exact string match. old_str must appear exactly once in the file. Read the file first: an edit is only allowed against a file you have read this session, and each successful edit requires reading again before the next edit to the same file. old_str is matched against the raw file content — do NOT include the `N: ` line-number prefixes that `read` shows; those are a gutter, not part of the file."
 }
 
 func (t *EditTool) Parameters() map[string]string {
@@ -290,6 +406,15 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: fmt.Sprintf("Error: binary file detected at %s. Use `read` only with text files.", path)}
 	}
 
+	// M4 read-before-edit + staleness. Only enforced within a session (empty
+	// session id disables it, keeping non-session callers unchanged).
+	sessionID := stringifyArg(args, "_session_id")
+	if known, current := sessionReads.status(sessionID, absPath, contentHash(data)); !known {
+		return ToolResult{Error: fmt.Sprintf("read-before-edit: you have not read %s in this session. Use `read %s` first, then edit against its current content.", path, path)}
+	} else if !current {
+		return ToolResult{Error: fmt.Sprintf("read-before-edit: %s changed since you last read it (a previous edit or an external change). Read it again, then edit — this prevents editing against stale content.", path)}
+	}
+
 	content := string(data)
 	occurrences := strings.Count(content, oldStr)
 	if occurrences == 0 {
@@ -304,6 +429,10 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
+	// M4: a successful edit makes the prior read stale — the next edit to this
+	// file must read again. This is what breaks the multi-edit cascade where a
+	// later edit targets text an earlier edit already moved.
+	sessionReads.invalidate(sessionID, absPath)
 	return ToolResult{Output: fmt.Sprintf("Edited %s: replaced %d bytes with %d bytes", path, len(oldStr), len(newStr))}
 }
 

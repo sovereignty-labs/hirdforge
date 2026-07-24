@@ -121,3 +121,25 @@ func TestRepoNotFoundMessageCoachesWithActualRepos(t *testing.T) {
 		t.Errorf("empty-workspace coaching should say none present: %q", empty)
 	}
 }
+
+func TestExecHeadTailElide(t *testing.T) {
+	data := []byte(strings.Repeat("A", 100) + strings.Repeat("B", 100) + strings.Repeat("Z", 100))
+	got := headTailElide(data, 100)
+	if !strings.HasPrefix(got, "A") {
+		t.Error("head must be retained")
+	}
+	if !strings.HasSuffix(got, "Z") {
+		t.Error("tail must be retained (this is the point — the old head-only cut dropped the exit summary)")
+	}
+	if !strings.Contains(got, "bytes elided") {
+		t.Errorf("elision must be marked: %q", got)
+	}
+	if len(got) >= len(data) {
+		t.Error("elided output should be smaller than the source")
+	}
+	// Under budget -> unchanged.
+	small := []byte("hello")
+	if headTailElide(small, 100) != "hello" {
+		t.Error("under-budget data must pass through unchanged")
+	}
+}
