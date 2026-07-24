@@ -2218,6 +2218,7 @@ func main() {
 	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
 	maxToolRounds := flag.Int("max-tool-rounds", 30, "maximum LLM inference rounds in the tool-calling loop")
 	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
+	debugIOFlag := flag.Bool("debug-io", false, "log tool commands, tool output, and final model content (diagnostic; verbose; off by default)")
 	soulMaxLines := flag.Int("soul-max-lines", 80, "maximum number of lines allowed in a SOUL file")
 	giteaURL := flag.String("gitea-url", "", "Gitea server URL for git tools")
 	giteaTokenFlag := flag.String("gitea-token", "", "Gitea API token (optional; falls back to /vault/secrets/gitea-token)")
@@ -2393,6 +2394,7 @@ func main() {
 		bootstrap:        *bootstrapFlag,
 		intuition:        *intuitionFlag,
 		episodic:         *episodicFlag,
+		debugIO:          *debugIOFlag,
 		maxContext:       *maxContext,
 		model:            *model,
 		apiKey:           *apiKey,

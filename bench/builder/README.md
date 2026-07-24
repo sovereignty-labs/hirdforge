@@ -78,7 +78,15 @@ Target (harness spec, after M1–M5 land in Phase 2): **≥ 8/10 clean**.
 Historical baseline: ~0/2 — measured against the Qwen 3.6 35B-A3B MoE, which
 was swapped off the fabric 2026-07-17 for weak agentic work.
 
-**Measured baseline, 2026-07-23** (current agent loop, BEFORE M2–M7; 10
+> **⚠️ RETRACTED 2026-07-24 — the numbers below are invalid.** The fixture had
+> been silently solved-in-place (see commit 7cda406; a broken-exec agent run,
+> exec running in the wrong cwd, refactored the real `fixture/metrics.go`, swept
+> into a commit by `git add -A`). An already-refactored fixture passes all four
+> checks trivially every round, so this "10/10" measured nothing. Fixed: exec
+> workspace-rooted (#377), fixture restored to the 14-duplicated before-state, a
+> pre-flight guard added. Re-baseline pending a valid run.
+
+**Measured baseline, 2026-07-23 (INVALID — see retraction above)** (10
 rounds per lane, all four mechanical checks required):
 
 | lane | model | clean | round duration |

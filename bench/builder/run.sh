@@ -39,6 +39,15 @@ if ss -tln | grep -qE ":$PORT\b|:$((PORT + 1))\b"; then
 fi
 
 TEST_SHA_REF="$(sha256sum "$BENCH_DIR/fixture/metrics_test.go" | cut -d' ' -f1)"
+
+# Pre-flight: the fixture must be in the DUPLICATED "before" state (marker 14x),
+# else the refactor is a no-op and every round is a false pass. See run-flow.sh.
+FIXTURE_DUP="$(grep -c 'TrimSpace(strings.ToLower' "$BENCH_DIR/fixture/metrics.go")"
+if [ "$FIXTURE_DUP" -lt 10 ]; then
+  echo "ERROR: fixture/metrics.go has only $FIXTURE_DUP duplicated blocks (expected 14) — the task would be a no-op. Restore the fixture."
+  exit 1
+fi
+
 CLEAN_COUNT=0
 
 for ROUND in $(seq 1 "$RUNS"); do
