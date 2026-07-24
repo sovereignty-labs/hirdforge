@@ -9,7 +9,8 @@ description: "Read-only reviewer: read + diff + submit a Gitea verdict. No edit/
 tools:
   - read
   - git-diff
-  - gitea-review            # create-review only (APPROVE / REQUEST_CHANGES)
+  - create-review           # submit a Gitea verdict only (APPROVE / REQUEST_CHANGES)
+  - list-pr-files           # read-only: enumerate the PR's changed files
 
 procedure: reviewer
 

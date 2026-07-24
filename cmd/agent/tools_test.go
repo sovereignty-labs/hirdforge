@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 	"testing"
 
 	toolpkg "git.hirdforge.com/kit/hirdforge/pkg/tools"
@@ -79,6 +80,37 @@ func TestConfigureToolRegistryCreatePROnly(t *testing.T) {
 		if _, ok := reg.Get(leak); ok {
 			t.Errorf("gitea suite leaked through create-pr: %q registered", leak)
 		}
+	}
+}
+
+// TestConfigureToolRegistryReviewerProfile pins P2.7's safety property: the
+// reviewer tool set gives the verdict tool (create-review) + read-only helpers
+// and NOTHING mutating — no create-pr, no merge, no edit/write/exec. A reviewer
+// that physically lacks the mutating tools cannot be prompt-injected into
+// changing code.
+func TestConfigureToolRegistryReviewerProfile(t *testing.T) {
+	reg := toolpkg.NewRegistry()
+	configureToolRegistry(reg, toolSetupDeps{
+		workspace:     t.TempDir(),
+		giteaURL:      "http://gitea.test",
+		agentName:     "test",
+		reviewTracker: newReviewContextTracker("test", "", 0),
+		enabled:       map[string]bool{"read": true, "git-diff": true, "create-review": true, "list-pr-files": true},
+	})
+	for _, want := range []string{"read", "git-diff", "create-review", "list-pr-files"} {
+		if _, ok := reg.Get(want); !ok {
+			t.Errorf("reviewer profile missing tool: %q", want)
+		}
+	}
+	// The mutating / builder tools must be absent — this is the security property.
+	for _, forbidden := range []string{"create-pr", "merge-pr", "edit", "write", "exec", "git-commit", "git-clone", "create-issue", "close-issue"} {
+		if _, ok := reg.Get(forbidden); ok {
+			t.Errorf("reviewer profile leaked mutating tool: %q", forbidden)
+		}
+	}
+	// The reviewer procedure renders for a reg holding the verdict tool.
+	if p := reviewerProcedure(reg); !strings.Contains(p, "Review procedure") || !strings.Contains(p, "create-review") {
+		t.Fatalf("reviewer procedure did not render: %q", p)
 	}
 }
 

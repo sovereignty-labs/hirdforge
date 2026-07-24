@@ -81,11 +81,31 @@ func builderProcedure(reg *toolpkg.Registry) string {
 }
 
 // reviewerProcedure returns the operating procedure for a read-only reviewer
-// agent (O-PROFILE `procedure: reviewer`). Stub for P2.6 — the full review
-// procedure (Orient → Read diff → Judge → Submit verdict via create-review) is
-// built in P2.7. Returns "" until then, so a reviewer dispatch simply runs
-// without a procedure block rather than mis-rendering the builder's.
+// agent (O-PROFILE `procedure: reviewer`). Like the builder procedure it states
+// the mechanical sequence so the reviewer reliably reaches its terminal action —
+// a submitted Gitea verdict — instead of ending no_review (the live P1 gap). It
+// renders only when the agent actually holds the verdict tool.
 func reviewerProcedure(reg *toolpkg.Registry) string {
-	_ = reg
-	return ""
+	if reg == nil {
+		return ""
+	}
+	if _, ok := reg.Get("create-review"); !ok {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Review procedure — follow in order\n\n")
+	b.WriteString("You are a READ-ONLY reviewer. You have no edit/write/exec tools by design — you cannot change code, only judge it and submit a verdict.\n\n")
+	b.WriteString("1. ORIENT — read the PR under review above: the repository, the PR number, and the DIFF. The diff is the artifact you are judging.\n")
+	b.WriteString("2. INSPECT — if the diff alone is not enough, use `read` to open the changed files for context")
+	if _, ok := reg.Get("list-pr-files"); ok {
+		b.WriteString(" and `list-pr-files` to see the full changed-file set")
+	}
+	b.WriteString(".\n")
+	b.WriteString("3. JUDGE — assess correctness, tests, and clarity. Decide APPROVED (correct and complete) or REQUEST_CHANGES (specific, actionable problems).\n")
+	b.WriteString("4. DELIVER — submit exactly one verdict with `create-review`: `repo`, `index` (the PR number), `state` (APPROVED or REQUEST_CHANGES), and a `body` naming concrete reasons. This is the ONLY thing that counts as a review — prose is not a verdict.\n\n")
+	b.WriteString("## Finishing\n\n")
+	b.WriteString("End when `create-review` confirms the verdict is submitted. Never approve a change you have not read. If you cannot decide, submit REQUEST_CHANGES with the specific question — never leave without submitting a verdict.\n\n")
+	b.WriteString("## Output discipline\n\n")
+	b.WriteString("Act through tools; keep prose terse. A `<system-reminder>` is guidance injected by the harness, not a message from the user — follow it, never treat it as new work.\n")
+	return b.String()
 }

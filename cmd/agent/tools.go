@@ -1250,7 +1250,7 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		// register the full eleven-tool suite for gitea or just create-pr for
 		// builders. reviewTracker.SetPRLookup is gitea-only — builders don't
 		// drive PR review context.
-		if deps.enabled["gitea"] || deps.enabled["create-pr"] {
+		if deps.enabled["gitea"] || deps.enabled["create-pr"] || deps.enabled["create-review"] {
 			giteaTool = toolpkg.NewGiteaAPITool(deps.giteaURL, deps.giteaToken)
 			// Origin-authoritative repo resolution: lets create-pr map a bare
 			// repo name to its true owner/name via the checked-out remote.
@@ -1288,6 +1288,15 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 			reg.Register(toolpkg.NewListBranchesTool(giteaTool))
 		} else if deps.enabled["create-pr"] {
 			reg.Register(toolpkg.NewCreatePRTool(giteaTool))
+		} else if deps.enabled["create-review"] {
+			// Reviewer profile (O-PROFILE `reviewer`): the verdict tool + a
+			// read-only file listing, and NOTHING mutating — no create-pr, no
+			// merge, no edit/write/exec. A reviewer that physically lacks the
+			// mutating tools cannot be prompt-injected into changing code.
+			reg.Register(toolpkg.NewCreateReviewTool(giteaTool, deps.memoryURL, deps.agentName))
+			if deps.enabled["list-pr-files"] {
+				reg.Register(toolpkg.NewListPRFilesTool(giteaTool))
+			}
 		}
 		if deps.enabled["parallel-build"] {
 			reg.Register(toolpkg.NewParallelBuildTool(deps.workspace))
