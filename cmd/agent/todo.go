@@ -280,5 +280,5 @@ func terminalNudge(sessionID string) string {
 // and it judges from the diff in the envelope, since the PR's changed files are
 // on the PR branch, not the reviewer's checkout.
 func reviewerNudge() string {
-	return "You have NOT submitted your verdict, and nothing you print here is read — only a Gitea review counts. Judge the change from the DIFF in this task (use `git-diff`; do not try to open the PR's new files, they are on the PR branch, not yours). Then call `create-review` now with `repo`, `index` (the PR number), `state` (APPROVED or REQUEST_CHANGES), and a `body` giving concrete reasons. If you genuinely cannot review it, report `QUESTION: <what blocks you>`. Do not stop until `create-review` confirms the verdict is submitted."
+	return "You have NOT submitted your verdict, and nothing you print here is read — only a Gitea review counts. Judge the change from the `DIFF:` section already provided above in this task (NOT from `git-diff` or the filesystem — the PR's changes are on the PR branch, not your checkout). Then call `create-review` now with `repo`, `index` (the PR number), `state` (APPROVED or REQUEST_CHANGES), and a `body` giving concrete reasons. If you genuinely cannot review it, report `QUESTION: <what blocks you>`. Do not stop until `create-review` confirms the verdict is submitted."
 }

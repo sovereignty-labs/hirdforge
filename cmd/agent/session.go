@@ -445,8 +445,14 @@ func (s *completionNudgeState) hasRecentError(sessionID string) bool {
 // deliverable, a todo is still open, or this is a reviewer (whose verdict is its
 // deliverable). Extracted to keep newConversationProcessor under the gocyclo gate.
 func completionGateEngaged(hadToolCalls, reviewMode bool, content, sessionID string) bool {
+	// A reviewer's deliverable IS a tool call (create-review), so gate it even if
+	// it stopped on the very first turn with prose and no tool calls — otherwise a
+	// "looks good" one-liner slips through as no_review.
+	if reviewMode {
+		return true
+	}
 	return hadToolCalls &&
-		(requestRequiresCompletionSignal(content) || sessionTodos.hasOpenItems(sessionID) || reviewMode)
+		(requestRequiresCompletionSignal(content) || sessionTodos.hasOpenItems(sessionID))
 }
 
 // reviewerGateSatisfied reports whether a reviewer has reached a terminal state:
