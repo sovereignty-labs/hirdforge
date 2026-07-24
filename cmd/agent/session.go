@@ -480,6 +480,8 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		// M6: the externalized plan is session-scoped; drop it when the session
 		// ends so the in-memory store does not accumulate stale lists.
 		defer sessionTodos.clear(sessionID)
+		// M4: same for the read-before-edit tracking.
+		defer toolpkg.ClearReadState(sessionID)
 		defer func() {
 			if !hadToolCalls {
 				return
@@ -751,7 +753,10 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				case "broadcast":
 					result = broadcastExecValue.Execute(args)
 				default:
-					if tc.Function.Name == "recall" || tc.Function.Name == "todo" {
+					switch tc.Function.Name {
+					case "recall", "todo", "read", "write", "edit":
+						// read/write/edit share the M4 read-before-edit state,
+						// keyed by session.
 						args["_session_id"] = sessionID
 					}
 					if t, ok := deps.reg.Get(tc.Function.Name); ok {

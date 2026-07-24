@@ -76,12 +76,34 @@ type ExecTool struct {
 	WorkDir string
 }
 
+// defaultExecMaxOutput bounds exec output so a single command cannot flood the
+// context (BUILDER_HARNESS §M4). Retained head+tail, so the model still sees the
+// command echo / early errors AND the final lines / exit summary. Config, not a
+// constant — tunable from telemetry.
+const defaultExecMaxOutput = 30 * 1024
+
 // NewExecTool creates an ExecTool with safe defaults.
 func NewExecTool() *ExecTool {
 	return &ExecTool{
 		Timeout:   30 * time.Second,
-		MaxOutput: 1048576,
+		MaxOutput: defaultExecMaxOutput,
 	}
+}
+
+// headTailElide keeps the first ~60% and last ~40% of the budget, with an
+// explicit marker naming how many bytes were dropped from the middle — so the
+// start (what ran, early errors) and the end (final lines, failures) both
+// survive instead of the tail being cut off entirely.
+func headTailElide(data []byte, budget int) string {
+	if len(data) <= budget || budget <= 0 {
+		return string(data)
+	}
+	head := budget * 6 / 10
+	tail := budget - head
+	elided := len(data) - head - tail
+	return string(data[:head]) +
+		fmt.Sprintf("\n\n...[%d bytes elided — head+tail kept; re-run a narrower command for the middle]...\n\n", elided) +
+		string(data[len(data)-tail:])
 }
 
 // gitRedirectMessage coaches the model onto the verified path, naming the repos
@@ -150,10 +172,7 @@ func (t *ExecTool) Execute(args map[string]interface{}) ToolResult {
 		exitCode = 124
 	}
 
-	output := string(out)
-	if len(out) > t.MaxOutput {
-		output = string(out[:t.MaxOutput]) + fmt.Sprintf("\n... output truncated at %d bytes", t.MaxOutput)
-	}
+	output := headTailElide(out, t.MaxOutput)
 	footer := fmt.Sprintf("[exit:%d | %.1fs | %d bytes]", exitCode, duration.Seconds(), byteCount)
 	output = output + "\n" + footer
 

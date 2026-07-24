@@ -198,6 +198,10 @@ func (t *ReadTool) Execute(args map[string]interface{}) ToolResult {
 	if bytesLookBinary(data) {
 		return ToolResult{Error: fmt.Sprintf("Error: binary file detected at %s. Use `exec: file %s` to check file type, or `exec: xxd %s | head -20` for hex inspection.", path, path, path)}
 	}
+	// M4: record that the agent now knows this file's current content, so a
+	// later edit can be checked against it (read-before-edit + staleness).
+	sessionReads.record(stringifyArg(args, "_session_id"), absPath, contentHash(data))
+
 	offset := intArg(args, "offset")
 	limit := intArg(args, "limit")
 	return ToolResult{Output: t.formatRead(string(data), offset, limit)}
@@ -311,6 +315,9 @@ func (t *WriteTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
+	// M4: the agent knows what it just wrote — establish that as ground truth so
+	// an immediate edit doesn't demand a redundant read.
+	sessionReads.record(stringifyArg(args, "_session_id"), absPath, contentHash([]byte(content)))
 	output := fmt.Sprintf("wrote %d bytes to %s", len(content), path)
 	lineCount := 0
 	if content != "" {
@@ -362,7 +369,7 @@ func (t *EditTool) Name() string {
 }
 
 func (t *EditTool) Description() string {
-	return "Edit a file by replacing an exact string match. old_str must appear exactly once in the file."
+	return "Edit a file by replacing an exact string match. old_str must appear exactly once in the file. Read the file first: an edit is only allowed against a file you have read this session, and each successful edit requires reading again before the next edit to the same file. old_str is matched against the raw file content — do NOT include the `N: ` line-number prefixes that `read` shows; those are a gutter, not part of the file."
 }
 
 func (t *EditTool) Parameters() map[string]string {
@@ -399,6 +406,15 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: fmt.Sprintf("Error: binary file detected at %s. Use `read` only with text files.", path)}
 	}
 
+	// M4 read-before-edit + staleness. Only enforced within a session (empty
+	// session id disables it, keeping non-session callers unchanged).
+	sessionID := stringifyArg(args, "_session_id")
+	if known, current := sessionReads.status(sessionID, absPath, contentHash(data)); !known {
+		return ToolResult{Error: fmt.Sprintf("read-before-edit: you have not read %s in this session. Use `read %s` first, then edit against its current content.", path, path)}
+	} else if !current {
+		return ToolResult{Error: fmt.Sprintf("read-before-edit: %s changed since you last read it (a previous edit or an external change). Read it again, then edit — this prevents editing against stale content.", path)}
+	}
+
 	content := string(data)
 	occurrences := strings.Count(content, oldStr)
 	if occurrences == 0 {
@@ -413,6 +429,10 @@ func (t *EditTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: err.Error()}
 	}
 	autoStageWrittenFile(absPath)
+	// M4: a successful edit makes the prior read stale — the next edit to this
+	// file must read again. This is what breaks the multi-edit cascade where a
+	// later edit targets text an earlier edit already moved.
+	sessionReads.invalidate(sessionID, absPath)
 	return ToolResult{Output: fmt.Sprintf("Edited %s: replaced %d bytes with %d bytes", path, len(oldStr), len(newStr))}
 }
 
