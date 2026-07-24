@@ -1187,12 +1187,13 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	}
 	if deps.enabled["exec"] {
 		execTool := toolpkg.NewExecTool()
+		// Root exec in the workspace, so relative paths match read/write/edit.
+		execTool.WorkDir = deps.workspace
 		// Builder profile policy: when the structured git-commit tool is
 		// available, mutating shell git is redirected to it (the verified push
 		// path). Agents without git-commit are unaffected.
 		if deps.enabled["git-commit"] {
 			execTool.RedirectGitWrites = true
-			execTool.WorkDir = deps.workspace
 		}
 		reg.Register(execTool)
 	}
