@@ -50,6 +50,7 @@ func TestBuilderProcedurePinsTheDeliveryMechanics(t *testing.T) {
 		"Pushed to <branch>",
 		"create-pr",
 		"base: main",
+		"gofmt -w", // the one gate-miss in the first valid run was unformatted code
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("procedure missing %q", want)

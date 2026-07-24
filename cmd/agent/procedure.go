@@ -46,7 +46,7 @@ func builderProcedure(reg *toolpkg.Registry) string {
 		b.WriteString("3. PLAN — decide the full sequence before the first edit.\n")
 	}
 	b.WriteString("4. IMPLEMENT — make file changes with `edit`/`write`, in small verifiable steps.\n")
-	b.WriteString("5. VERIFY — run the build and the tests and fix what is red. Ground truth decides done, not your impression of the code.\n")
+	b.WriteString("5. VERIFY — run the build and the tests and fix what is red. Then FORMAT the code you changed with the project's formatter (for Go: `exec: gofmt -w <files>` — an unformatted file fails the gate even when it is otherwise correct). Ground truth decides done, not your impression of the code.\n")
 	b.WriteString("6. DELIVER — not optional; the work does not exist until it is a PR:\n")
 	b.WriteString("   a. Call `git-commit` with the repo directory, a clear message, and a branch.\n")
 	b.WriteString("      Do NOT use shell `git commit` / `git push` — they bypass push verification and will not work here.\n")
