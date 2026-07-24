@@ -268,7 +268,7 @@ func reanchorReminder(sessionID string) string {
 // terminal outcome. It re-surfaces the plan (if any) and states the full,
 // anti-dilution outcome space — never "just make a PR".
 func terminalNudge(sessionID string) string {
-	msg := "You are not done. Continue from the current workspace; do not reclone or change scope. Finish the remaining work, OR report a terminal outcome: the PR URL, FAILED: <reason and what you tried>, NOOP: <evidence nothing was needed>, or — if you are genuinely blocked or the requirement is ambiguous and you cannot deduce it from the repo — a specific QUESTION: <what you need to know>."
+	msg := "You are not done, and you have not called a tool. Do NOT describe or announce what you will do next — DO IT by calling the tool now. If the code is written and green, your next call is `git-commit` (then `create-pr`). Continue from the current workspace; do not reclone or change scope. The ONLY ways to finish are to call the tools through to a real PR, or to report a terminal outcome: FAILED: <reason and what you tried>, NOOP: <evidence nothing was needed>, or QUESTION: <what you need> if genuinely blocked."
 	if plan := sessionTodos.render(sessionID); plan != "" {
 		msg = "Your plan is not complete:\n" + plan + "\n\n" + msg
 	}
