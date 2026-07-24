@@ -350,3 +350,56 @@ func setMemTimeout(store *MemStore, id string, at time.Time) {
 		tk.TimeoutAt = &at
 	}
 }
+
+// TestDispatchReviewerAdvancesOnObservedVerdict pins the P2.7 tail fix: the
+// reviewer leg drives approve/revise from the reliable API verdict observation
+// (review.state) rather than depending on the fragile pr.review_submitted
+// webhook — it emits EventPRReviewSubmitted so the approve-on-review route fires.
+func TestDispatchReviewerAdvancesOnObservedVerdict(t *testing.T) {
+	fs := &fakeSandbox{}
+	d, cfg, _, taskID, store, events := newDispatchFixture(t, fs, true)
+	// Put the task in review with a PR, as the green path would.
+	if err := store.SetPR(taskID, "kit/hirdforge", 55); err != nil {
+		t.Fatal(err)
+	}
+	for _, to := range []string{StatusDispatched, StatusBuilding, StatusReview} {
+		if err := store.Transition(taskID, to, "setup", Cause{Kind: CauseSandbox}); err != nil {
+			t.Fatalf("transition %s: %v", to, err)
+		}
+	}
+	// Reviewer profile + the diff/verdict observers.
+	d.Profiles["reviewer"] = profile.Profile{Version: 1, Name: "reviewer", Tools: []string{"read", "git-diff", "create-review"}, Procedure: "reviewer", Budgets: profile.Budgets{MaxToolRounds: 30}}
+	d.DiffFetch = func(_ context.Context, _ string, _ int64) (string, string, string, error) {
+		return "diff --git a/x b/x", "agent/x", "main", nil
+	}
+	d.ReviewLookup = func(_ context.Context, _ string, _ int64) (string, string, bool, error) {
+		return "APPROVED", "reviewers", true, nil
+	}
+	// Find the review-on-gate route.
+	var reviewRoute *Route
+	for i := range cfg.Routes {
+		if cfg.Routes[i].ID == "review-on-gate" {
+			reviewRoute = &cfg.Routes[i]
+		}
+	}
+	if reviewRoute == nil {
+		t.Fatal("review-on-gate route missing from config")
+	}
+
+	if err := d.DispatchReviewer(context.Background(), cfg, reviewRoute, Event{TaskID: taskID}); err != nil {
+		t.Fatalf("DispatchReviewer: %v", err)
+	}
+	// The observed APPROVED verdict must be emitted as a review-submitted event.
+	var got *Event
+	for i := range *events {
+		if (*events)[i].Type == EventPRReviewSubmitted {
+			got = &(*events)[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("no EventPRReviewSubmitted emitted; events=%+v", *events)
+	}
+	if got.ReviewState != "APPROVED" || got.PRNumber != 55 {
+		t.Fatalf("emitted event = %+v, want APPROVED on PR 55", *got)
+	}
+}
