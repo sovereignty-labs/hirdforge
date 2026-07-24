@@ -346,3 +346,54 @@ func TestFailureSignatureGroupsSameClass(t *testing.T) {
 		t.Fatal("different error classes must not collide")
 	}
 }
+
+// fakeReviewTool is a create-review that always succeeds — the reviewer's
+// terminal action.
+type fakeReviewTool struct{ calls int64 }
+
+func (t *fakeReviewTool) Name() string        { return "create-review" }
+func (t *fakeReviewTool) Description() string { return "test-only create-review" }
+func (t *fakeReviewTool) Parameters() map[string]string {
+	return map[string]string{"repo": "r", "index": "n", "state": "APPROVED|REQUEST_CHANGES", "body": "b"}
+}
+func (t *fakeReviewTool) Execute(map[string]interface{}) toolpkg.ToolResult {
+	atomic.AddInt64(&t.calls, 1)
+	return toolpkg.ToolResult{Output: "submitted APPROVED review on PR #7"}
+}
+
+// TestReviewerCompletionGateForcesVerdict pins the P2.7 no_review fix: a reviewer
+// (completion=review) that stops with prose but no submitted verdict is nudged
+// until it actually calls create-review — the review-loop analogue of the
+// builder's PR gate. Without this the live reviewer ended no_review.
+func TestReviewerCompletionGateForcesVerdict(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newStubInferenceServer(t,
+		stubToolCall("noop", `{"n":"1"}`),                    // a tool call, so hadToolCalls is set
+		stubContent("The change looks correct; tests pass."), // early stop — NO verdict submitted
+		stubToolCall("create-review", `{"repo":"kit/hirdforge","index":"7","state":"APPROVED","body":"LGTM"}`),
+		stubContent("Verdict submitted."),
+	)
+	deps := harnessDeps(srv)
+	deps.maxToolRounds = 10
+	deps.completion = "review"
+	rev := &fakeReviewTool{}
+	deps.reg.Register(rev)
+	deps.reg.Register(&fakeNoopTool{})
+	deps.workspace = t.TempDir()
+
+	proc := newConversationProcessor(deps)
+	_, err := proc(context.Background(), "sess-rev-gate", "task-rev-gate",
+		"Review the PR diff in this envelope and submit your verdict.", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !logs.hasLogMsg("completion_nudge_sent") {
+		t.Error("a reviewer that stopped without a verdict must be nudged")
+	}
+	if atomic.LoadInt64(&rev.calls) == 0 {
+		t.Error("the gate must push the reviewer to actually call create-review")
+	}
+	if !logs.hasLogMsg("completion_gate_passed") {
+		t.Error("once the verdict was submitted the gate must pass")
+	}
+}

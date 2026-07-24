@@ -2216,6 +2216,7 @@ func main() {
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write,edit", "comma-separated enabled tools")
 	procedureFlag := flag.String("procedure", "", "operating procedure to render: builder | reviewer | none (O-PROFILE; empty ⇒ builder)")
+	completionFlag := flag.String("completion", "", "completion mode: pr | review | none (O-PROFILE completion.requires; empty ⇒ pr semantics)")
 	skillsFlag := flag.String("skills", "", "comma-separated bundle skill names resolved to skills/<name>.md in the skills repo (O-SKILL-BUNDLE)")
 	skillsRepoFlag := flag.String("skills-repo", "", "git URL of the skills/personas repo for --skills (tokenless; auth via the primed credential helper)")
 	memoryScopesFlag := flag.String("memory-scopes", "", "comma-separated Seidr collection scopes for recall/remember (O-SKILL-BUNDLE)")
@@ -2435,6 +2436,7 @@ func main() {
 		agentName:        agentName,
 		soul:             soul,
 		procedure:        *procedureFlag,
+		completion:       *completionFlag,
 		skillsContent:    skillsContent,
 		modelTemplate:    templateContent,
 		peers:            peers,

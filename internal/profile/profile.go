@@ -167,10 +167,14 @@ func (p Profile) isReviewIntent() bool {
 // defaults these fields carry). Deterministic: same profile ⇒ same args.
 func (p Profile) AgentArgs() []string {
 	rounds := p.Budgets.MaxToolRounds
-	return []string{
+	args := []string{
 		"-tools", strings.Join(p.Tools, ","),
 		"-max-tool-rounds", strconv.Itoa(rounds),
 		"-procedure", p.Procedure,
 		"-max-context", strconv.Itoa(p.Budgets.MaxContext),
 	}
+	if c := strings.TrimSpace(p.Completion.Requires); c != "" {
+		args = append(args, "-completion", c)
+	}
+	return args
 }

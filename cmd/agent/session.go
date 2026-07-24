@@ -391,11 +391,28 @@ type completionNudgeState struct {
 	mu           sync.Mutex
 	nudgeCounts  map[string]int
 	recentErrors map[string]bool
+	// reviewSubmitted marks that a session's reviewer actually fired a
+	// create-review (the mechanical "done" for a reviewer profile — a verdict
+	// exists, not prose that says one should). Backs the review-mode gate.
+	reviewSubmitted map[string]bool
 }
 
 var completionNudges = &completionNudgeState{
-	nudgeCounts:  make(map[string]int),
-	recentErrors: make(map[string]bool),
+	nudgeCounts:     make(map[string]int),
+	recentErrors:    make(map[string]bool),
+	reviewSubmitted: make(map[string]bool),
+}
+
+func (s *completionNudgeState) markReviewSubmitted(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reviewSubmitted[sessionID] = true
+}
+
+func (s *completionNudgeState) hasReviewSubmitted(sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reviewSubmitted[sessionID]
 }
 
 func (s *completionNudgeState) increment(sessionID string) int {
@@ -421,6 +438,35 @@ func (s *completionNudgeState) hasRecentError(sessionID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.recentErrors[sessionID]
+}
+
+// completionGateEngaged reports whether the terminal-outcome gate should apply:
+// the model stopped after doing work AND either the request demanded a
+// deliverable, a todo is still open, or this is a reviewer (whose verdict is its
+// deliverable). Extracted to keep newConversationProcessor under the gocyclo gate.
+func completionGateEngaged(hadToolCalls, reviewMode bool, content, sessionID string) bool {
+	return hadToolCalls &&
+		(requestRequiresCompletionSignal(content) || sessionTodos.hasOpenItems(sessionID) || reviewMode)
+}
+
+// reviewerGateSatisfied reports whether a reviewer has reached a terminal state:
+// it actually submitted a verdict (create-review fired) or failed open with a
+// reasoned QUESTION/FAILED. Non-review modes are never "satisfied" here — they
+// fall through to the prose terminal-outcome check.
+func reviewerGateSatisfied(reviewMode bool, sessionID, content string) bool {
+	if !reviewMode {
+		return false
+	}
+	return completionNudges.hasReviewSubmitted(sessionID) || completionBlockedPattern.MatchString(content)
+}
+
+// completionNudgeMessage picks the mode-appropriate nudge: the reviewer is
+// pushed to submit a verdict; everyone else toward a PR/terminal outcome.
+func completionNudgeMessage(reviewMode bool, sessionID string) string {
+	if reviewMode {
+		return reviewerNudge()
+	}
+	return terminalNudge(sessionID)
 }
 
 func requestRequiresCompletionSignal(userContent string) bool {
@@ -466,6 +512,7 @@ type conversationDeps struct {
 	agentName        string
 	soul             string
 	procedure        string // O-PROFILE: builder | reviewer | none (empty ⇒ builder)
+	completion       string // O-PROFILE completion.requires: pr | review | none (empty ⇒ pr semantics)
 	skillsContent    string // O-SKILL-BUNDLE: resolved skill files, appended after the procedure
 	modelTemplate    string
 	peers            map[string]string
@@ -1092,6 +1139,11 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					}
 				} else {
 					consecutiveToolFailures = 0
+					// The reviewer's mechanical "done": a verdict was actually
+					// submitted (create-review fired), not merely described.
+					if tc.Function.Name == "create-review" {
+						completionNudges.markReviewSubmitted(sessionID)
+					}
 					// A successful tool result can still signal drift (git-commit
 					// no-op, redirected shell git, M3 edit rescue) → re-anchor.
 					if toolResultSignalsWobble(tc.Function.Name, result.Output) {
@@ -1196,16 +1248,21 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				// request demands a deliverable OR the model still has an open
 				// todo item. Anti-dilution: the nudge states the full outcome
 				// space and re-surfaces the plan — never "just make a PR".
-				gateEngaged := hadToolCalls &&
-					(requestRequiresCompletionSignal(content) || sessionTodos.hasOpenItems(sessionID))
-				if gateEngaged {
+				reviewMode := deps.completion == "review"
+				if completionGateEngaged(hadToolCalls, reviewMode, content, sessionID) {
 					logJSON("info", "completion_gate_check", map[string]interface{}{
 						"agent":       deps.agentName,
 						"session_id":  sessionID,
 						"task_id":     taskID,
 						"content_len": len(lastNoToolAssistantContent),
+						"mode":        deps.completion,
 					})
-					if !contentHasTerminalOutcome(lastNoToolAssistantContent) {
+					// A reviewer is "done" only when it actually submitted a verdict
+					// (create-review fired) — the mechanical outcome, not prose — or
+					// it fails open with a reasoned FAILED/QUESTION/NOOP. This is the
+					// review-loop analogue of the builder's PR gate: it closes the
+					// no_review early-stop the live dogfood exposed.
+					if !reviewerGateSatisfied(reviewMode, sessionID, lastNoToolAssistantContent) && !contentHasTerminalOutcome(lastNoToolAssistantContent) {
 						if completionNudges.hasExhausted(sessionID) {
 							lastNoToolAssistantContent = "FAILED: completion gate exhausted"
 							toolLoopExitReason = terminationNoActionableOutput
@@ -1220,7 +1277,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 						}
 						completionNudges.recordError(sessionID)
 						nudgeCount := completionNudges.increment(sessionID)
-						nudgeMsg := terminalNudge(sessionID)
+						nudgeMsg := completionNudgeMessage(reviewMode, sessionID)
 						logJSON("info", "completion_nudge_sent", map[string]interface{}{
 							"agent":       deps.agentName,
 							"session_id":  sessionID,
