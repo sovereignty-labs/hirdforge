@@ -43,7 +43,11 @@ type Dispatcher struct {
 	// Profiles are the loaded, validated harness profiles keyed by name. A
 	// bundle's `profile` field selects one; an unknown name is a loud dispatch
 	// failure, never a silent fallback (O-PROFILE resolution obligation).
-	Profiles      map[string]profile.Profile
+	Profiles map[string]profile.Profile
+	// SkillsRepoURL is the tokenless git URL of the skills/personas repo the
+	// sandbox agent resolves bundle.skills against (auth via the guard-primed
+	// credential helper). Empty ⇒ bundles that name skills fail loudly at dispatch.
+	SkillsRepoURL string
 	CloneURLBase  string // e.g. https://git.hirdforge.com — clone URL = base + "/" + repo + ".git"
 	BaseBranch    string
 	CredentialRef string
@@ -55,11 +59,13 @@ type Dispatcher struct {
 // is NOT aliased — it fails loudly.
 const legacyDefaultProfile = "default"
 
-// agentCommandFor resolves a bundle's profile name to the full agent command
-// (constant base + profile-derived flags) and the resolved profile. An unknown
-// profile is a loud error; "default" is an explicit legacy alias for "builder".
-func (d *Dispatcher) agentCommandFor(profileName string) ([]string, profile.Profile, error) {
-	name := strings.TrimSpace(profileName)
+// agentCommandFor resolves a bundle to the full agent command: the constant base
+// + the resolved profile's flags (O-PROFILE) + the bundle's skills/memory-scope
+// flags (O-SKILL-BUNDLE). An unknown profile is a loud error; "default" is an
+// explicit legacy alias for "builder". A bundle that names skills with no skills
+// repo configured also fails loudly (the agent would otherwise abort at startup).
+func (d *Dispatcher) agentCommandFor(bundle Bundle) ([]string, profile.Profile, error) {
+	name := strings.TrimSpace(bundle.Profile)
 	if name == "" {
 		name = "builder"
 	}
@@ -69,9 +75,22 @@ func (d *Dispatcher) agentCommandFor(profileName string) ([]string, profile.Prof
 	}
 	p, ok := d.Profiles[name]
 	if !ok {
-		return nil, profile.Profile{}, fmt.Errorf("unknown profile %q (loaded: %d)", profileName, len(d.Profiles))
+		return nil, profile.Profile{}, fmt.Errorf("unknown profile %q (loaded: %d)", bundle.Profile, len(d.Profiles))
 	}
 	cmd := append(append([]string{}, d.AgentCommandBase...), p.AgentArgs()...)
+
+	// O-SKILL-BUNDLE: append the bundle's skills + memory scopes. Skills need a
+	// repo to resolve against; a bundle that names skills with none configured is
+	// a loud dispatch failure, not a silent drop.
+	if len(bundle.Skills) > 0 {
+		if strings.TrimSpace(d.SkillsRepoURL) == "" {
+			return nil, profile.Profile{}, fmt.Errorf("bundle names skills %v but no skills repo is configured", bundle.Skills)
+		}
+		cmd = append(cmd, "-skills", strings.Join(bundle.Skills, ","), "-skills-repo", d.SkillsRepoURL)
+	}
+	if len(bundle.MemoryScopes) > 0 {
+		cmd = append(cmd, "-memory-scopes", strings.Join(bundle.MemoryScopes, ","))
+	}
 	return cmd, p, nil
 }
 
@@ -99,7 +118,7 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, cfg *Config, route *Route
 		return d.failTask(taskID, "envelope marshal failed: "+err.Error(), Cause{Kind: CauseSandbox})
 	}
 
-	agentCmd, prof, err := d.agentCommandFor(task.Bundle.Profile)
+	agentCmd, prof, err := d.agentCommandFor(task.Bundle)
 	if err != nil {
 		// O-PROFILE: an unresolvable profile is a loud dispatch failure, never a
 		// silent fallback — the task fails legibly rather than running an
@@ -308,13 +327,13 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, cfg *Config, route *R
 	if err != nil {
 		return d.failTask(task.ID, "reviewer envelope marshal failed: "+err.Error(), Cause{Kind: CauseSandbox})
 	}
-	reviewerProfile := ""
+	var reviewerBundle Bundle
 	if route.Dispatch != nil {
 		if b, ok := cfg.Bundles[route.Dispatch.Bundle]; ok {
-			reviewerProfile = b.Profile
+			reviewerBundle = b
 		}
 	}
-	agentCmd, _, err := d.agentCommandFor(reviewerProfile)
+	agentCmd, _, err := d.agentCommandFor(reviewerBundle)
 	if err != nil {
 		return d.failTask(task.ID, "reviewer profile resolution failed: "+err.Error(), Cause{Kind: CauseSandbox})
 	}

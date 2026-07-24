@@ -466,6 +466,7 @@ type conversationDeps struct {
 	agentName        string
 	soul             string
 	procedure        string // O-PROFILE: builder | reviewer | none (empty ⇒ builder)
+	skillsContent    string // O-SKILL-BUNDLE: resolved skill files, appended after the procedure
 	modelTemplate    string
 	peers            map[string]string
 	peerRoles        map[string]string
@@ -672,6 +673,11 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		// stated by the harness rather than left implicit in persona prose.
 		if procedure := selectProcedure(deps.procedure, deps.reg); procedure != "" {
 			systemContent += "\n\n" + procedure
+		}
+		// O-SKILL-BUNDLE: task skills are knowledge appended after the procedure,
+		// before the task — guidance parts, per the M5 output-discipline rule.
+		if strings.TrimSpace(deps.skillsContent) != "" {
+			systemContent += "\n\n" + deps.skillsContent
 		}
 		if peersBlock := buildPeerSystemBlock(deps.peers, deps.peerRoles); peersBlock != "" {
 			systemContent += "\n\n" + peersBlock
