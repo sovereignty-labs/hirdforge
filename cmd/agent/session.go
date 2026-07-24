@@ -443,6 +443,7 @@ type conversationDeps struct {
 	memoryURL        string
 	bootstrap        bool
 	intuition        bool
+	debugIO          bool
 	episodic         bool
 	maxContext       int
 	model            string
@@ -718,6 +719,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				args = map[string]interface{}{"_raw": tc.Function.Arguments}
 			}
 			logJSON("info", "tool called", map[string]interface{}{"tool": tc.Function.Name})
+			debugLogToolCall(deps.debugIO, sessionID, tc.Function.Name, args)
 			if !emit(sseChunk{Type: "tool_call", Tool: tc.Function.Name, Args: args, Done: false}) {
 				return toolpkg.ToolResult{Error: "stream closed"}
 			}
@@ -825,6 +827,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			if result.Error != "" {
 				rememberToolFailure(deps.memoryURL, deps.agentName, sessionID, tc.Function.Name, args, result, "retry_exhausted")
 			}
+			debugLogToolResult(deps.debugIO, sessionID, tc.Function.Name, result.Output, result.Error)
 			if result.Error != "" {
 				logJSON("info", "tool result", map[string]interface{}{"tool": tc.Function.Name, "success": false, "error": result.Error, "output": result.Output})
 				validateContextMemoriesAsync(deps.memoryURL, sessionID, "contradiction")
@@ -1145,6 +1148,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			if len(assistant.ToolCalls) == 0 {
 				lastNoToolAssistantContent = strings.TrimSpace(stripThinkTags(assistant.Content))
 				toolLoopExitReason = classifyModelTurn(lastNoToolAssistantContent)
+				debugLogFinalContent(deps.debugIO, sessionID, lastNoToolAssistantContent)
 
 				// Terminal gate (M6): the model tried to stop. It may only stop on
 				// a terminal outcome — a PR, a reasoned FAILED, a justified NOOP,

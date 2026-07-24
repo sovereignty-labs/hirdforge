@@ -61,6 +61,19 @@ for p in "$PORT" "$((PORT + 1))" "$GITEA_PORT"; do
 done
 
 TEST_SHA_REF="$(sha256sum "$BENCH_DIR/fixture/metrics_test.go" | cut -d' ' -f1)"
+
+# Pre-flight: the fixture must be in the DUPLICATED "before" state (marker 14x),
+# or the refactor task is a no-op and every round scores a false result. The
+# fixture was once silently solved-in-place (a broken-exec agent run refactored
+# the real repo; committed via `git add -A`), which invalidated months of runs —
+# this assertion makes that failure loud instead of silent.
+FIXTURE_DUP="$(grep -c 'TrimSpace(strings.ToLower' "$BENCH_DIR/fixture/metrics.go")"
+if [ "$FIXTURE_DUP" -lt 10 ]; then
+  echo "ERROR: fixture/metrics.go has only $FIXTURE_DUP duplicated blocks (expected 14)."
+  echo "The refactor task would be a no-op — the fixture appears already solved. Restore it before benchmarking."
+  exit 1
+fi
+
 CLEAN_COUNT=0
 
 # seed_origin builds a bare throwaway remote holding the fixture package on main.
@@ -113,6 +126,7 @@ for ROUND in $(seq 1 "$RUNS"); do
     -gitea-url "http://127.0.0.1:$GITEA_PORT" \
     -soul "$BENCH_DIR/soul.md" \
     -agent-name bench-builder \
+    -debug-io \
     -max-tool-rounds "$MAX_ROUNDS" \
     -inference-timeout 300 \
     >"$WS/agent.log" 2>&1 &
