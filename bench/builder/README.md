@@ -78,15 +78,19 @@ Target (harness spec, after M1–M5 land in Phase 2): **≥ 8/10 clean**.
 Historical baseline: ~0/2 — measured against the Qwen 3.6 35B-A3B MoE, which
 was swapped off the fabric 2026-07-17 for weak agentic work.
 
-> **⚠️ RETRACTED 2026-07-24 — the numbers below are invalid.** The fixture had
-> been silently solved-in-place (see commit 7cda406; a broken-exec agent run,
-> exec running in the wrong cwd, refactored the real `fixture/metrics.go`, swept
-> into a commit by `git add -A`). An already-refactored fixture passes all four
-> checks trivially every round, so this "10/10" measured nothing. Fixed: exec
-> workspace-rooted (#377), fixture restored to the 14-duplicated before-state, a
-> pre-flight guard added. Re-baseline pending a valid run.
+> **⚠️ The 2026-07-23 "10/10" below is INVALID (retracted).** The fixture had
+> been silently solved-in-place (commit 7cda406; the exec-cwd bug let a broken
+> agent run refactor the real `fixture/metrics.go`, swept into a commit by
+> `git add -A`), so every check passed trivially. Fixed 2026-07-24: exec
+> workspace-rooted (#377), fixture restored (#378), pre-flight guard added.
+>
+> **✅ VALID full-flow result, 2026-07-24: `qwen` 9/10 clean** (10 rounds,
+> issue→refactor→commit→push→real PR). pr_created 10/10, tests_green 10/10,
+> dup_gone 10/10, testfile-untouched 10/10; the single miss was gofmt. The scorer
+> was independently proven to give CLEAN=1 for a correct solution and 0 for
+> nothing/tampered/incomplete. The ≥8/10 bar is met on the full flow.
 
-**Measured baseline, 2026-07-23 (INVALID — see retraction above)** (10
+**Measured baseline, 2026-07-23 (INVALID — see note above)** (10
 rounds per lane, all four mechanical checks required):
 
 | lane | model | clean | round duration |

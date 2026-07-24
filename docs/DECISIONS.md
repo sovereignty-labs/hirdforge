@@ -113,17 +113,19 @@ approved. Concretely granted:
    (both Qwen3.6-27B dense — the 35B-A3B MoE was already swapped off the fabric
    2026-07-17 for weak agentic performance, per the LiteLLM config). The
    BUILDER_HARNESS benchmark gate (14-function refactor ≥8/10 clean) is the bar.
-   **~~VERIFIED 2026-07-23: qwen 10/10 clean~~ — RETRACTED 2026-07-24.** That
-   result was a FALSE POSITIVE: the benchmark fixture had been silently
-   solved-in-place (commit 7cda406/P1.1 committed an already-refactored
-   `fixture/metrics.go` — a broken-exec agent run refactored the real repo, since
-   exec ran in the process cwd not the workspace; swept in by `git add -A`). With
-   the fixture already delegating to `formatMetric`, all four mechanical checks
-   pass trivially every round — the task was a no-op. The builders were therefore
-   **never actually verified**. Fixed 2026-07-24: exec rooted in the workspace
-   (#377), fixture restored to the 14-duplicated before-state, a pre-flight guard
-   added (fixture must show 14 markers or the run aborts). Re-verification pending
-   a valid run.
+   **The 2026-07-23 "qwen 10/10" was RETRACTED (false positive — the fixture had
+   been silently solved-in-place: commit 7cda406/P1.1 committed an
+   already-refactored `fixture/metrics.go`; the exec-cwd bug let a Phase-1 agent
+   refactor the real repo, swept in by `git add -A`; every check passed
+   trivially).** Fixed 2026-07-24: exec rooted in the workspace (#377), fixture
+   restored to the 14-duplicated before-state (#378), pre-flight guard added, and
+   the scorer independently proven to give CLEAN=1 for a correct solution and 0
+   for nothing/tampered/incomplete. **RE-VERIFIED (valid) 2026-07-24: qwen
+   9/10 clean on the FULL flow** (issue→refactor→commit→push→real PR;
+   pr_created 10/10, tests 10/10, dup_gone 10/10, testfile-untouched 10/10;
+   the one miss was gofmt-formatting). The ≥8/10 bar is met, honestly, on the
+   full flow — not just edit-only. Caveat: one lane (qwen), one task archetype;
+   breadth (qwen-reserved, more archetypes, nightly runs) remains per the spec.
 3. **Lane use:** the model fabric (LiteLLM agent-host:4000 + anvil llama-servers) is
    free to drive for testing and benchmarks, no restrictions.
 4. **Asgard authority:** full authority to create what the specs require in the
