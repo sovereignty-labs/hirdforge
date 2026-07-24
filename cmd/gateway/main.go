@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"git.hirdforge.com/kit/hirdforge/internal/cortex"
+	"git.hirdforge.com/kit/hirdforge/internal/profile"
 	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
@@ -1504,6 +1505,7 @@ func main() {
 	cortexInferenceKey := flag.String("cortex-inference-key", envOrDefault("CORTEX_INFERENCE_KEY", ""), "inference API key for sandbox agents")
 	cortexAgentSoul := flag.String("cortex-agent-soul", "/work/repo/bench/builder/soul.md", "persona file path (inside the cloned repo) for sandbox agents")
 	cortexMaxRounds := flag.Int("cortex-max-tool-rounds", 80, "max tool-loop rounds for sandbox builder agents")
+	cortexProfilesDir := flag.String("cortex-profiles-dir", "/etc/valhalla/profiles", "directory of harness profile YAML files (O-PROFILE)")
 	flag.Parse()
 	if raw := strings.TrimSpace(os.Getenv("GATEWAY_STREAM_TIMEOUT_SECONDS")); raw != "" {
 		if n, err := strconv.Atoi(raw); err != nil {
@@ -1578,18 +1580,28 @@ func main() {
 			gw.broadcastPayload(map[string]any{"type": "cortex.decision", "decision": d})
 		}
 		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
-		gw.initCortexDispatcher(cortexDispatchOptions{
-			AgentImage:    strings.TrimSpace(*cortexAgentImage),
-			SandboxNS:     strings.TrimSpace(*cortexSandboxNS),
-			CredSecret:    strings.TrimSpace(*cortexCredSecret),
-			CloneBase:     strings.TrimSpace(*cortexCloneBase),
-			BaseBranch:    strings.TrimSpace(*cortexBaseBranch),
-			InferenceURL:  strings.TrimSpace(*cortexInferenceURL),
-			Model:         strings.TrimSpace(*cortexModel),
-			InferenceKey:  strings.TrimSpace(*cortexInferenceKey),
-			AgentSoul:     strings.TrimSpace(*cortexAgentSoul),
-			MaxToolRounds: *cortexMaxRounds,
-		})
+		// O-PROFILE: load the harness profiles the dispatcher resolves bundles
+		// against. A load failure disables dispatch LOUDLY (queued tasks stay
+		// visibly queued) rather than dispatching an unconfigured loop.
+		profiles, perr := profile.LoadDir(strings.TrimSpace(*cortexProfilesDir))
+		if perr != nil {
+			log.Printf("cortex: PROFILES FAILED TO LOAD (%v) — DISPATCH DISABLED; queued tasks will not run", perr)
+		} else {
+			log.Printf("cortex: loaded %d profiles from %s", len(profiles), *cortexProfilesDir)
+			gw.initCortexDispatcher(cortexDispatchOptions{
+				AgentImage:    strings.TrimSpace(*cortexAgentImage),
+				SandboxNS:     strings.TrimSpace(*cortexSandboxNS),
+				CredSecret:    strings.TrimSpace(*cortexCredSecret),
+				CloneBase:     strings.TrimSpace(*cortexCloneBase),
+				BaseBranch:    strings.TrimSpace(*cortexBaseBranch),
+				InferenceURL:  strings.TrimSpace(*cortexInferenceURL),
+				Model:         strings.TrimSpace(*cortexModel),
+				InferenceKey:  strings.TrimSpace(*cortexInferenceKey),
+				AgentSoul:     strings.TrimSpace(*cortexAgentSoul),
+				MaxToolRounds: *cortexMaxRounds,
+				Profiles:      profiles,
+			})
+		}
 	} else {
 		log.Printf("cortex: disabled (no --cortex-config)")
 	}

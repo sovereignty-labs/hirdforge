@@ -465,6 +465,7 @@ type conversationDeps struct {
 	playbookFile     string
 	agentName        string
 	soul             string
+	procedure        string // O-PROFILE: builder | reviewer | none (empty ⇒ builder)
 	modelTemplate    string
 	peers            map[string]string
 	peerRoles        map[string]string
@@ -669,7 +670,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		// M5: the persona says who the agent is; the procedure says how the work
 		// is done. Injected after the identity so the mechanical sequence is
 		// stated by the harness rather than left implicit in persona prose.
-		if procedure := builderProcedure(deps.reg); procedure != "" {
+		if procedure := selectProcedure(deps.procedure, deps.reg); procedure != "" {
 			systemContent += "\n\n" + procedure
 		}
 		if peersBlock := buildPeerSystemBlock(deps.peers, deps.peerRoles); peersBlock != "" {

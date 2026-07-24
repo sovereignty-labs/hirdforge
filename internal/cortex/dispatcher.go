@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"git.hirdforge.com/kit/hirdforge/internal/profile"
 	"git.hirdforge.com/kit/hirdforge/internal/sandbox"
 )
 
@@ -33,11 +34,45 @@ type Dispatcher struct {
 	// Gitea API. Returns (state APPROVED|REQUEST_CHANGES, reviewer, found).
 	ReviewLookup func(ctx context.Context, repo string, prNumber int64) (string, string, bool, error)
 
-	AgentImage    string
-	AgentCommand  []string
+	AgentImage string
+	// AgentCommandBase is the constant part of the agent invocation (binary,
+	// envelope, workspace, inference/gitea endpoints). The per-task tool set,
+	// step cap, procedure, and context budget come from the resolved profile
+	// (O-PROFILE) and are appended at dispatch — never hardcoded here.
+	AgentCommandBase []string
+	// Profiles are the loaded, validated harness profiles keyed by name. A
+	// bundle's `profile` field selects one; an unknown name is a loud dispatch
+	// failure, never a silent fallback (O-PROFILE resolution obligation).
+	Profiles      map[string]profile.Profile
 	CloneURLBase  string // e.g. https://git.hirdforge.com — clone URL = base + "/" + repo + ".git"
 	BaseBranch    string
 	CredentialRef string
+}
+
+// legacyDefaultProfile is the pre-O-PROFILE bundle profile name; it aliases to
+// "builder" (with a log line) so live configs that still say `profile: default`
+// keep dispatching during the migration to named profiles. A truly unknown name
+// is NOT aliased — it fails loudly.
+const legacyDefaultProfile = "default"
+
+// agentCommandFor resolves a bundle's profile name to the full agent command
+// (constant base + profile-derived flags) and the resolved profile. An unknown
+// profile is a loud error; "default" is an explicit legacy alias for "builder".
+func (d *Dispatcher) agentCommandFor(profileName string) ([]string, profile.Profile, error) {
+	name := strings.TrimSpace(profileName)
+	if name == "" {
+		name = "builder"
+	}
+	if _, ok := d.Profiles[name]; !ok && name == legacyDefaultProfile {
+		log.Printf("cortex: profile %q is a legacy alias → \"builder\" (migrate the bundle to a named profile)", legacyDefaultProfile)
+		name = "builder"
+	}
+	p, ok := d.Profiles[name]
+	if !ok {
+		return nil, profile.Profile{}, fmt.Errorf("unknown profile %q (loaded: %d)", profileName, len(d.Profiles))
+	}
+	cmd := append(append([]string{}, d.AgentCommandBase...), p.AgentArgs()...)
+	return cmd, p, nil
 }
 
 // DispatchTask drives one task from queued to review/failed, synchronously.
@@ -64,12 +99,20 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, cfg *Config, route *Route
 		return d.failTask(taskID, "envelope marshal failed: "+err.Error(), Cause{Kind: CauseSandbox})
 	}
 
+	agentCmd, prof, err := d.agentCommandFor(task.Bundle.Profile)
+	if err != nil {
+		// O-PROFILE: an unresolvable profile is a loud dispatch failure, never a
+		// silent fallback — the task fails legibly rather than running an
+		// unconfigured loop.
+		return d.failTask(taskID, "profile resolution failed: "+err.Error(), Cause{Kind: CauseSandbox})
+	}
+
 	gate := route.DoneGate
 	spec := sandbox.RunSpec{
 		TaskID:       task.ID,
 		Envelope:     envJSON,
 		AgentImage:   d.AgentImage,
-		AgentCommand: d.AgentCommand,
+		AgentCommand: agentCmd,
 		CloneURL:     env.Git.CloneURL,
 		BaseBranch:   env.Git.BaseBranch,
 		WorkBranch:   env.Git.WorkBranch,
@@ -84,9 +127,17 @@ func (d *Dispatcher) DispatchTask(ctx context.Context, cfg *Config, route *Route
 	if err != nil {
 		return d.failTask(taskID, "sandbox allocation failed: "+err.Error(), Cause{Kind: CauseSandbox})
 	}
+	// Record the resolved capability on the transition row (O-PROFILE audit hook:
+	// a run's tool set is reconstructable after the fact) — informational, never
+	// read for control flow.
 	if err := d.Store.Transition(taskID, StatusDispatched,
-		fmt.Sprintf("sandbox allocated: %s", ref.String()),
-		Cause{Kind: CauseSandbox, Detail: map[string]any{"job": ref.JobName}}); err != nil {
+		fmt.Sprintf("sandbox allocated: %s (profile %s)", ref.String(), prof.Name),
+		Cause{Kind: CauseSandbox, Detail: map[string]any{
+			"job":       ref.JobName,
+			"profile":   prof.Name,
+			"procedure": prof.Procedure,
+			"tools":     strings.Join(prof.Tools, ","),
+		}}); err != nil {
 		return err
 	}
 	if err := d.Store.Transition(taskID, StatusBuilding,
@@ -257,11 +308,21 @@ func (d *Dispatcher) DispatchReviewer(ctx context.Context, cfg *Config, route *R
 	if err != nil {
 		return d.failTask(task.ID, "reviewer envelope marshal failed: "+err.Error(), Cause{Kind: CauseSandbox})
 	}
+	reviewerProfile := ""
+	if route.Dispatch != nil {
+		if b, ok := cfg.Bundles[route.Dispatch.Bundle]; ok {
+			reviewerProfile = b.Profile
+		}
+	}
+	agentCmd, _, err := d.agentCommandFor(reviewerProfile)
+	if err != nil {
+		return d.failTask(task.ID, "reviewer profile resolution failed: "+err.Error(), Cause{Kind: CauseSandbox})
+	}
 	spec := sandbox.RunSpec{
 		TaskID:       task.ID + "-review",
 		Envelope:     envJSON,
 		AgentImage:   d.AgentImage,
-		AgentCommand: d.AgentCommand,
+		AgentCommand: agentCmd,
 		CloneURL:     env.Git.CloneURL,
 		BaseBranch:   d.BaseBranch,
 		WorkBranch:   "review/" + task.ID,

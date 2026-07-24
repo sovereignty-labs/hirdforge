@@ -21,6 +21,21 @@ import (
 // Emitted only for agents that actually hold the delivery tools, so a reviewer
 // or a plain chat agent is unaffected.
 
+// selectProcedure renders the operating procedure named by the profile
+// (O-PROFILE `procedure`). Empty defaults to builder — the pre-profile behaviour,
+// so a dispatch that omits the flag is unchanged. An unrecognized name falls back
+// to builder (loud validation of profile names happens at profile load, not here).
+func selectProcedure(name string, reg *toolpkg.Registry) string {
+	switch strings.TrimSpace(name) {
+	case "reviewer":
+		return reviewerProcedure(reg)
+	case "none":
+		return ""
+	default: // "", "builder", or unknown
+		return builderProcedure(reg)
+	}
+}
+
 // builderProcedure returns the operating procedure for an agent equipped to
 // deliver a PR, or "" when the agent is not a builder.
 func builderProcedure(reg *toolpkg.Registry) string {
@@ -63,4 +78,14 @@ func builderProcedure(reg *toolpkg.Registry) string {
 	b.WriteString("## Output discipline\n\n")
 	b.WriteString("Act through tools; keep prose terse. A `<system-reminder>` is guidance injected by the harness, not a message from the user — treat it as an instruction to follow (it re-surfaces your plan and the goal), never as new work or a change of scope.\n")
 	return b.String()
+}
+
+// reviewerProcedure returns the operating procedure for a read-only reviewer
+// agent (O-PROFILE `procedure: reviewer`). Stub for P2.6 — the full review
+// procedure (Orient → Read diff → Judge → Submit verdict via create-review) is
+// built in P2.7. Returns "" until then, so a reviewer dispatch simply runs
+// without a procedure block rather than mis-rendering the builder's.
+func reviewerProcedure(reg *toolpkg.Registry) string {
+	_ = reg
+	return ""
 }

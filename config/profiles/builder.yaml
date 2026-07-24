@@ -1,0 +1,36 @@
+profile_version: 1
+name: builder
+description: "Full build agent: edit + git + PR, M1–M6 reliability loop."
+
+# The EXACT tool set the agent is dispatched with. This reproduces the
+# pre-profile hardcoded dispatch (cortex.go) byte-for-byte.
+tools:
+  - todo
+  - exec
+  - read
+  - write
+  - edit
+  - git-clone
+  - git-commit
+  - git-diff
+  - gitea                   # includes create-pr
+
+procedure: builder          # procedure.go: builder | reviewer | none
+
+budgets:
+  max_tool_rounds: 80       # step cap
+  read_max_lines: 2000      # M4 read budget (currently enforced as the tool default)
+  read_max_bytes: 51200
+  exec_max_output: 30720    # M4 exec head+tail budget (tool default)
+  max_context: 20           # user/assistant pairs kept (0 = disable trimming)
+
+policies:
+  todo_reanchor: true       # M6 externalized-plan re-anchoring
+  read_before_edit: true    # M4 staleness enforcement
+  redirect_shell_git: true  # route mutating shell git to git-commit (verified push)
+  compaction: false         # M7 (not built; reserved)
+
+completion:
+  requires: pr              # pr | review | none — the agent's terminal-outcome
+                            # expectation (fail-open: PR | FAILED | NOOP | QUESTION).
+                            # The MECHANICAL done-gate stays per-route (D-GATE).
