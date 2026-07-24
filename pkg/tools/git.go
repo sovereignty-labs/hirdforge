@@ -676,6 +676,32 @@ func quoteAll(in []string) []string {
 	return out
 }
 
+// isGitRepo reports whether dir contains a .git entry (dir, or a file for
+// worktrees/submodules).
+func isGitRepo(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+// resolveRepoDir finds the git repository a git tool should operate on, handling
+// BOTH workspace layouts: the benchmark clones into a subdir (workDir/<repo>);
+// the production sandbox clones the repo AT the workspace root (workDir itself is
+// the repo, e.g. /work/repo). Without this, a model that passes repo="<name>"
+// against a root-layout workspace gets "repo not found" and cannot commit — the
+// exact bug the first live dogfood surfaced. Prefers an exact subdir match, then
+// falls back to the workspace root.
+func resolveRepoDir(workDir, repo string) (string, bool) {
+	if r := strings.TrimSpace(repo); r != "" && r != "." {
+		if cand := filepath.Join(workDir, r); isGitRepo(cand) {
+			return cand, true
+		}
+	}
+	if isGitRepo(workDir) {
+		return workDir, true
+	}
+	return "", false
+}
+
 type GitCommitTool struct {
 	WorkDir   string
 	GiteaURL  string
@@ -717,8 +743,8 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 	}
 	branch, _ := args["branch"].(string)
 
-	repoDir := filepath.Join(t.WorkDir, repo)
-	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+	repoDir, ok := resolveRepoDir(t.WorkDir, repo)
+	if !ok {
 		return ToolResult{Error: RepoNotFoundMessage(t.WorkDir, repo)}
 	}
 
@@ -814,7 +840,10 @@ func (t *GitCommitTool) Verify(args map[string]interface{}, result ToolResult) e
 	}
 	branch, _ := args["branch"].(string)
 
-	repoDir := filepath.Join(t.WorkDir, repo)
+	repoDir, ok := resolveRepoDir(t.WorkDir, repo)
+	if !ok {
+		return fmt.Errorf("git verification failed: repo %q not found", repo)
+	}
 	if branch == "" {
 		headRes := runGit(repoDir, []string{"git", "rev-parse", "--abbrev-ref", "HEAD"}, 10*time.Second)
 		if headRes.Error != "" {
@@ -920,8 +949,8 @@ func (t *GitDiffTool) Execute(args map[string]interface{}) ToolResult {
 	}
 	branch, _ := args["branch"].(string)
 
-	repoDir := filepath.Join(t.WorkDir, repo)
-	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+	repoDir, ok := resolveRepoDir(t.WorkDir, repo)
+	if !ok {
 		return ToolResult{Error: RepoNotFoundMessage(t.WorkDir, repo)}
 	}
 
