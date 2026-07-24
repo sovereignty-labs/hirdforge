@@ -1046,6 +1046,12 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		// done). consecutiveToolFailures resets on any success.
 		consecutiveToolFailures := 0
 		reanchorPending := false
+		// Fail-open tracking: when the SAME tool fails the SAME way
+		// failOpenRetryThreshold times, stop re-anchoring and push the model to
+		// fix-once-or-report-FAILED (the "not PR-or-bust" guardrail).
+		sameFailureCounts := map[string]int{}
+		failOpenPending := false
+		failOpenTool, failOpenErr := "", ""
 		executeToolCalls := func(calls []toolCall) {
 			for _, tc := range calls {
 				toolCallSignatures = append(toolCallSignatures, toolCallSignature(tc.Function.Name, tc.Function.Arguments))
@@ -1065,6 +1071,13 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					consecutiveToolFailures++
 					if consecutiveToolFailures >= 2 {
 						reanchorPending = true
+					}
+					sig := failureSignature(tc.Function.Name, result.Error)
+					sameFailureCounts[sig]++
+					if sameFailureCounts[sig] >= failOpenRetryThreshold {
+						failOpenPending = true
+						failOpenTool = tc.Function.Name
+						failOpenErr = firstLine(result.Error)
 					}
 					if shouldRetryTool(tc.Function.Name) {
 						toolErrorsExhausted = true
@@ -1115,6 +1128,18 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					roundsSinceAnchor++
 				}
 				reanchorPending = false
+			}
+			// Fail-open escalation: a tool stuck failing the same way is past the
+			// point a re-anchor helps. Push the model to fix-once-or-report-FAILED
+			// so it escalates with a proposed solution instead of burning the
+			// deadline chasing the artifact.
+			if failOpenPending {
+				messages = append(messages, message{Role: "user", Content: failOpenEscalation(failOpenTool, failOpenErr)})
+				logJSON("warn", "fail_open_escalation", map[string]interface{}{
+					"agent": deps.agentName, "session_id": sessionID, "task_id": taskID,
+					"round": i + 1, "tool": failOpenTool,
+				})
+				failOpenPending = false
 			}
 			if deps.maxContext > 0 && len(messages)-1 > int(float64(deps.maxContext)*0.8) {
 				trimmed := progressiveTrim(messages[1:], deps.maxContext)
