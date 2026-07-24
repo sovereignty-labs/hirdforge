@@ -63,6 +63,14 @@ func TestBuilderAgentArgsReproduceToday(t *testing.T) {
 	if !strings.Contains(joined, "-procedure builder") {
 		t.Fatalf("builder AgentArgs missing procedure: %q", joined)
 	}
+	if !strings.Contains(joined, "-completion pr") {
+		t.Fatalf("builder AgentArgs missing completion: %q", joined)
+	}
+	// The reviewer profile must carry review-mode completion.
+	rjoined := strings.Join(profs["reviewer"].AgentArgs(), " ")
+	if !strings.Contains(rjoined, "-completion review") || !strings.Contains(rjoined, "-procedure reviewer") {
+		t.Fatalf("reviewer AgentArgs wrong: %q", rjoined)
+	}
 }
 
 func writeProfile(t *testing.T, dir, name, body string) string {

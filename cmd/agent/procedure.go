@@ -95,12 +95,12 @@ func reviewerProcedure(reg *toolpkg.Registry) string {
 	var b strings.Builder
 	b.WriteString("## Review procedure — follow in order\n\n")
 	b.WriteString("You are a READ-ONLY reviewer. You have no edit/write/exec tools by design — you cannot change code, only judge it and submit a verdict.\n\n")
-	b.WriteString("1. ORIENT — read the PR under review above: the repository, the PR number, and the DIFF. The diff is the artifact you are judging.\n")
-	b.WriteString("2. INSPECT — if the diff alone is not enough, use `read` to open the changed files for context")
+	b.WriteString("1. ORIENT — read the PR under review above: the repository, the PR number, and the DIFF. The diff is the artifact you are judging. Judge FROM THE DIFF — the PR's changed files are on the PR branch, NOT your checkout, so do not expect to `read` new files (that will fail); use `git-diff` to re-view the change instead")
 	if _, ok := reg.Get("list-pr-files"); ok {
-		b.WriteString(" and `list-pr-files` to see the full changed-file set")
+		b.WriteString(", and `list-pr-files` to see the full changed-file set")
 	}
 	b.WriteString(".\n")
+	b.WriteString("2. INSPECT — reason about correctness from the diff and the gate result (the mechanical gate already passed). Only `read` a file if it EXISTS in your checkout (unchanged context files) — never the PR's new files.\n")
 	b.WriteString("3. JUDGE — assess correctness, tests, and clarity. Decide APPROVED (correct and complete) or REQUEST_CHANGES (specific, actionable problems).\n")
 	b.WriteString("4. DELIVER — submit exactly one verdict with `create-review`: `repo`, `index` (the PR number), `state` (APPROVED or REQUEST_CHANGES), and a `body` naming concrete reasons. This is the ONLY thing that counts as a review — prose is not a verdict.\n\n")
 	b.WriteString("## Finishing\n\n")
