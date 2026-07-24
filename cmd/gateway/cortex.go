@@ -66,6 +66,10 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 		ReviewLookup: g.cortexReviewLookup,
 		Events:       func(ev cortex.Event) { _, _ = g.cortex.HandleEvent(ev) },
 		AgentImage:   opts.AgentImage,
+		// NOTE: the gateway image BAKES config/profiles (O-PROFILE). The CI build
+		// must rebuild the gateway when internal/ or config/ change, or it ships a
+		// stale profile bake + stale coordination code (fixed in build.yaml — the
+		// rebuild filter now covers internal/ and config/).
 		// Constant base; the per-task tool set / step cap / procedure / context
 		// budget are appended from the resolved profile (O-PROFILE) at dispatch.
 		AgentCommandBase: []string{

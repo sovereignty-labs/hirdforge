@@ -123,7 +123,7 @@ jobs:
             docker build -f Dockerfile.gateway -t "$BRANCH_TAG" .
             docker push "$BRANCH_TAG"
           else
-            if ! echo "$CHANGED" | grep -Eq '^(cmd/gateway/|pkg/|go\.mod$|go\.sum$|Dockerfile\.gateway$|ui/)'; then
+            if ! echo "$CHANGED" | grep -Eq '^(cmd/gateway/|internal/|pkg/|config/|go\.mod$|go\.sum$|Dockerfile\.gateway$|ui/)'; then
               if docker pull $REGISTRY/valhalla-gateway:latest 2>/dev/null; then
                 docker tag $REGISTRY/valhalla-gateway:latest $REGISTRY/valhalla-gateway:sha-$SHA_SHORT
               else
