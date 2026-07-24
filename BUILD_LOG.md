@@ -99,7 +99,7 @@
 - Chuck: Deployment + Service at :30881, tools=exec,read,write
 - Ragnar: Deployment + Service at :30882, tools=read,write (no exec — architects don't need shells)
 - Both using same valhalla-agent binary with different SOULs
-- PodSecurity compliant (runAsNonRoot, drop ALL caps, seccomp RuntimeDefault)
+- All pods: runAsNonRoot, runAsUser=1000, runAsGroup=1000, seccompProfile RuntimeDefault, allowPrivilegeEscalation false, capabilities drop ALL
 - Gitea container registry fixed (ROOT_URL patched in Secret)
 - Talos nodes patched to trust HTTP registry
 - 13.5MB image, non-root, 1-second startup
