@@ -2215,6 +2215,7 @@ func main() {
 	toolsFile := flag.String("tools-file", "/etc/valhalla/tools.md", "path to tools context file")
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write,edit", "comma-separated enabled tools")
+	procedureFlag := flag.String("procedure", "", "operating procedure to render: builder | reviewer | none (O-PROFILE; empty ⇒ builder)")
 	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
 	maxToolRounds := flag.Int("max-tool-rounds", 30, "maximum LLM inference rounds in the tool-calling loop")
 	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
@@ -2408,6 +2409,7 @@ func main() {
 		playbookFile:     *playbookFile,
 		agentName:        agentName,
 		soul:             soul,
+		procedure:        *procedureFlag,
 		modelTemplate:    templateContent,
 		peers:            peers,
 		peerRoles:        peerRoles,

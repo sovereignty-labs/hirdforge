@@ -1,0 +1,30 @@
+profile_version: 1
+name: reviewer
+description: "Read-only reviewer: read + diff + submit a Gitea verdict. No edit/write/exec — cannot be prompt-injected into modifying code."
+
+# NO edit / write / exec / git-commit / git-clone. The absence of mutating tools
+# is a security property (O-PROFILE §4), not a convenience — a reviewer that
+# physically lacks the tools cannot be steered into changing code. Enforced at
+# load: a `reviewer` procedure carrying any mutating tool is refused loudly.
+tools:
+  - read
+  - git-diff
+  - gitea-review            # create-review only (APPROVE / REQUEST_CHANGES)
+
+procedure: reviewer
+
+budgets:
+  max_tool_rounds: 30       # smaller cap — review is bounded read + one verdict
+  read_max_lines: 2000
+  read_max_bytes: 51200
+  exec_max_output: 30720
+  max_context: 20
+
+policies:
+  todo_reanchor: true       # M6 keeps the review plan pinned
+  read_before_edit: false   # no edits to guard
+  redirect_shell_git: false # no shell git in a read-only profile
+  compaction: false
+
+completion:
+  requires: review          # the terminal outcome is a submitted Gitea review

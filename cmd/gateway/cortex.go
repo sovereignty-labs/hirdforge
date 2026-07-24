@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"git.hirdforge.com/kit/hirdforge/internal/cortex"
+	"git.hirdforge.com/kit/hirdforge/internal/profile"
 	"git.hirdforge.com/kit/hirdforge/internal/sandbox"
 )
 
@@ -32,6 +33,9 @@ type cortexDispatchOptions struct {
 	InferenceKey  string
 	AgentSoul     string
 	MaxToolRounds int
+	// Profiles are the loaded harness profiles (O-PROFILE), keyed by name. The
+	// dispatcher resolves each task's bundle.profile against this set.
+	Profiles map[string]profile.Profile
 }
 
 // initCortexDispatcher wires the P1.3 dispatcher: sandbox Jobs, Gitea PR
@@ -59,7 +63,9 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 		ReviewLookup: g.cortexReviewLookup,
 		Events:       func(ev cortex.Event) { _, _ = g.cortex.HandleEvent(ev) },
 		AgentImage:   opts.AgentImage,
-		AgentCommand: []string{
+		// Constant base; the per-task tool set / step cap / procedure / context
+		// budget are appended from the resolved profile (O-PROFILE) at dispatch.
+		AgentCommandBase: []string{
 			"valhalla-agent", "-one-shot",
 			"-envelope", "/task/envelope.json",
 			"-workspace", "/work/repo",
@@ -68,10 +74,9 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 			"-model", opts.Model,
 			"-api-key", opts.InferenceKey,
 			"-gitea-url", g.giteaURL,
-			"-tools", "todo,exec,read,write,edit,git-clone,git-commit,git-diff,gitea",
-			"-max-tool-rounds", strconv.Itoa(opts.MaxToolRounds),
 			"-inference-timeout", "300",
 		},
+		Profiles:      opts.Profiles,
 		CloneURLBase:  strings.TrimSuffix(opts.CloneBase, "/"),
 		BaseBranch:    opts.BaseBranch,
 		CredentialRef: opts.CredSecret,

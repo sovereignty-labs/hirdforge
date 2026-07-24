@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"git.hirdforge.com/kit/hirdforge/internal/profile"
 	"git.hirdforge.com/kit/hirdforge/internal/sandbox"
 )
 
@@ -59,9 +60,12 @@ func newDispatchFixture(t *testing.T, fs *fakeSandbox, prFound bool) (*Dispatche
 		PRLookup: func(_ context.Context, repo, head string) (int64, bool, error) {
 			return 55, prFound, nil
 		},
-		Events:        func(ev Event) { events = append(events, ev) },
-		AgentImage:    "registry/agent:test",
-		AgentCommand:  []string{"/agent", "-one-shot"},
+		Events:           func(ev Event) { events = append(events, ev) },
+		AgentImage:       "registry/agent:test",
+		AgentCommandBase: []string{"/agent", "-one-shot"},
+		Profiles: map[string]profile.Profile{
+			"builder": {Version: 1, Name: "builder", Tools: []string{"read", "edit", "gitea"}, Procedure: "builder", Budgets: profile.Budgets{MaxToolRounds: 80}},
+		},
 		CloneURLBase:  "https://git.hirdforge.com",
 		BaseBranch:    "main",
 		CredentialRef: "sandbox-git-cred",

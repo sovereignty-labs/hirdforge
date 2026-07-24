@@ -12,6 +12,9 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /valhalla-gateway ./cmd/gateway/
 FROM alpine:3.20
 RUN apk add --no-cache curl && adduser -D -u 1000 gateway
 COPY --from=build /valhalla-gateway /usr/local/bin/valhalla-gateway
+# Harness profiles (O-PROFILE): baked so the dispatcher resolves bundles against
+# the versioned, in-repo profile set. Default --cortex-profiles-dir points here.
+COPY config/profiles /etc/valhalla/profiles
 USER gateway
 EXPOSE 8080
 ENTRYPOINT ["valhalla-gateway"]
