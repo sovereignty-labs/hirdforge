@@ -15,6 +15,16 @@ type Cortex struct {
 	cfg   *Config
 	store Store
 
+	// dispatchMu serializes the dedup-check + CreateTask for issue-triggered
+	// builder dispatch. Gitea delivers a single label as TWO webhooks (labeled +
+	// label_updated), which arrive within the same millisecond; without this the
+	// two HandleEvent calls both pass the "no active task" check and create twin
+	// tasks racing on the same work branch. One active task per (repo, issue,
+	// route) is the invariant. (Single-replica gateway; a partial unique index
+	// on (issue_repo, issue_number, route_id) WHERE active is the multi-replica
+	// hardening — noted as a follow-up, not needed today.)
+	dispatchMu sync.Mutex
+
 	// OnTaskQueued, when set, is invoked after a dispatch route creates a
 	// queued task, and on a revise re-dispatch (the gateway hooks the
 	// Dispatcher here, in a goroutine).
@@ -126,6 +136,16 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 				gateSnapshot = b
 			}
 		}
+		// Idempotent dispatch: hold dispatchMu across the "already active?" check
+		// and CreateTask so the twin webhook (labeled + label_updated) that Gitea
+		// fires for one label doesn't create a second racing task/sandbox.
+		c.dispatchMu.Lock()
+		if existing, ok := c.activeTaskFor(ev.Repo, ev.IssueNumber, route.ID); ok {
+			c.dispatchMu.Unlock()
+			d.TaskID = existing
+			d.Reason = fmt.Sprintf("%s -> deduped: task %s already active for %s#%d", reason, existing, ev.Repo, ev.IssueNumber)
+			break
+		}
 		task := &TaskRecord{
 			ID:          NewTaskID(),
 			RouteID:     route.ID,
@@ -141,8 +161,10 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		}
 		cause := Cause{Kind: causeKindForEvent(ev.Type), Detail: map[string]any{"event": ev.Type, "route": route.ID}}
 		if err := c.store.CreateTask(task, reason, cause); err != nil {
+			c.dispatchMu.Unlock()
 			return d, fmt.Errorf("cortex: create task: %w", err)
 		}
+		c.dispatchMu.Unlock()
 		d.TaskID = task.ID
 		d.Reason = fmt.Sprintf("%s -> task %s queued", reason, task.ID)
 		if c.OnTaskQueued != nil {
@@ -173,6 +195,29 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 
 	c.recordDecision(d)
 	return d, nil
+}
+
+// activeTaskFor returns the ID of a non-terminal task already dispatched for the
+// same (repo, issue, route), if any — the mechanical idempotency check that
+// collapses the duplicate webhooks Gitea fires for a single label. A zero issue
+// number carries no identity to dedup on, so it never matches. On a store error
+// it fails OPEN (dispatches): a rare duplicate is recoverable, a dropped build
+// is a silently missed task.
+func (c *Cortex) activeTaskFor(repo string, issue int64, routeID string) (string, bool) {
+	if issue == 0 {
+		return "", false
+	}
+	active, err := c.store.ListActive()
+	if err != nil {
+		log.Printf("cortex: dedup ListActive failed, dispatching anyway: %v", err)
+		return "", false
+	}
+	for _, t := range active {
+		if t.IssueRepo == repo && t.IssueNumber == issue && t.RouteID == routeID {
+			return t.ID, true
+		}
+	}
+	return "", false
 }
 
 func (c *Cortex) recordDecision(d Decision) {

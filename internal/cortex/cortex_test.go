@@ -240,3 +240,74 @@ func TestReloadKeepsOldConfigOnError(t *testing.T) {
 		t.Fatal("failed reload must keep the previous config")
 	}
 }
+
+// TestHandleEventDedupsDuplicateLabelWebhooks pins the double-dispatch fix: Gitea
+// delivers a single label as two webhooks (labeled + label_updated), and an
+// operator dispatch can add a third. Each must collapse to ONE task+sandbox, or
+// twins race on the same work branch. The guard is scoped to active tasks so a
+// terminal task never blocks a genuine re-run.
+func TestHandleEventDedupsDuplicateLabelWebhooks(t *testing.T) {
+	cfg := mustConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+
+	ev := Event{Type: EventIssueLabeled, Repo: "kit/hirdforge", Label: "agent:build", IssueNumber: 42, IssueTitle: "x"}
+	d1, err := c.HandleEvent(ev)
+	if err != nil {
+		t.Fatalf("first dispatch: %v", err)
+	}
+	if d1.TaskID == "" {
+		t.Fatal("first dispatch created no task")
+	}
+	// The twin webhook for the same label.
+	d2, err := c.HandleEvent(ev)
+	if err != nil {
+		t.Fatalf("second dispatch: %v", err)
+	}
+	if d2.TaskID != d1.TaskID {
+		t.Fatalf("dedup failed: twin webhook made task %q, want the existing %q", d2.TaskID, d1.TaskID)
+	}
+	if !strings.Contains(d2.Reason, "dedup") {
+		t.Fatalf("twin decision should record a dedup: %q", d2.Reason)
+	}
+	if got := countActiveForIssue(t, store, 42); got != 1 {
+		t.Fatalf("want exactly 1 active task for issue 42, got %d", got)
+	}
+
+	// A different issue is a different task.
+	d3, err := c.HandleEvent(Event{Type: EventIssueLabeled, Repo: "kit/hirdforge", Label: "agent:build", IssueNumber: 43})
+	if err != nil {
+		t.Fatalf("distinct issue: %v", err)
+	}
+	if d3.TaskID == "" || d3.TaskID == d1.TaskID {
+		t.Fatalf("distinct issue must create a new task, got %q", d3.TaskID)
+	}
+
+	// Once the first task is terminal, a genuine re-label creates a fresh task —
+	// dedup must not permanently wedge the issue.
+	if err := store.Transition(d1.TaskID, StatusFailed, "gate failed", Cause{Kind: CauseSandbox}); err != nil {
+		t.Fatalf("transition to failed: %v", err)
+	}
+	d4, err := c.HandleEvent(ev)
+	if err != nil {
+		t.Fatalf("re-label after terminal: %v", err)
+	}
+	if d4.TaskID == "" || d4.TaskID == d1.TaskID {
+		t.Fatalf("re-label after terminal must create a new task, got %q (first %q)", d4.TaskID, d1.TaskID)
+	}
+}
+
+func countActiveForIssue(t *testing.T, store *MemStore, issue int64) int {
+	t.Helper()
+	active, err := store.ListActive()
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	n := 0
+	for _, tk := range active {
+		if tk.IssueNumber == issue {
+			n++
+		}
+	}
+	return n
+}
