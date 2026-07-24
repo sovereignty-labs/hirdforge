@@ -24,6 +24,9 @@ func TestFormatNewBranchName(t *testing.T) {
 		{name: "keeps existing prefix", agentName: "chuck", branch: "chuck/feat/add-docs", want: "chuck/feat/add-docs"},
 		{name: "no agent name", agentName: "", branch: "feat/add-docs", want: "feat/add-docs"},
 		{name: "trims leading slash", agentName: "chuck", branch: "/feat/add-docs", want: "chuck/feat-add-docs"},
+		// The sandbox work branch "agent/<task>" is authoritative — create-pr
+		// opens the PR for exactly that ref, so it must never be rewritten.
+		{name: "preserves sandbox work branch", agentName: "Builder", branch: "agent/hf-019f9489fb2a", want: "agent/hf-019f9489fb2a"},
 	}
 
 	for _, tt := range tests {

@@ -755,7 +755,7 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 	// working origin and breaks the push. Requiring a real host keeps the tool
 	// hermetic when GiteaURL is unset (tests, or a pre-cloned file origin).
 	if t.Token != "" && hostFromURL(t.GiteaURL) != "" {
-		pushURL := t.buildPushURL(repo)
+		pushURL := t.buildPushURL(repoDir, repo)
 		runGit(repoDir, []string{"git", "remote", "set-url", "origin", pushURL}, 5*time.Second)
 	}
 
@@ -868,10 +868,16 @@ func (t *GitCommitTool) Verify(args map[string]interface{}, result ToolResult) e
 	return nil
 }
 
-func (t *GitCommitTool) buildPushURL(repo string) string {
+func (t *GitCommitTool) buildPushURL(repoDir, repo string) string {
 	t.Token = resolveGiteaToken(t.Token)
 	base := strings.TrimRight(t.GiteaURL, "/")
 	owner, name := resolveRepoOwnerName(repo)
+	// The checked-out repo's origin remote is authoritative: it carries the true
+	// owner/name from the clone URL, so a bare "repo" arg (root-layout case) can
+	// no longer redirect the push to gitea_admin/<repo>.
+	if o, n, ok := originOwnerRepo(repoDir); ok {
+		owner, name = o, n
+	}
 	stripped := strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
 	scheme := "http://"
 	if strings.HasPrefix(base, "https://") {
@@ -898,6 +904,12 @@ func formatNewBranchName(agentName, branch string) string {
 	if branch == "" || agentName == "" {
 		return branch
 	}
+	// The sandbox checks the agent out on the work branch "agent/<task>" and
+	// create-pr opens the PR for exactly that ref. Never rewrite it: renaming it
+	// to "<agent>/agent-<task>" pushes a branch create-pr can't find (404).
+	if strings.HasPrefix(branch, "agent/") {
+		return branch
+	}
 	prefix := agentName + "/"
 	if strings.HasPrefix(branch, prefix) {
 		return branch
@@ -919,6 +931,52 @@ func resolveRepoOwnerName(repo string) (owner, name string) {
 	}
 	log.Printf("git tool: repo %q missing owner, defaulting to %q", repo, owner)
 	return owner, name
+}
+
+// originOwnerRepo reads owner/name from repoDir's origin remote URL. The origin
+// is the authoritative identity of the checked-out repo (it comes from the clone
+// URL in the dispatch envelope), so it is correct even when the agent refers to
+// the repo by a bare directory name like "repo" — the root-layout case that
+// otherwise defaults owner to "gitea_admin" and pushes to the wrong namespace.
+func originOwnerRepo(repoDir string) (owner, name string, ok bool) {
+	if strings.TrimSpace(repoDir) == "" {
+		return "", "", false
+	}
+	res := runGit(repoDir, []string{"git", "config", "--get", "remote.origin.url"}, 5*time.Second)
+	if res.Error != "" {
+		return "", "", false
+	}
+	return parseOwnerRepoFromURL(res.Output)
+}
+
+// parseOwnerRepoFromURL extracts the trailing "<owner>/<name>" from a git remote
+// URL. Handles https/http (with or without embedded credentials) and the
+// scp-like "git@host:owner/repo.git" form.
+func parseOwnerRepoFromURL(raw string) (owner, name string, ok bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", "", false
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:] // strip embedded credentials (and scp user@)
+	}
+	// For the scp-like form the host and path are separated by ':' rather than
+	// '/'. Normalise so the path segments split uniformly.
+	s = strings.Replace(s, ":", "/", 1)
+	parts := strings.Split(strings.Trim(s, "/"), "/")
+	// parts[0] is the host; the last two segments are owner/name.
+	if len(parts) < 3 {
+		return "", "", false
+	}
+	name = strings.TrimSuffix(parts[len(parts)-1], ".git")
+	owner = parts[len(parts)-2]
+	if strings.TrimSpace(owner) == "" || strings.TrimSpace(name) == "" {
+		return "", "", false
+	}
+	return owner, name, true
 }
 
 type GitDiffTool struct {

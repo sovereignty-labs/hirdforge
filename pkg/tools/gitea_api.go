@@ -19,6 +19,11 @@ type GiteaAPITool struct {
 	Token          string
 	ReviewersToken string
 	Client         *http.Client
+	// WorkDir is the agent workspace root. When set, parseRepo resolves a bare
+	// repo name to its true owner/name via the checked-out origin remote, so
+	// create-pr targets the real repo (e.g. kit/hirdforge) instead of the
+	// gitea_admin default. Empty in unit tests that don't touch a workspace.
+	WorkDir string
 }
 
 func NewGiteaAPITool(giteaURL, token string) *GiteaAPITool {
@@ -35,6 +40,16 @@ func (t *GiteaAPITool) parseRepo(repo string) (string, string) {
 	if strings.Contains(repo, "/") {
 		parts := strings.SplitN(repo, "/", 2)
 		return parts[0], parts[1]
+	}
+	// A bare name (e.g. "repo", the root-layout dir): the checked-out origin
+	// remote is the authoritative identity. This keeps create-pr and the rest of
+	// the API on the real repo instead of falling back to gitea_admin/<repo>.
+	if t.WorkDir != "" {
+		if repoDir, ok := resolveRepoDir(t.WorkDir, repo); ok {
+			if owner, name, found := originOwnerRepo(repoDir); found {
+				return owner, name
+			}
+		}
 	}
 	owner := os.Getenv("GITEA_DEFAULT_OWNER")
 	if owner == "" {
