@@ -140,6 +140,22 @@ Workbench, each earned:
 
 ## Open items
 
+**O-FAT-AGENT-IMAGE — The v1 `valhalla-agent` image cannot be built by the
+airgapped CI runners.** `Dockerfile.agent` pulls kubectl/helm/kubeseal/talosctl/
+crane/yq from the public internet; the Gitea runners have none, so the
+`build-agent` job could only ever fail. It fired on every push touching
+`cmd/agent/` or `pkg/` — exactly the v2 builder-harness work — so `main` went red
+on our own mechanism merges while every other job stayed green (run 1195:
+`build-agent` FAILURE, `build-agent-sandbox`/gateway/seidr/lockbox/hirdforge all
+success). **Disabled behind `vars.BUILD_FAT_AGENT_IMAGE` 2026-07-24** so CI
+signal is trustworthy again. Nothing consumed the artifact: all v1 agent
+Deployments in asgard-infra pin an old sha (`sha-2ccfdc9` / `sha-e2b0f9a`) and no
+manifest tracks `:latest`; the v2 dispatch path uses `valhalla-agent-sandbox`,
+built from the lean airgap-safe `Dockerfile.agent-sandbox`. **To re-enable**, the
+tool downloads must come from an in-cluster mirror first — otherwise flipping the
+variable just restores the red. Decide whether the v1 fat image is still wanted
+at all, or whether those legacy agents retire with v1. *2026-07-24.*
+
 **O-CI — Does `git.hirdforge.com` Gitea have working CI runners?** *(Retargeted by
 the D-INFRA correction — the KWS question is moot.)* The platform wires into
 `git.hirdforge.com`, so a route whose `done_gate` is `ci-status` needs runners

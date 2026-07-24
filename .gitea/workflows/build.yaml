@@ -10,7 +10,27 @@ env:
   DOCKER_HOST: tcp://localhost:2375
   REGISTRY: gitea-http.gitea.svc.cluster.local:3000/kit/hirdforge
 jobs:
+  # DISABLED 2026-07-24 — opt-in only. Dockerfile.agent (the fat v1 agent image)
+  # downloads kubectl/helm/kubeseal/talosctl/crane/yq from the public internet,
+  # and the Gitea CI runners are airgapped, so this job can ONLY ever fail.
+  #
+  # It was failing on every push that touched cmd/agent/ or pkg/ — i.e. exactly
+  # the v2 builder-harness work — turning main red and destroying the CI signal
+  # (the useful jobs beside it were green the whole time). Evidence: run 1195,
+  # build-agent FAILURE while build-agent-sandbox, gateway, seidr, lockbox and
+  # hirdforge all succeeded.
+  #
+  # Nothing consumes the artifact: every v1 agent Deployment in asgard-infra
+  # pins an old sha (sha-2ccfdc9 / sha-e2b0f9a) and no manifest tracks :latest.
+  # The v2 dispatch path uses valhalla-agent-sandbox (build-agent-sandbox below,
+  # built from the lean airgap-safe Dockerfile.agent-sandbox), which is green.
+  #
+  # To re-enable: set the repo variable BUILD_FAT_AGENT_IMAGE=true, but first
+  # make the tool downloads come from an in-cluster mirror instead of the public
+  # internet — otherwise it will just fail again. Tracked as an open item in
+  # docs/DECISIONS.md.
   build-agent:
+    if: ${{ vars.BUILD_FAT_AGENT_IMAGE == 'true' }}
     runs-on: ubuntu-latest
 
     steps:
