@@ -1238,6 +1238,9 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		// drive PR review context.
 		if deps.enabled["gitea"] || deps.enabled["create-pr"] {
 			giteaTool = toolpkg.NewGiteaAPITool(deps.giteaURL, deps.giteaToken)
+			// Origin-authoritative repo resolution: lets create-pr map a bare
+			// repo name to its true owner/name via the checked-out remote.
+			giteaTool.WorkDir = deps.workspace
 		}
 		if deps.enabled["gitea"] {
 			deps.reviewTracker.SetPRLookup(func(ref *prRef) bool {
