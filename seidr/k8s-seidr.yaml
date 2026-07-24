@@ -78,6 +78,12 @@ spec:
       labels:
         app: seidr
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
       - name: seidr
         image: 203.0.113.26:30637/gitea_admin/valhalla-seidr:latest
@@ -97,9 +103,10 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: ["ALL"]
 ---
 apiVersion: v1
 kind: Service
