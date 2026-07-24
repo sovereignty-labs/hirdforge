@@ -158,19 +158,19 @@ func TestCompletionNudgeStateExhaustion(t *testing.T) {
 		t.Error("should not be exhausted with zero nudges")
 	}
 
-	s.increment(sessionID)
-	if s.hasExhausted(sessionID) {
-		t.Error("should not be exhausted after 1 nudge")
+	for i := 1; i < maxCompletionNudges; i++ {
+		s.increment(sessionID)
+		if s.hasExhausted(sessionID) {
+			t.Errorf("should not be exhausted after %d nudges (cap %d)", i, maxCompletionNudges)
+		}
 	}
-
+	s.increment(sessionID) // reaches the cap
+	if !s.hasExhausted(sessionID) {
+		t.Errorf("should be exhausted at %d nudges", maxCompletionNudges)
+	}
 	s.increment(sessionID)
 	if !s.hasExhausted(sessionID) {
-		t.Error("should be exhausted after 2 nudges")
-	}
-
-	s.increment(sessionID)
-	if !s.hasExhausted(sessionID) {
-		t.Error("should still be exhausted after 3 nudges")
+		t.Error("should stay exhausted past the cap")
 	}
 }
 
@@ -201,14 +201,15 @@ func TestCompletionNudgeStatePerSession(t *testing.T) {
 	sid1 := "session-1"
 	sid2 := "session-2"
 
-	s.increment(sid1)
-	s.increment(sid1)
+	for i := 0; i < maxCompletionNudges; i++ {
+		s.increment(sid1)
+	}
 
 	if !s.hasExhausted(sid1) {
 		t.Error("session-1 should be exhausted")
 	}
 	if s.hasExhausted(sid2) {
-		t.Error("session-2 should not be exhausted")
+		t.Error("session-2 should not be exhausted (per-session isolation)")
 	}
 }
 
@@ -305,14 +306,15 @@ func TestCompletionGateWithFailedTools(t *testing.T) {
 		t.Error("should not be exhausted without nudges")
 	}
 
-	s.increment(sid)
-	if s.hasExhausted(sid) {
-		t.Error("should not be exhausted after 1 nudge")
+	for i := 1; i < maxCompletionNudges; i++ {
+		s.increment(sid)
+		if s.hasExhausted(sid) {
+			t.Errorf("should not be exhausted after %d nudges (cap %d)", i, maxCompletionNudges)
+		}
 	}
-
 	s.increment(sid)
 	if !s.hasExhausted(sid) {
-		t.Error("should be exhausted after 2 nudges")
+		t.Errorf("should be exhausted at %d nudges", maxCompletionNudges)
 	}
 }
 
@@ -343,8 +345,9 @@ func TestCompletionGateConcurrent(t *testing.T) {
 }
 
 func TestCompletionGateMaxNudges(t *testing.T) {
-	if maxCompletionNudges != 2 {
-		t.Errorf("maxCompletionNudges = %d, want 2", maxCompletionNudges)
+	// Raised 2 -> 4 (2026-07-24) to convert end-of-task narration stalls into PRs.
+	if maxCompletionNudges != 4 {
+		t.Errorf("maxCompletionNudges = %d, want 4", maxCompletionNudges)
 	}
 }
 

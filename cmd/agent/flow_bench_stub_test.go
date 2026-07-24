@@ -72,6 +72,7 @@ func TestE2EFlowStopsBeforeCreatePR(t *testing.T) {
 
 	commit := &flowFakeGitCommitTool{branch: "bench-builder/refactor-metrics"}
 	deps := harnessDeps(srv)
+	deps.maxToolRounds = 12 // enough rounds for the nudge budget to exhaust
 	deps.reg.Register(commit)
 	deps.workspace = t.TempDir()
 

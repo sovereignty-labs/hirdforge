@@ -347,7 +347,14 @@ func buildPeerSystemBlock(peers, roles map[string]string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-const maxCompletionNudges = 2
+// maxCompletionNudges: how many times the loop re-prompts a model that stopped
+// without a terminal outcome before giving up. Raised 2 -> 4 (2026-07-24): the
+// residual benchmark failure was a model that had done a correct refactor but
+// then NARRATED its next step ("now I'll format/commit") across turns without
+// executing it, exhausting a 2-nudge budget just short of the PR. More chances,
+// plus a firmer "act, don't announce" nudge (terminalNudge), convert those
+// end-stalls into completed PRs.
+const maxCompletionNudges = 4
 
 var prRequestPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)create\s+(a\s+)?PR`),
