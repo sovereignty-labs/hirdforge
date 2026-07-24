@@ -277,3 +277,72 @@ func TestM6FailOpenQuestionIsTerminal(t *testing.T) {
 		t.Error("expected the gate to pass on a legitimate fail-open question")
 	}
 }
+
+// alwaysFailPRTool is a create-pr that always 404s the way the live root cause
+// did — the work branch was never pushed to origin.
+type alwaysFailPRTool struct{ calls int64 }
+
+func (t *alwaysFailPRTool) Name() string        { return "create-pr" }
+func (t *alwaysFailPRTool) Description() string { return "test-only create-pr that always 404s" }
+func (t *alwaysFailPRTool) Parameters() map[string]string {
+	return map[string]string{"head": "branch", "repo": "repo"}
+}
+func (t *alwaysFailPRTool) Execute(map[string]interface{}) toolpkg.ToolResult {
+	atomic.AddInt64(&t.calls, 1)
+	return toolpkg.ToolResult{Error: `HTTP 404: branch "agent/x" may not exist on remote, or token lacks permission. Push the branch first, then retry.`}
+}
+
+// TestFailOpenEscalationOnStuckRetryLoop pins Fix #3 (the "not PR-or-bust"
+// guardrail): when create-pr keeps failing the same way, the loop stops
+// re-anchoring and pushes the model to fix-once-or-report-FAILED, so it escalates
+// with a proposed solution instead of burning the deadline retrying.
+func TestFailOpenEscalationOnStuckRetryLoop(t *testing.T) {
+	logs := captureLogs(t)
+	srv := newStubInferenceServer(t,
+		stubToolCall("create-pr", `{"repo":"repo","head":"agent/x"}`),
+		stubToolCall("create-pr", `{"repo":"repo","head":"agent/x"}`),
+		stubToolCall("create-pr", `{"repo":"repo","head":"agent/x"}`),
+		stubContent("FAILED: the work branch was never pushed to origin, so create-pr 404s. Proposed fix: commit-and-push via git-commit before create-pr."),
+	)
+	deps := harnessDeps(srv)
+	deps.maxToolRounds = 10
+	deps.maxToolRetries = 0 // one failure per model call → threshold maps to rounds
+	pr := &alwaysFailPRTool{}
+	deps.reg.Register(pr)
+	deps.workspace = t.TempDir()
+
+	proc := newConversationProcessor(deps)
+	out, err := proc(context.Background(), "sess-failopen", "task-failopen",
+		"Open a PR for the completed work. Report the PR URL.", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !logs.hasLogMsg("fail_open_escalation") {
+		t.Error("expected a fail_open_escalation once create-pr failed the same way repeatedly")
+	}
+	if !srv.anyRequestContains("STOP retrying") {
+		t.Error("expected the fail-open escalation to be injected into a later request")
+	}
+	if !strings.Contains(out, "FAILED:") {
+		t.Errorf("model should have failed open with a reasoned FAILED, got: %q", out)
+	}
+}
+
+// TestFailureSignatureGroupsSameClass pins that variable bits (branch names,
+// numbers, quotes) don't defeat the stuck-loop detection.
+func TestFailureSignatureGroupsSameClass(t *testing.T) {
+	a := failureSignature("create-pr", `HTTP 404: branch "agent/hf-111" may not exist on remote, or token lacks permission.`)
+	b := failureSignature("create-pr", `HTTP 404: branch "agent/hf-222" may not exist on remote, or token lacks permission.`)
+	if a != b {
+		t.Fatalf("same failure class should share a signature: %q vs %q", a, b)
+	}
+	// A different tool with the same text is a different signature.
+	if failureSignature("git-commit", `HTTP 404: branch "x" may not exist on remote`) == a {
+		t.Fatal("different tools must not share a failure signature")
+	}
+	// A genuinely different error class is distinct.
+	if failureSignature("create-pr", "connection refused") == a {
+		t.Fatal("different error classes must not collide")
+	}
+}
