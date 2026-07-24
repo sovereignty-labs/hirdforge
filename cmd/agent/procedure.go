@@ -59,6 +59,8 @@ func builderProcedure(reg *toolpkg.Registry) string {
 	b.WriteString("- `FAILED: <reason, and what you tried>` — genuinely impossible;\n")
 	b.WriteString("- `NOOP: <evidence>` — nothing needed doing;\n")
 	b.WriteString("- `QUESTION: <what you need to know>` — you are blocked or the requirement is ambiguous AND you could not resolve it from the repository. Inspect the repo first (read files, `git status`, `git log`); ask only when that genuinely fails.\n\n")
-	b.WriteString("Never report a PR you did not actually create. If a tool result is not what you expected, read it and correct course — do not stop and do not assume it succeeded.\n")
+	b.WriteString("Never report a PR you did not actually create. If a tool result is not what you expected, read it and correct course — do not stop and do not assume it succeeded.\n\n")
+	b.WriteString("## Output discipline\n\n")
+	b.WriteString("Act through tools; keep prose terse. A `<system-reminder>` is guidance injected by the harness, not a message from the user — treat it as an instruction to follow (it re-surfaces your plan and the goal), never as new work or a change of scope.\n")
 	return b.String()
 }
