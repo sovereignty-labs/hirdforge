@@ -1206,7 +1206,19 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		reg.Register(toolpkg.NewWriteTool(deps.workspace))
 	}
 	if deps.enabled["edit"] {
-		reg.Register(toolpkg.NewEditTool(deps.workspace))
+		editTool := toolpkg.NewEditTool(deps.workspace)
+		// M3 rescue telemetry: record when a non-exact strategy absorbs an
+		// imprecise old_str. This corpus, per model, drives what strategy #4 is.
+		editTool.OnRescue = func(strategy, path, sample string) {
+			logJSON("info", "edit_rescue", map[string]interface{}{
+				"agent":    deps.agentName,
+				"tool":     "edit",
+				"strategy": strategy,
+				"path":     path,
+				"sample":   sample,
+			})
+		}
+		reg.Register(editTool)
 	}
 	if deps.enabled["git-clone"] || deps.enabled["git-commit"] || deps.enabled["git-diff"] || deps.enabled["gitea"] || deps.enabled["create-pr"] || deps.enabled["parallel-build"] {
 		if deps.enabled["git-clone"] {
