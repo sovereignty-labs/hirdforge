@@ -720,6 +720,7 @@ func fetchGatewayA2ATask(gatewayURL, taskID string) (*gatewayA2ATask, error) {
 type recallTool struct {
 	memoryURL  string
 	agentName  string
+	scopes     []string // O-SKILL-BUNDLE memory_scopes: recall queries across these Seidr collections
 	onMemories func(sessionID string, ids []string)
 }
 
@@ -735,11 +736,17 @@ func (t *recallTool) Execute(args map[string]interface{}) toolpkg.ToolResult {
 	if strings.TrimSpace(query) == "" {
 		return toolpkg.ToolResult{Output: "No relevant memories found."}
 	}
-	body, _ := json.Marshal(map[string]interface{}{
+	queryPayload := map[string]interface{}{
 		"query": query,
 		"agent": t.agentName,
 		"limit": 5,
-	})
+	}
+	// O-SKILL-BUNDLE: when the bundle names memory scopes, recall queries across
+	// exactly those Seidr collections — the agent sees only its scoped memory.
+	if len(t.scopes) > 0 {
+		queryPayload["collections"] = t.scopes
+	}
+	body, _ := json.Marshal(queryPayload)
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(t.memoryURL, "/")+"/query", bytes.NewReader(body))
 	if err != nil {
 		return toolpkg.ToolResult{Output: "No relevant memories found."}
@@ -1145,6 +1152,7 @@ type toolSetupDeps struct {
 	gatewayURL          string
 	maxDelegationTokens int
 	memoryURL           string
+	memoryScopes        []string // O-SKILL-BUNDLE memory_scopes for recall/remember
 	memoryToolsEnabled  bool
 	mcpServers          string
 	reviewTracker       *reviewContextTracker
@@ -1176,11 +1184,17 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	recallExec := &recallTool{
 		memoryURL: deps.memoryURL,
 		agentName: deps.agentName,
+		scopes:    deps.memoryScopes,
 		onMemories: func(sessionID string, ids []string) {
 			addSessionContextMemoryIDs(sessionID, ids)
 		},
 	}
 	rememberExec := &rememberTool{memoryURL: deps.memoryURL, agentName: deps.agentName}
+	// O-SKILL-BUNDLE: remember writes to the primary (first) scope so scoped
+	// lessons land in the collection the bundle designates.
+	if len(deps.memoryScopes) > 0 {
+		rememberExec.collection = deps.memoryScopes[0]
+	}
 	memoryEditExec := &memoryEditTool{memoryURL: deps.memoryURL}
 	if deps.enabled["todo"] {
 		reg.Register(&todoTool{})

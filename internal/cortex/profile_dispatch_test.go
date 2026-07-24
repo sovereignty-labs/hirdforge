@@ -28,7 +28,7 @@ func testDispatcherWithProfiles() *Dispatcher {
 func TestAgentCommandForResolvesProfile(t *testing.T) {
 	d := testDispatcherWithProfiles()
 
-	cmd, p, err := d.agentCommandFor("builder")
+	cmd, p, err := d.agentCommandFor(Bundle{Profile: "builder"})
 	if err != nil {
 		t.Fatalf("builder: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestAgentCommandForResolvesProfile(t *testing.T) {
 	}
 
 	// reviewer resolves to its own read-only tool set + procedure.
-	rcmd, rp, err := d.agentCommandFor("reviewer")
+	rcmd, rp, err := d.agentCommandFor(Bundle{Profile: "reviewer"})
 	if err != nil {
 		t.Fatalf("reviewer: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestAgentCommandForResolvesProfile(t *testing.T) {
 func TestAgentCommandForDefaultAliasesToBuilder(t *testing.T) {
 	d := testDispatcherWithProfiles()
 	for _, name := range []string{"", "default"} {
-		_, p, err := d.agentCommandFor(name)
+		_, p, err := d.agentCommandFor(Bundle{Profile: name})
 		if err != nil {
 			t.Fatalf("%q: %v", name, err)
 		}
@@ -72,14 +72,49 @@ func TestAgentCommandForDefaultAliasesToBuilder(t *testing.T) {
 	}
 }
 
+func TestAgentCommandForAppendsSkillsAndScopes(t *testing.T) {
+	d := testDispatcherWithProfiles()
+	d.SkillsRepoURL = "http://gitea/kit/hirdforge-personas.git"
+
+	cmd, _, err := d.agentCommandFor(Bundle{
+		Profile:      "builder",
+		Skills:       []string{"go/testing-conventions", "hirdforge/commit-style"},
+		MemoryScopes: []string{"skill:go", "repo:kit/hirdforge"},
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	joined := strings.Join(cmd, " ")
+	for _, want := range []string{
+		"-skills go/testing-conventions,hirdforge/commit-style",
+		"-skills-repo http://gitea/kit/hirdforge-personas.git",
+		"-memory-scopes skill:go,repo:kit/hirdforge",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in %q", want, joined)
+		}
+	}
+}
+
+func TestAgentCommandForSkillsWithoutRepoIsLoud(t *testing.T) {
+	d := testDispatcherWithProfiles() // no SkillsRepoURL
+	if _, _, err := d.agentCommandFor(Bundle{Profile: "builder", Skills: []string{"go/x"}}); err == nil {
+		t.Fatal("a bundle naming skills with no skills repo must fail loudly")
+	}
+	// A bundle with NO skills is unaffected by a missing skills repo.
+	if _, _, err := d.agentCommandFor(Bundle{Profile: "builder"}); err != nil {
+		t.Fatalf("sk-less bundle should dispatch fine: %v", err)
+	}
+}
+
 func TestAgentCommandForUnknownProfileIsLoud(t *testing.T) {
 	d := testDispatcherWithProfiles()
-	if _, _, err := d.agentCommandFor("nonesuch"); err == nil {
+	if _, _, err := d.agentCommandFor(Bundle{Profile: "nonesuch"}); err == nil {
 		t.Fatal("unknown profile must fail loudly, not silently fall back")
 	}
 	// An explicit "default" alias still works even if no default.yaml exists —
 	// but a genuinely unknown name never aliases.
-	if _, _, err := d.agentCommandFor("revieww"); err == nil {
+	if _, _, err := d.agentCommandFor(Bundle{Profile: "revieww"}); err == nil {
 		t.Fatal("typo'd profile name must fail loudly")
 	}
 }

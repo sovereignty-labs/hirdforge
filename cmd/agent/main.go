@@ -2216,6 +2216,9 @@ func main() {
 	playbookFile := flag.String("playbook-file", "/etc/valhalla/playbook.md", "path to playbook context file")
 	toolsFlag := flag.String("tools", "exec,read,write,edit", "comma-separated enabled tools")
 	procedureFlag := flag.String("procedure", "", "operating procedure to render: builder | reviewer | none (O-PROFILE; empty ⇒ builder)")
+	skillsFlag := flag.String("skills", "", "comma-separated bundle skill names resolved to skills/<name>.md in the skills repo (O-SKILL-BUNDLE)")
+	skillsRepoFlag := flag.String("skills-repo", "", "git URL of the skills/personas repo for --skills (tokenless; auth via the primed credential helper)")
+	memoryScopesFlag := flag.String("memory-scopes", "", "comma-separated Seidr collection scopes for recall/remember (O-SKILL-BUNDLE)")
 	maxToolRetries := flag.Int("max-tool-retries", 2, "max retry attempts per tool call (0 disables retries)")
 	maxToolRounds := flag.Int("max-tool-rounds", 30, "maximum LLM inference rounds in the tool-calling loop")
 	inferenceTimeout := flag.Int("inference-timeout", 120, "timeout in seconds for each inference call")
@@ -2366,6 +2369,7 @@ func main() {
 		gatewayURL:          *gatewayURL,
 		maxDelegationTokens: *maxDelegationTokens,
 		memoryURL:           *memoryURL,
+		memoryScopes:        parseCSVList(*memoryScopesFlag),
 		memoryToolsEnabled:  *memoryToolsFlag,
 		mcpServers:          *mcpServers,
 		reviewTracker:       reviewTracker,
@@ -2387,6 +2391,27 @@ func main() {
 		personaRoot = persona.Root
 	}
 	templateName, templateContent, templateSource := resolveModelTemplate(*model, *modelTemplateFlag, personaRoot)
+
+	// O-SKILL-BUNDLE: resolve the task's bundle skills to prompt content. An
+	// unresolved skill is a LOUD, fatal dispatch failure — never a silent skip
+	// that runs the agent believing it had knowledge it lacked.
+	skillsContent := ""
+	if names := parseCSVList(*skillsFlag); len(names) > 0 {
+		skillsRoot := strings.TrimSpace(*skillsRepoFlag)
+		if skillsRoot == "" {
+			log.Fatalf("--skills set (%v) but --skills-repo is empty; cannot resolve skills", names)
+		}
+		dst := filepath.Join(os.TempDir(), "valhalla-skills")
+		if err := syncPersonaRepo(skillsRoot, dst); err != nil {
+			log.Fatalf("skills repo clone failed: %v", err)
+		}
+		content, loaded, err := resolveBundleSkills(dst, names)
+		if err != nil {
+			log.Fatalf("skill resolution failed: %v", err)
+		}
+		skillsContent = content
+		logJSON("info", "skills_loaded", map[string]interface{}{"skills": strings.Join(loaded, ","), "count": len(loaded)})
+	}
 
 	processConversation := newConversationProcessor(conversationDeps{
 		workspace:        *workspace,
@@ -2410,6 +2435,7 @@ func main() {
 		agentName:        agentName,
 		soul:             soul,
 		procedure:        *procedureFlag,
+		skillsContent:    skillsContent,
 		modelTemplate:    templateContent,
 		peers:            peers,
 		peerRoles:        peerRoles,

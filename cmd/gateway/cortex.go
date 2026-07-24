@@ -36,6 +36,9 @@ type cortexDispatchOptions struct {
 	// Profiles are the loaded harness profiles (O-PROFILE), keyed by name. The
 	// dispatcher resolves each task's bundle.profile against this set.
 	Profiles map[string]profile.Profile
+	// SkillsRepoURL is the tokenless git URL the sandbox resolves bundle.skills
+	// against (O-SKILL-BUNDLE); auth rides the guard-primed credential helper.
+	SkillsRepoURL string
 }
 
 // initCortexDispatcher wires the P1.3 dispatcher: sandbox Jobs, Gitea PR
@@ -77,6 +80,7 @@ func (g *gateway) initCortexDispatcher(opts cortexDispatchOptions) {
 			"-inference-timeout", "300",
 		},
 		Profiles:      opts.Profiles,
+		SkillsRepoURL: opts.SkillsRepoURL,
 		CloneURLBase:  strings.TrimSuffix(opts.CloneBase, "/"),
 		BaseBranch:    opts.BaseBranch,
 		CredentialRef: opts.CredSecret,
