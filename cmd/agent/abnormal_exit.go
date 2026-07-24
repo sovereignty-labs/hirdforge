@@ -14,6 +14,25 @@ package main
 // carries the M6 plan verbatim, so the "remaining work" section writes itself
 // and a re-dispatch can resume from it.
 
+// appendAbnormalExitSummaryRequest appends the M1 handoff-report reminder to the
+// message list when the loop is ending abnormally, and returns the (possibly
+// unchanged) list. Extracted from the conversation loop so the injection lives in
+// one cohesive place — and so the loop's already-high cyclomatic complexity does
+// not carry this branch.
+func appendAbnormalExitSummaryRequest(messages []message, agentName, sessionID, taskID string, reason terminationReason) []message {
+	if !reason.IsAbnormal() {
+		return messages
+	}
+	messages = append(messages, message{Role: "user", Content: abnormalExitSummaryRequest(sessionID, reason)})
+	logJSON("info", "abnormal_exit_summary_requested", map[string]interface{}{
+		"agent":      agentName,
+		"session_id": sessionID,
+		"task_id":    taskID,
+		"reason":     reason.String(),
+	})
+	return messages
+}
+
 // abnormalExitSummaryRequest is the synthetic reminder appended before the final
 // (tools-disabled) turn on an abnormal exit. It ends by requiring a terminal
 // marker so the result still classifies (PR / FAILED / NOOP / QUESTION) — and,
