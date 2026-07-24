@@ -973,6 +973,11 @@ func buildToolDefs(reg *toolpkg.Registry) []toolDef {
 			if t.Name() == "remember" && k == "tags" {
 				continue
 			}
+			// read's paging args are optional — the model reads whole files by
+			// default and only pages when a budget marker tells it to.
+			if t.Name() == "read" && (k == "offset" || k == "limit") {
+				continue
+			}
 			required = append(required, k)
 		}
 		sort.Strings(required)

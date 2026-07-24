@@ -12,6 +12,18 @@ import (
 
 const maxFileSize = 1024 * 1024
 
+// M4 read budgets (BUILDER_HARNESS §M4). Tool output must never flood the
+// context — the 14-function refactor died behind a wall of grep/sed output, and
+// long tasks degrade as the original instruction recedes. Reads are line-
+// numbered, capped, and paged; every truncation is announced so nothing is
+// model-invisible. Budgets are struct fields (config, not constants) so they can
+// be tuned from telemetry.
+const (
+	defaultReadMaxLines   = 2000
+	defaultReadMaxBytes   = 50 * 1024
+	defaultReadMaxLineLen = 2000
+)
+
 // atomicWriteFile writes data to a temp file in the same directory as path and
 // then renames it over path, so a crash or kill mid-write leaves either the
 // previous contents or the new contents — never a truncated file. The temp
@@ -96,10 +108,40 @@ func looksLikePersonaPath(p string) bool {
 // ReadTool reads workspace files.
 type ReadTool struct {
 	WorkDir string
+	// Budgets (config, not constants). Zero falls back to the defaults.
+	MaxLines   int
+	MaxBytes   int
+	MaxLineLen int
 }
 
 func NewReadTool(workDir string) *ReadTool {
-	return &ReadTool{WorkDir: workDir}
+	return &ReadTool{
+		WorkDir:    workDir,
+		MaxLines:   defaultReadMaxLines,
+		MaxBytes:   defaultReadMaxBytes,
+		MaxLineLen: defaultReadMaxLineLen,
+	}
+}
+
+func (t *ReadTool) maxLines() int {
+	if t.MaxLines > 0 {
+		return t.MaxLines
+	}
+	return defaultReadMaxLines
+}
+
+func (t *ReadTool) maxBytes() int {
+	if t.MaxBytes > 0 {
+		return t.MaxBytes
+	}
+	return defaultReadMaxBytes
+}
+
+func (t *ReadTool) maxLineLen() int {
+	if t.MaxLineLen > 0 {
+		return t.MaxLineLen
+	}
+	return defaultReadMaxLineLen
 }
 
 func (t *ReadTool) Name() string {
@@ -112,7 +154,9 @@ func (t *ReadTool) Description() string {
 
 func (t *ReadTool) Parameters() map[string]string {
 	return map[string]string{
-		"path": "File path relative to workspace",
+		"path":   "File path relative to workspace",
+		"offset": "Optional: 1-based line number to start from, for paging a large file.",
+		"limit":  "Optional: maximum number of lines to return.",
 	}
 }
 
@@ -154,7 +198,72 @@ func (t *ReadTool) Execute(args map[string]interface{}) ToolResult {
 	if bytesLookBinary(data) {
 		return ToolResult{Error: fmt.Sprintf("Error: binary file detected at %s. Use `exec: file %s` to check file type, or `exec: xxd %s | head -20` for hex inspection.", path, path, path)}
 	}
-	return ToolResult{Output: string(data)}
+	offset := intArg(args, "offset")
+	limit := intArg(args, "limit")
+	return ToolResult{Output: t.formatRead(string(data), offset, limit)}
+}
+
+// formatRead renders file content as a line-numbered, paged, budgeted view.
+// Every line is prefixed "N: " (1-based absolute line number — NOT part of the
+// file; the edit tool matches raw content, so strip the prefix when building
+// old_str). Over-long lines are cut with a marker. Output stops at the line or
+// byte budget, and any truncation is announced with the offset to continue —
+// nothing is silently dropped.
+func (t *ReadTool) formatRead(content string, offset, limit int) string {
+	lines := strings.Split(content, "\n")
+	// A trailing newline yields a final empty element; drop it so line counts match.
+	if n := len(lines); n > 0 && lines[n-1] == "" && strings.HasSuffix(content, "\n") {
+		lines = lines[:n-1]
+	}
+	total := len(lines)
+	if total == 0 {
+		return "(empty file)"
+	}
+
+	start := 0
+	if offset > 1 {
+		start = offset - 1
+	}
+	if start >= total {
+		return fmt.Sprintf("[read: offset %d is past end of file — the file has %d line(s)]", offset, total)
+	}
+
+	lineBudget := t.maxLines()
+	if limit > 0 && limit < lineBudget {
+		lineBudget = limit
+	}
+
+	var b strings.Builder
+	byteBudget := t.maxBytes()
+	maxLL := t.maxLineLen()
+	emitted := 0
+	truncatedByBytes := false
+	i := start
+	for ; i < total && emitted < lineBudget; i++ {
+		line := lines[i]
+		if len(line) > maxLL {
+			line = line[:maxLL] + fmt.Sprintf("…[line truncated, %d more chars]", len(lines[i])-maxLL)
+		}
+		rendered := fmt.Sprintf("%d: %s\n", i+1, line)
+		if b.Len() > 0 && b.Len()+len(rendered) > byteBudget {
+			truncatedByBytes = true
+			break
+		}
+		b.WriteString(rendered)
+		emitted++
+	}
+	lastShown := start + emitted // 1-based line number of the last shown line == this (0-based next)
+	out := strings.TrimRight(b.String(), "\n")
+
+	if i < total {
+		reason := "line limit"
+		if truncatedByBytes {
+			reason = "size limit"
+		}
+		out += fmt.Sprintf("\n\n[read: showing lines %d-%d of %d (%s reached). Continue with offset=%d]",
+			start+1, lastShown, total, reason, lastShown+1)
+	}
+	return out
 }
 
 // WriteTool writes workspace files.
