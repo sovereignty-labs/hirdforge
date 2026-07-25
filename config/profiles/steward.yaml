@@ -1,0 +1,38 @@
+profile_version: 1
+name: steward
+# The user-facing name is a STAND-IN the user can replace (D-INTERLOCUTOR).
+# It lives here in config, never hardcoded in Go — swap it for "Jeeves", "Ragnar",
+# whatever. The route path /steward/* is the stable API token; this is the label.
+display_name: "Steward"
+description: "The interlocutor: the main chat interface. Read-only investigation + plan mode; proposes work, never does it. No edit/write/exec — cannot be prompt-injected into changing code or the lifecycle."
+
+# Read-only by construction (O-PROFILE §4 + read_only below). It grounds itself in
+# live reality — the repo and the issue/task record — and converges on a plan. The
+# ONLY write in the whole surface is the operator's blessing (§7 /steward/handoff),
+# which runs OUTSIDE this agent via createLabeledIssueAndRoute. The interlocutor is
+# never in the coordination path: it proposes; Cortex distributes; agents do; gates
+# decide. Any mutating tool here is refused loudly at load.
+tools:
+  - read                    # ground in the repo
+  - git-diff                # read working changes
+  - list-issues             # read the issue record (status projection, P4.4)
+  - get-issue               # read one issue in detail
+
+procedure: steward          # plan mode (the prompt itself lands in P4.2)
+
+budgets:
+  max_tool_rounds: 60       # a long investigative conversation, not a short build
+  read_max_lines: 2000
+  read_max_bytes: 51200
+  exec_max_output: 30720
+  max_context: 40           # holds more of the thread than a builder (endurance is core — P4.5)
+
+policies:
+  todo_reanchor: false      # no delivery checklist to re-anchor
+  read_before_edit: false   # no edits to guard
+  redirect_shell_git: false # no shell git in a read-only profile
+  compaction: true          # session endurance is this role's competency (P4.5, O-M7-SCOPE reopened)
+  read_only: true           # SECURITY: enforce the mutating-tool ban regardless of procedure
+
+completion:
+  requires: none            # a persistent conversation, not a task with a terminal artifact

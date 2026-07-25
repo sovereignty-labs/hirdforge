@@ -1250,7 +1250,8 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 		// register the full eleven-tool suite for gitea or just create-pr for
 		// builders. reviewTracker.SetPRLookup is gitea-only — builders don't
 		// drive PR review context.
-		if deps.enabled["gitea"] || deps.enabled["create-pr"] || deps.enabled["create-review"] {
+		if deps.enabled["gitea"] || deps.enabled["create-pr"] || deps.enabled["create-review"] ||
+			deps.enabled["list-issues"] || deps.enabled["get-issue"] {
 			giteaTool = toolpkg.NewGiteaAPITool(deps.giteaURL, deps.giteaToken)
 			// Origin-authoritative repo resolution: lets create-pr map a bare
 			// repo name to its true owner/name via the checked-out remote.
@@ -1296,6 +1297,20 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 			reg.Register(toolpkg.NewCreateReviewTool(giteaTool, deps.memoryURL, deps.agentName))
 			if deps.enabled["list-pr-files"] {
 				reg.Register(toolpkg.NewListPRFilesTool(giteaTool))
+			}
+		}
+		// Read-only issue reads for a non-mutating investigator (the interlocutor /
+		// O-PROFILE `steward`): list-issues / get-issue and NOTHING that writes.
+		// These also ship inside the full `gitea` bundle; here they bind WITHOUT it,
+		// so a read-only profile can ground itself in the issue record without ever
+		// carrying create/merge/close/comment/label. Idempotent when `gitea` already
+		// registered them (Register overwrites by name with the same constructor).
+		if giteaTool != nil {
+			if deps.enabled["list-issues"] {
+				reg.Register(toolpkg.NewListIssuesTool(giteaTool))
+			}
+			if deps.enabled["get-issue"] {
+				reg.Register(toolpkg.NewGetIssueTool(giteaTool))
 			}
 		}
 		if deps.enabled["parallel-build"] {

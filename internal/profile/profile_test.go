@@ -97,6 +97,89 @@ completion: {requires: review}
 	}
 }
 
+// The steward (interlocutor) profile is read-only by construction: the
+// mutating-tool ban (O-PROFILE §4) must apply to it, and it must ship none.
+func TestStewardProfileIsReadOnly(t *testing.T) {
+	profs, err := LoadDir(repoProfilesDir(t))
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	s, ok := profs["steward"]
+	if !ok {
+		t.Fatal("steward profile missing")
+	}
+	if s.Procedure != "steward" {
+		t.Fatalf("steward procedure = %q, want steward", s.Procedure)
+	}
+	if s.Completion.Requires != "none" {
+		t.Fatalf("steward completion = %q, want none", s.Completion.Requires)
+	}
+	if !s.Policies.ReadOnly {
+		t.Fatal("steward profile must set read_only: true")
+	}
+	if !s.isReadOnlyIntent() {
+		t.Fatal("steward profile must be read-only intent (mutating-tool ban applies)")
+	}
+	for _, tool := range s.Tools {
+		if mutatingTools[tool] {
+			t.Fatalf("steward profile ships a mutating tool %q", tool)
+		}
+	}
+	// It must hold no operator/mutating verbs at all — not just the banned set.
+	for _, tool := range s.Tools {
+		switch tool {
+		case "create-pr", "merge", "close-issue", "comment", "update-labels", "create-review":
+			t.Fatalf("steward profile ships operator/mutating tool %q", tool)
+		}
+	}
+}
+
+// The display name is a user-replaceable stand-in read from config, never a brand
+// string baked in Go: steward.yaml carries its own, and a profile omitting it
+// falls back to the profile Name (still config-sourced).
+func TestDisplayNameIsConfigSourced(t *testing.T) {
+	profs, err := LoadDir(repoProfilesDir(t))
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if got := profs["steward"].DisplayName; got != "Steward" {
+		t.Fatalf("steward display_name = %q, want %q (from config)", got, "Steward")
+	}
+	// A profile with no display_name defaults to Name — no hardcoded string.
+	dir := t.TempDir()
+	p := writeProfile(t, dir, "jeeves.yaml", `profile_version: 1
+name: jeeves
+tools: [read]
+procedure: steward
+budgets: {max_tool_rounds: 60}
+policies: {read_only: true}
+completion: {requires: none}
+`)
+	pr, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if pr.DisplayName != "jeeves" {
+		t.Fatalf("display_name default = %q, want %q (the Name)", pr.DisplayName, "jeeves")
+	}
+}
+
+// The read-only ban must fire for the steward procedure too, not just reviewers:
+// a steward-intent profile carrying a mutating tool is refused loudly at load.
+func TestValidateRejectsStewardWithMutatingTool(t *testing.T) {
+	dir := t.TempDir()
+	p := writeProfile(t, dir, "steward.yaml", `profile_version: 1
+name: steward
+tools: [read, write, list-issues]
+procedure: steward
+budgets: {max_tool_rounds: 60}
+completion: {requires: none}
+`)
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "mutating tool") {
+		t.Fatalf("expected loud refusal of steward+write, got err=%v", err)
+	}
+}
+
 func TestValidateRejectsBadVersionAndName(t *testing.T) {
 	dir := t.TempDir()
 	bad := writeProfile(t, dir, "builder.yaml", `profile_version: 2
