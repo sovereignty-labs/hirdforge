@@ -159,10 +159,18 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		}
 		c.refreshDeadline(cfg, route, task.ID)
 		cause := Cause{Kind: CauseWebhook, Detail: map[string]any{"review_state": ev.ReviewState, "reviewer": ev.Actor}}
-		if err := c.store.Transition(task.ID, StatusFailed,
-			fmt.Sprintf("changes_requested by %s on PR #%d — revise dispatch follows", orDash(ev.Actor), ev.PRNumber),
-			cause); err != nil {
-			return d, fmt.Errorf("cortex: revise transition: %w", err)
+		// Mark the attempt failed before re-dispatching — but ONLY if it is not
+		// already failed. A task that failed earlier (gate failure, watchdog
+		// reap) is a legitimate revise target: the operator reads the PR, asks
+		// for changes, and the retry runs from `failed` (failed→dispatched is
+		// legal). Transitioning failed→failed is not, and it used to abort the
+		// whole revise with "illegal transition failed->failed".
+		if task.Status != StatusFailed {
+			if err := c.store.Transition(task.ID, StatusFailed,
+				fmt.Sprintf("changes_requested by %s on PR #%d — revise dispatch follows", orDash(ev.Actor), ev.PRNumber),
+				cause); err != nil {
+				return d, fmt.Errorf("cortex: revise transition: %w", err)
+			}
 		}
 		d.TaskID = task.ID
 		d.Reason = fmt.Sprintf("%s -> revise dispatch for task %s (attempt %d)", reason, task.ID, task.Attempt+1)
