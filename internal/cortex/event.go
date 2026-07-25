@@ -32,6 +32,10 @@ type Event struct {
 	// task.gate_passed / task.gate_failed / operator.dispatch
 	RouteID string `json:"route_id,omitempty"` // originating route of the task
 	TaskID  string `json:"task_id,omitempty"`
+	// GateExcerpt carries the failing gate's output on task.gate_failed so the
+	// retry route can hand the builder the EVIDENCE of what failed (P3.2) —
+	// never a blind retry (D-LESSONS #2). Data only; Cortex never interprets it.
+	GateExcerpt string `json:"gate_excerpt,omitempty"`
 }
 
 // Decision is one routing evaluation — match or no-match — recorded for the

@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// maxBuildAttempts bounds the P3.2 retry-on-gate-failure loop: the first attempt
+// plus retries, capped here. Past the cap the task stays failed with a loud
+// decision rather than looping forever (escalate, never silently retry). A code
+// constant, not a route field — the routing schema is a load-bearing contract
+// and this needs no schema change.
+const maxBuildAttempts = 3
+
 // Cortex is the engine: config + store + the in-memory decision ring buffer
 // that backs GET /log (the table is the reload-rehydration source).
 type Cortex struct {
@@ -94,6 +101,41 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		d.Reason = fmt.Sprintf("%s -> reviewer dispatch for task %s", reason, ev.TaskID)
 		if c.OnReviewerDispatch != nil {
 			c.OnReviewerDispatch(route, ev)
+		}
+
+	case route.Dispatch != nil && route.Dispatch.Role == RoleBuilder && ev.Type == EventTaskGateFailed && ev.TaskID != "":
+		// P3.2 retry-on-failure: a failed mechanical gate routes BACK to a
+		// builder on the SAME task, carrying the gate's own output as failure
+		// context — evidence, never a blind retry (D-LESSONS #2). Bounded by
+		// maxBuildAttempts: past the cap the task stays failed and the decision
+		// says so loudly (escalate, never loop — D-ESCALATE).
+		task, _, err := c.store.GetTask(ev.TaskID)
+		if err != nil {
+			d.Reason = fmt.Sprintf("%s -> no task %s: %v", reason, ev.TaskID, err)
+			break
+		}
+		// Attempt starts at 1 (the initial build), so this allows maxBuildAttempts
+		// total attempts before the task is left failed for a human.
+		if task.Attempt >= maxBuildAttempts {
+			d.TaskID = task.ID
+			d.Reason = fmt.Sprintf("%s -> retry EXHAUSTED for task %s after %d attempts — needs a human",
+				reason, task.ID, task.Attempt)
+			break
+		}
+		fc, _ := json.Marshal(FailureContext{
+			PriorAgent:   task.Agent,
+			PriorAttempt: task.Attempt,
+			Reason:       "gate_failed",
+			GateExcerpt:  ev.GateExcerpt,
+		})
+		if err := c.store.PrepareRetry(task.ID, fc); err != nil {
+			return d, fmt.Errorf("cortex: prepare gate retry: %w", err)
+		}
+		d.TaskID = task.ID
+		d.Reason = fmt.Sprintf("%s -> retry dispatch for task %s (attempt %d) with gate evidence",
+			reason, task.ID, task.Attempt+2)
+		if c.OnTaskQueued != nil {
+			c.OnTaskQueued(route, task.ID)
 		}
 
 	case route.Dispatch != nil && route.Dispatch.Role == RoleBuilder && ev.Type == EventPRReviewSubmitted:
