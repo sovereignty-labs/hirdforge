@@ -81,47 +81,15 @@ func registerCortexControlRoutes(mux *http.ServeMux, g *gateway) {
 		if req.Label == "" {
 			req.Label = "agent:build"
 		}
-		issueBody, _ := json.Marshal(map[string]any{"title": req.Title, "body": req.Body})
-		resp, err := giteaRequest(http.DefaultClient, http.MethodPost, g.giteaURL, g.giteaToken,
-			fmt.Sprintf("/api/v1/repos/%s/issues", req.Repo), strings.NewReader(string(issueBody)))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+		// Same path the Steward uses — one route from "work wanted" to a routed
+		// task, so neither entry point can drift from the other.
+		issueNum, cerr := g.createLabeledIssueAndRoute(r.Context(), req.Repo, req.Title, req.Body, req.Label, "operator")
+		if cerr != nil {
+			http.Error(w, cerr.Error(), http.StatusBadGateway)
 			return
 		}
-		defer resp.Body.Close()
-		var issue struct {
-			Number int64 `json:"number"`
-		}
-		_ = json.NewDecoder(resp.Body).Decode(&issue)
-		if resp.StatusCode != http.StatusCreated || issue.Number == 0 {
-			http.Error(w, fmt.Sprintf("gitea issue create: status %d", resp.StatusCode), http.StatusBadGateway)
-			return
-		}
-		labelBody, _ := json.Marshal(map[string]any{"labels": []string{req.Label}})
-		lresp, err := giteaRequest(http.DefaultClient, http.MethodPost, g.giteaURL, g.giteaToken,
-			fmt.Sprintf("/api/v1/repos/%s/issues/%d/labels", req.Repo, issue.Number), strings.NewReader(string(labelBody)))
-		if err == nil {
-			_ = lresp.Body.Close()
-		}
-		log.Printf("cortex: operator dispatch -> issue %s#%d labeled %s", req.Repo, issue.Number, req.Label)
-		// Fire the routing event directly. Gitea does NOT emit an issue/label
-		// webhook for label changes made via the /labels API (only UI changes),
-		// so an operator dispatch must trigger Cortex itself rather than wait
-		// for a delivery that never comes. External label adds still arrive via
-		// the webhook; this is the manual entry point owning its own trigger.
-		ev := cortex.Event{
-			Type:        cortex.EventIssueLabeled,
-			Repo:        req.Repo,
-			Label:       req.Label,
-			IssueNumber: issue.Number,
-			IssueTitle:  req.Title,
-			IssueBody:   req.Body,
-			IssueLabels: []string{req.Label},
-		}
-		if _, err := g.cortex.HandleEvent(ev); err != nil {
-			log.Printf("cortex: operator dispatch HandleEvent error: %v", err)
-		}
-		writeJSON(w, http.StatusCreated, map[string]any{"repo": req.Repo, "issue": issue.Number, "label": req.Label})
+		// 201: the issue was created (and routed).
+		writeJSON(w, http.StatusCreated, map[string]any{"repo": req.Repo, "issue": issueNum, "label": req.Label})
 	})
 
 	// POST /api/v1/cortex/tasks/{id}/retry and /cancel
