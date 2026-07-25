@@ -36,11 +36,21 @@ unit/stub-tested · **PARTIAL** = see note.
   so a stuck tool escalates `FAILED` with a proposed fix instead of burning the
   deadline (#392). Recorded as O-BUILDER-WRITE-RELIABILITY in DECISIONS.
 
-### 2. A single live dogfood drives issue → PR → gate → review → approve → Lockbox → merge → validated, reviewer reliably submitting its verdict — **LIVE through the reviewer verdict; advance unit-tested + deployed**
-Every link was demonstrated live on the Asgard deployment; the chain is recorded
-below with its evidence. The one step not yet shown in a *single* unbroken live
-run is the final `approve-on-review` advance firing, blocked only by the
-builder's ~10% no_pr flake on the two post-deploy attempts (see note).
+### 2. A single live dogfood drives issue → PR → gate → review → approve → Lockbox → merge → validated, reviewer reliably submitting its verdict — **LIVE through `approved` (agent side); merge is the operator's Lockbox tap**
+**Proven end-to-end in one unbroken live run** on `sha-f10c805` (issue #424 →
+PR #425), gateway log:
+```
+task queued + DEDUPED (one task)
+PR #425 opened (builder, on the work branch — observable)
+gate_passed → matched review-on-gate → reviewer dispatch
+VERDICT: APPROVED on PR #425 (create-review, reviewer profile)
+review observed … APPROVED by reviewers — advancing
+matched approve-on-review … task advanced to approved
+```
+Every mechanical link fired: dedup → builder PR → gate → reviewer verdict →
+`approve-on-review` → `approved` (Lockbox enqueued). The `merge → validated` tail
+is the operator's Lockbox approval, by design (the write boundary). The chain's
+per-link evidence and the debugging that got here follow.
 
 - **Dedup — LIVE:** one `agent:build` label → **one** task on every run
   (`cortex: … -> deduped: task … already active`), on #386–#418. (#391)
@@ -62,15 +72,12 @@ builder's ~10% no_pr flake on the two post-deploy attempts (see note).
   §Findings): a CI stale-image bug shipping the wrong reviewer profile, a
   reviewers-token gap, judge-from-the-wrong-diff, and the missing review-mode
   gate — all fixed and deployed.
-- **Verdict → approved — UNIT-TESTED + DEPLOYED:** `DispatchReviewer` advances on
-  its reliable API verdict observation (`ReviewLookup` reads `review.state`) by
-  emitting `EventPRReviewSubmitted`, which the `approve-on-review` route (P1.7)
-  turns into `approved` + Lockbox enqueue. Unit test:
-  `TestDispatchReviewerAdvancesOnObservedVerdict`. Not yet caught in a single
-  unbroken live run because the builder flaked `no_pr` on both post-deploy
-  dogfoods (model variance — the agent binary is unchanged from the runs that
-  produced #414). *This is the only sub-step of criterion #2 pending a
-  non-flaky live run; the mechanism is in production.*
+- **Verdict → approved — LIVE:** `DispatchReviewer` advances on its reliable API
+  verdict observation (`ReviewLookup` reads `review.state`) by emitting
+  `EventPRReviewSubmitted`, which the `approve-on-review` route (P1.7) turns into
+  `approved` + Lockbox enqueue. Demonstrated live on #425
+  (`matched approve-on-review … advanced to approved`) and unit-tested
+  (`TestDispatchReviewerAdvancesOnObservedVerdict`).
 - **merge → validated — operator's Lockbox tap, by design:** the write boundary
   (PR-behind-Lockbox) is human authorization, never automated. On approval the
   merge fires `pr.merged` → `validate-on-merge` → `validated`.
@@ -95,6 +102,12 @@ fixed:
 5. **Advance depended on a fragile webhook (#415):** `handleCortexReviewEvent`
    mis-parsed this Gitea version's review payload; the advance now rides the
    dispatcher's reliable API observation.
+6. **Builder "no_pr flake" was a real branch bug (#423):** the builder opened
+   PRs on an invented branch (`Builder/feat-*`) instead of the sandbox work
+   branch `agent/<task>`, so the collect step (which keys on the work branch)
+   failed `no_pr` despite a real PR. Fixed: the builder commits to the work
+   branch it is already on, and git-commit names the pushed branch. After this,
+   the full loop ran clean on the first try (#424 → #425 → approved).
 
 ### 3. Skill + profile bundles dispatch measurably different agent behavior with no code change; Seidr memory is skill-scoped — **LIVE (profiles) / TESTED (skills, scopes)**
 - **Profiles — LIVE:** the gateway loads `config/profiles/{builder,reviewer}.yaml`
