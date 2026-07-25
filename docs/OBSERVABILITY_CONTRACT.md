@@ -89,35 +89,47 @@ The UI never invents state or decisions; it renders this contract. If a surface
 needs data this contract doesn't expose, the contract is extended *here first*
 (stop-and-ask), then the UI consumes it.
 
-## 7. Steward surface (plan mode — Phase 4)
+## 7. Interlocutor surface (plan mode — Phase 4)
 
-Approved 2026-07-25; **revised the same day** when the role was clarified: the
-Steward is the main chat interface — think with the best model, investigate,
-converge on a plan — and work is created only when the operator **blesses** that
-plan. Conversation itself is inert.
+Approved 2026-07-25; **revised twice the same day** as the role was clarified. The
+interlocutor is the **main chat interface** — the working session with the best
+model: think, investigate, converge on a plan — and work is created only when the
+operator **blesses** it. Conversation itself is inert. The route path `/steward/*`
+is a **stable API token**; the *displayed* name is configuration (a placeholder the
+user can replace — "Steward" is a stand-in). Most turns produce no plan at all; a
+plan appears only when the conversation warrants work.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/v1/steward/chat` | One conversational turn. **No side effects.** Response `{session_id, reply, plan?}`, where `plan` is a *proposal* — `{id, title, body, acceptance}` — never an action. |
-| `POST /api/v1/steward/handoff` | **The blessing.** Body `{session_id, plan_id}`. Files the issue(s) and returns `{created_issues:[{repo,number,url,label}]}`. The only writing endpoint on this surface. |
+| `POST /api/v1/steward/chat` | One conversational turn. **No side effects.** Response `{session_id, reply, plan?}`. `plan` is a *proposal*, not an action: `{id, title, steps[]}`, each step `{id, title, detail, gate, needs_operator}`. |
+| `POST /api/v1/steward/handoff` | **The blessing.** Body `{session_id, plan_id, step_ids?}`. Files issue(s) for the blessed, non-`needs_operator` steps and returns `{created_issues:[{repo,number,url,label,step_id}]}`. Dispatch is **partial** — `needs_operator` steps are held, never filed. The only writing endpoint on this surface. |
+| `POST /api/v1/steward/revise` | First-class revise. Body `{session_id, plan_id, instruction}`. Amends a proposed plan in-session; still **inert** — returns the updated `plan`, writes nothing. |
 | `GET /api/v1/steward/sessions/{id}` | Turn + plan history, so a UI can rehydrate the thread. |
+
+A **step's `gate`** declares its done-gate the same way a route does (D-GATE): a
+code step is PR-gated (`ci-status` / `test-command`), an operational step is
+Lockbox-gated (`custom-validator`, e.g. `secret exists`). Not every step is a PR.
+A step with `needs_operator: true` is work the interlocutor is holding *for the
+human* — surfaced, never dispatched.
 
 Streaming reuses §4 with one added event, `steward.turn`.
 
 **Invariants:**
 - **Chat never writes.** There is no path from a conversational turn to a state
   change. Work is created only by an explicit operator blessing — not "the model
-  decided to create work" but "the operator approved a plan".
-- The Steward's tools are **read-only** (repo + observability surface). It has no
-  operator verbs — dispatch, retry, cancel, approve, merge remain D-CONTROL and
-  are unreachable here.
+  decided to create work" but "the operator approved a plan". Revise is inert too.
+- The interlocutor's tools are **read-only** (repo + observability surface). It has
+  no operator verbs — dispatch, retry, cancel, approve, merge remain D-CONTROL and
+  are unreachable here. It **proposes**; Cortex distributes; agents do; mechanical
+  gates decide. It is never in the coordination path.
 - A blessing files issues through the same `createLabeledIssueAndRoute` path the
   operator's manual dispatch uses; Cortex then routes deterministically.
-- Issues it files are attributed to the Steward and the originating session.
+- Issues it files are attributed to the interlocutor and the originating session
+  (`created_by: steward`), and carry the originating `step_id`.
 - Status answers are **projections** of this contract, cite task ids, and quote
   the recorded mechanical reason verbatim — never recollection (§6).
 
-*Implementation note:* the Steward runs as a persistent agent (its own model —
+*Implementation note:* the interlocutor runs as a persistent agent (its own model —
 the deep lane), and the gateway proxies `/steward/*` to it. Where the model runs
 is deliberately not part of this contract; the surface above is.
 

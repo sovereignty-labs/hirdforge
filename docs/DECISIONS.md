@@ -146,6 +146,34 @@ Workbench, each earned:
    judges (trivially satisfied by a PR diff; generalizes to all gated roles).
 *2026-07-18.*
 
+**D-INTERLOCUTOR — The main agent is a conversation, not a ticket funnel.** *(Kit,
+2026-07-25, after three corrections to an over-small first design.)* The Phase-4
+agent is the **main chat interface** — a working session with the best model
+available (think Claude/ChatGPT): sometimes all talk, sometimes talk with an
+occasional light task, sometimes hours against a giant codebase. The platform's job
+is to **facilitate that conversation for as long as the model can hold it
+together**, and let the agent deploy work to Cortex and the agents already built.
+Binding points:
+- **Name is a user-replaceable stand-in.** "Steward" (and the mock's "Concierge")
+  are placeholders; the displayed identity is configuration, hardcoded nowhere. The
+  route path `/steward/*` is a stable API token, not the name.
+- **Three execution shapes** chosen per turn: *answer in chat* (no tasks) · *one
+  coder* for a small one-off · *fan-out* where Cortex distributes to one agent or
+  many per how the work decomposes. Not everything becomes a plan; most turns
+  produce no work.
+- **Two task shapes,** both already D-GATE-expressible: **code → PR → CI gate →
+  merge**, and **operational → action → Lockbox gate** (e.g. `secret exists`). A
+  one-off is "like handing OpenCode a task" — often a PR, but Lockbox exists for the
+  simpler operational kind.
+- **It is only ever the head, never the hands.** The big model is too slow to do
+  the action; it talks, converges, and hands off. It is **never in the coordination
+  path** — it proposes, Cortex distributes, agents do, mechanical gates decide. Its
+  tools are read-only (O-PROFILE-enforced); the only write is the operator's
+  blessing.
+- **Session endurance is core, not optional** — see O-M7-SCOPE (reopened for this
+  role). Executed by PHASE4_EXECUTION_SPEC; surface frozen in
+  OBSERVABILITY_CONTRACT §7. *2026-07-25.*
+
 ---
 
 ## Open items
@@ -166,6 +194,17 @@ nothing about real multi-file work; and the pin + announcement remove the
 correctness risk that made it urgent. Revisit with telemetry from a genuinely
 large task (watch `context_compacted` counts and `context_exhaustion`
 terminations). *Owner: Phase 6 or first evidence, whichever comes first.*
+
+**REOPENED 2026-07-25 for the interlocutor (Phase 4).** The deferral rationale
+above — "every task is a short builder run" — is a statement about *builders*, and
+it does not survive the interlocutor's role. Kit's Phase-4 framing: the
+interlocutor is a **working session held for hours** ("facilitate that conversation
+for as long as we can help the model hold it together"). Session endurance is that
+agent's core competency, not an edge case, so trim-and-announce is insufficient
+there. **Split resolution:** the builder-side deferral stands (builders are
+short-lived); the interlocutor gets **real summarization + Seidr continuity** as a
+named Phase-4 requirement (PHASE4 P4.5). Evidence for reopening is the role
+clarification itself, logged here rather than as a silent change of mind.
 
 **O-CI-RUNNER-WEDGE — The single Gitea act_runner can wedge indefinitely and
 stall all CI.** Observed 2026-07-24: a `quality` job hung ~106 min past its
