@@ -13,8 +13,12 @@ import (
 // implementation calls the steward agent over HTTP (P4.6, the gateway proxy);
 // tests inject a stub. Keeping the model behind this interface is what lets the
 // engine be exercised — including its inertness — without live inference.
+//
+// It receives a SessionContext, not the raw turn list: for an hours-long session
+// the engine condenses older turns and pins the active plan, so the conversation
+// survives past the context budget (P4.5 endurance, O-M7-SCOPE reopened).
 type TurnRunner interface {
-	RunTurn(ctx context.Context, sessionID, message string, history []Turn) (string, error)
+	RunTurn(ctx context.Context, sessionID, message string, sc SessionContext) (string, error)
 }
 
 // Clock returns the current time; injectable so tests are deterministic.
@@ -26,15 +30,22 @@ type Clock func() time.Time
 // path: structurally, a chat turn cannot file work. The only write in the whole
 // §7 surface is the operator's blessing (Handoff, P4.3), which lives elsewhere.
 type Engine struct {
-	runner TurnRunner
-	store  *SessionStore
-	now    Clock
+	runner     TurnRunner
+	store      *SessionStore
+	now        Clock
+	summarizer Summarizer // optional; nil = window only, no summary
+	recent     int        // verbatim recent-turn window (endurance)
+	onCompact  func(sessionID string, folded int)
 }
+
+// defaultRecentTurns is how many most-recent turns are threaded verbatim; older
+// turns are folded into a summary while the active plan is pinned.
+const defaultRecentTurns = 12
 
 // NewEngine builds an engine over a turn runner. A nil clock defaults to
 // time.Now.
 func NewEngine(runner TurnRunner) *Engine {
-	return &Engine{runner: runner, store: NewSessionStore(), now: time.Now}
+	return &Engine{runner: runner, store: NewSessionStore(), now: time.Now, recent: defaultRecentTurns}
 }
 
 // WithClock overrides the clock (tests).
@@ -45,13 +56,38 @@ func (e *Engine) WithClock(c Clock) *Engine {
 	return e
 }
 
+// WithSummarizer installs the span summarizer for session endurance (P4.5). The
+// real one calls the deep-lane model; tests inject a stub. Without it the engine
+// still bounds context by windowing, but the older span is dropped rather than
+// summarized.
+func (e *Engine) WithSummarizer(s Summarizer) *Engine {
+	e.summarizer = s
+	return e
+}
+
+// WithRecentWindow overrides how many recent turns are threaded verbatim.
+func (e *Engine) WithRecentWindow(n int) *Engine {
+	if n > 0 {
+		e.recent = n
+	}
+	return e
+}
+
+// OnCompact registers a callback fired whenever the older span is (re)summarized,
+// with the count of turns folded — the loud, observable half of compaction
+// (context_compacted; doctrine: degrade never silently).
+func (e *Engine) OnCompact(f func(sessionID string, folded int)) *Engine {
+	e.onCompact = f
+	return e
+}
+
 // Chat runs one inert conversational turn: consult the model with the session
 // history, parse and strictly validate its output, record the turn, and return
 // it. Every exit but a clean validated turn records NOTHING and files NOTHING —
 // a malformed or hostile model output costs an error the caller can turn into a
 // graceful reply, never a side effect.
 func (e *Engine) Chat(ctx context.Context, sessionID, message string) (ChatOutput, error) {
-	raw, err := e.runner.RunTurn(ctx, sessionID, message, e.store.History(sessionID))
+	raw, err := e.runner.RunTurn(ctx, sessionID, message, e.buildContext(ctx, sessionID))
 	if err != nil {
 		return ChatOutput{}, err
 	}
@@ -178,27 +214,17 @@ func (e *Engine) Handoff(ctx context.Context, sessionID, planID string, stepIDs 
 	return created, nil
 }
 
-// planByID finds a plan the session actually proposed. Walks backward so the
-// latest revision of a plan id wins.
+// planByID finds a plan the session actually proposed, by id (latest revision
+// wins). Read from the durable plan list, so a blessing can act on a plan even
+// after its originating turn was folded away by endurance.
 func (e *Engine) planByID(sessionID, planID string) *Plan {
-	turns := e.store.History(sessionID)
-	for i := len(turns) - 1; i >= 0; i-- {
-		if turns[i].Plan != nil && turns[i].Plan.ID == planID {
-			return turns[i].Plan
-		}
-	}
-	return nil
+	return e.store.PlanByID(sessionID, planID)
 }
 
 // PlanFor returns the most recent plan proposed in a session, if any — the
-// candidate a subsequent blessing (Handoff, P4.3) would act on. It walks history
-// backward so a revised plan supersedes an earlier one.
+// candidate a subsequent blessing (Handoff, P4.3) would act on. A revised plan
+// supersedes an earlier one. Read from the durable plan list, so it survives
+// endurance folding.
 func (e *Engine) PlanFor(sessionID string) *Plan {
-	turns := e.store.History(sessionID)
-	for i := len(turns) - 1; i >= 0; i-- {
-		if turns[i].Plan != nil {
-			return turns[i].Plan
-		}
-	}
-	return nil
+	return e.store.ActivePlan(sessionID)
 }
