@@ -5,19 +5,22 @@ import (
 	"time"
 )
 
-// Turn is one exchange in a Steward conversation, recorded so a UI can rehydrate
-// the thread (§7 GET /steward/sessions/{id}) and so every issue the Steward
-// created is traceable back to the words that caused it.
+// Turn is one exchange in an interlocutor conversation, recorded so a UI can
+// rehydrate the thread (§7 GET /steward/sessions/{id}) and so any plan — and later
+// any issue a blessing files from it — is traceable back to the words that caused
+// it. A turn is inert: it carries at most a PROPOSED plan, never a side effect.
 type Turn struct {
 	At      time.Time `json:"at"`
-	Message string    `json:"message"`         // what the operator said
-	Reply   string    `json:"reply"`           // what the Steward answered
-	Intent  Intent    `json:"intent"`          // how the turn was classified
-	Issue   *Created  `json:"issue,omitempty"` // set only when one was created
+	Message string    `json:"message"`        // what the operator said
+	Reply   string    `json:"reply"`          // what the interlocutor answered
+	Plan    *Plan     `json:"plan,omitempty"` // set only when the turn proposed one (inert until blessed)
 }
 
-// Created is the record of the single side effect a Steward turn may have.
+// Created is the record of one issue a blessing filed from a plan step (§7
+// /steward/handoff). It lives here because a session's history is where the UI
+// traces a dispatched step back to the conversation that produced it.
 type Created struct {
+	StepID string `json:"step_id"`
 	Repo   string `json:"repo"`
 	Number int64  `json:"number"`
 	URL    string `json:"url"`

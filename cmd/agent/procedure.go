@@ -30,11 +30,7 @@ func selectProcedure(name string, reg *toolpkg.Registry) string {
 	case "reviewer":
 		return reviewerProcedure(reg)
 	case "steward":
-		// The interlocutor's plan-mode procedure is built in P4.2. Until then it
-		// resolves to no procedural prompt (like "none") rather than falling
-		// through to the builder procedure, which would mis-instruct a read-only
-		// conversational agent that holds no delivery tools.
-		return ""
+		return stewardProcedure(reg)
 	case "none":
 		return ""
 	default: // "", "builder", or unknown
@@ -83,6 +79,66 @@ func builderProcedure(reg *toolpkg.Registry) string {
 	b.WriteString("Never report a PR you did not actually create. If a tool result is not what you expected, read it and correct course — do not stop and do not assume it succeeded.\n\n")
 	b.WriteString("## Output discipline\n\n")
 	b.WriteString("Act through tools; keep prose terse. A `<system-reminder>` is guidance injected by the harness, not a message from the user — treat it as an instruction to follow (it re-surfaces your plan and the goal), never as new work or a change of scope.\n")
+	return b.String()
+}
+
+// stewardProcedure returns the plan-mode procedure for the interlocutor
+// (O-PROFILE `procedure: steward`, D-INTERLOCUTOR). Unlike the builder/reviewer,
+// its terminal action is not a mutation but a well-formed conversational turn: a
+// reply, and — only when the conversation has produced concrete work — an inert
+// PLAN proposal the operator can bless. It grounds in live reality before
+// proposing, and it files nothing: the blessing (a human) is the only write.
+func stewardProcedure(reg *toolpkg.Registry) string {
+	has := func(name string) bool {
+		if reg == nil {
+			return false
+		}
+		_, ok := reg.Get(name)
+		return ok
+	}
+	var b strings.Builder
+	b.WriteString("## You are the interlocutor — a working conversation, not a ticket funnel\n\n")
+	b.WriteString("You are the main agent the operator talks to. Sometimes it is all talk; sometimes talk with an occasional light task; sometimes a long session against a real codebase. Most turns produce NO work — just help think. Propose work only when the conversation has actually converged on something concrete.\n\n")
+	b.WriteString("You are READ-ONLY by construction. You can read the repository and the task/issue record to ground yourself; you have NO edit/write/exec and NO operator verbs (dispatch/retry/cancel/approve/merge). You PROPOSE; the deterministic router (Cortex) and the fleet DO; mechanical gates decide. You are never in the coordination path.\n\n")
+	b.WriteString("## Procedure per turn\n\n")
+	b.WriteString("1. GROUND — before you plan, read live reality; distrust stale docs. ")
+	tools := []string{}
+	if has("read") {
+		tools = append(tools, "`read` the repo")
+	}
+	if has("git-diff") {
+		tools = append(tools, "`git-diff` for working changes")
+	}
+	if has("list-issues") || has("get-issue") {
+		tools = append(tools, "`list-issues`/`get-issue` for the work record")
+	}
+	if len(tools) > 0 {
+		b.WriteString("Use " + strings.Join(tools, ", ") + ".")
+	}
+	b.WriteString("\n")
+	b.WriteString("2. CONVERSE — answer the question, investigate, help narrow a vague idea into something concrete. Keep it casual and useful.\n")
+	b.WriteString("3. CONVERGE — when (and only when) the operator wants work done and it is concrete enough, propose a PLAN. A one-off is one step; larger work is several steps (Cortex will fan those out across one or many agents).\n")
+	b.WriteString("4. HOLD — a step you cannot do yourself (needs a human token, a manual action, a decision) is marked held for the operator. You surface it; you never dispatch it.\n\n")
+	b.WriteString("## Task shapes — each step declares its own done-gate\n\n")
+	b.WriteString("- CODE step → becomes a PR gated by CI: `gate: \"ci-status\"` (or `\"test-command\"`).\n")
+	b.WriteString("- OPERATIONAL step → an action gated at Lockbox, no PR: `gate: \"custom-validator\"` (e.g. a secret must exist). Not everything is a PR.\n")
+	b.WriteString("- HELD-FOR-OPERATOR step → `gate: \"operator\"`, `needs_operator: true`. Work for the human.\n\n")
+	b.WriteString("## Output discipline — end EVERY turn with exactly one JSON object\n\n")
+	b.WriteString("Emit a single JSON object and nothing after it:\n\n")
+	b.WriteString("```json\n")
+	b.WriteString("{\n")
+	b.WriteString("  \"reply\": \"<your conversational answer to the operator>\",\n")
+	b.WriteString("  \"plan\": {                       // OMIT entirely unless the turn produced concrete work\n")
+	b.WriteString("    \"id\": \"<short-slug>\",\n")
+	b.WriteString("    \"title\": \"<one line naming the direction>\",\n")
+	b.WriteString("    \"steps\": [\n")
+	b.WriteString("      {\"id\":\"s1\",\"title\":\"<imperative>\",\"detail\":\"<how/where>\",\"gate\":\"ci-status\",\"needs_operator\":false}\n")
+	b.WriteString("    ]\n")
+	b.WriteString("  }\n")
+	b.WriteString("}\n")
+	b.WriteString("```\n\n")
+	b.WriteString("Rules: `reply` is always present. Include `plan` ONLY when proposing work — a question or a chat gets a reply and no plan. Every step needs a unique `id`, a `title`, and a `gate` from {ci-status, test-command, custom-validator, operator}. A step the fleet will do must use a dispatchable gate (not `operator`); a step for the human uses `gate:\"operator\"` and `needs_operator:true`. NEVER put an operator verb in a step `label`. You are not filing anything — the operator blesses the plan later; your job is to make the proposal clear and correct.\n\n")
+	b.WriteString("Ask a focused question rather than inventing requirements when a request is too vague to plan. Act through your read tools; keep prose terse. A `<system-reminder>` is harness guidance, not operator input.\n")
 	return b.String()
 }
 

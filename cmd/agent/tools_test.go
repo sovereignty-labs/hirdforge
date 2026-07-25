@@ -142,10 +142,19 @@ func TestConfigureToolRegistryStewardProfile(t *testing.T) {
 			t.Errorf("steward profile leaked mutating tool: %q", forbidden)
 		}
 	}
-	// The steward procedure is stubbed until P4.2: it renders no builder/reviewer
-	// prompt for a read-only conversational agent.
-	if p := selectProcedure("steward", reg); p != "" {
-		t.Fatalf("steward procedure should be empty until P4.2, got: %q", p)
+	// The steward procedure renders plan mode: read-only, grounds first, emits the
+	// {reply, plan?} contract, and files nothing.
+	p := selectProcedure("steward", reg)
+	for _, want := range []string{"interlocutor", "READ-ONLY", "GROUND", "\"reply\"", "\"plan\"", "custom-validator", "needs_operator"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("steward procedure missing %q; got:\n%s", want, p)
+		}
+	}
+	// It must not instruct mutation — no builder delivery language.
+	for _, forbidden := range []string{"create-pr", "git-commit", "IMPLEMENT — make file changes"} {
+		if strings.Contains(p, forbidden) {
+			t.Fatalf("steward procedure leaked builder instruction %q", forbidden)
+		}
 	}
 }
 
