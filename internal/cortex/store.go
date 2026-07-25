@@ -78,6 +78,11 @@ type Store interface {
 	// PrepareRetry bumps attempt and stores the failure context the next
 	// dispatch envelope will carry (D-LESSONS #2). Does not change status.
 	PrepareRetry(taskID string, failureContext []byte) error
+	// SetTimeoutAt refreshes a task's deadline. A retry MUST call this: the
+	// deadline is a bound on ONE sandbox run, so a re-dispatch that inherits the
+	// prior attempt's (already-expired) deadline is reaped by the watchdog the
+	// moment it starts building.
+	SetTimeoutAt(taskID string, at *time.Time) error
 	FindTaskByPR(prRepo string, prNumber int64) (*TaskRecord, error)
 	RecordDecision(d Decision) error
 	ListDecisions(limit int) ([]Decision, error)
@@ -414,6 +419,10 @@ func (s *PGStore) SetReviewer(taskID, reviewer string) error {
 func (s *PGStore) PrepareRetry(taskID string, failureContext []byte) error {
 	return s.execOne(`UPDATE cortex_tasks SET attempt = attempt + 1, failure_context = $1::jsonb, updated_at=NOW() WHERE id=$2`,
 		failureContext, taskID)
+}
+
+func (s *PGStore) SetTimeoutAt(taskID string, at *time.Time) error {
+	return s.execOne(`UPDATE cortex_tasks SET timeout_at=$1, updated_at=NOW() WHERE id=$2`, at, taskID)
 }
 
 func (s *PGStore) FindTaskByPR(prRepo string, prNumber int64) (*TaskRecord, error) {

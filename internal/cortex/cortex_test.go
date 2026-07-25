@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestHandleEventBuildLabel pins P1.1's acceptance: a labeled issue creates a
@@ -485,5 +486,39 @@ func TestSkilledBundleDispatchesDifferentKnowledge(t *testing.T) {
 	}
 	if len(st.Bundle.MemoryScopes) != 1 || st.Bundle.MemoryScopes[0] != "repo:kit/hirdforge" {
 		t.Fatalf("skilled bundle scopes = %v", st.Bundle.MemoryScopes)
+	}
+}
+
+// TestRetryRefreshesDeadline pins a bug seen live: the first revise re-dispatched
+// the task and the watchdog killed it seconds later —
+// "watchdog: task … past timeout (…, status building) — failing" — because
+// PrepareRetry bumped the attempt but left attempt 1's (already-expired)
+// timeout_at in place. The deadline bounds ONE sandbox run, so every retry needs
+// a fresh one.
+func TestRetryRefreshesDeadline(t *testing.T) {
+	cfg := realConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInReview(t, store, "hf-dl", 9)
+
+	// Give it an already-expired deadline, as a first attempt would have.
+	past := time.Now().Add(-30 * time.Minute)
+	if err := store.SetTimeoutAt("hf-dl", &past); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.HandleEvent(Event{
+		Type: EventPRReviewSubmitted, Repo: "kit/hirdforge",
+		ReviewState: "REQUEST_CHANGES", PRNumber: 9, Actor: "kit", ReviewBody: "fix it",
+	}); err != nil {
+		t.Fatalf("revise: %v", err)
+	}
+
+	task, _, _ := store.GetTask("hf-dl")
+	if task.TimeoutAt == nil {
+		t.Fatal("retry left no deadline at all")
+	}
+	if !task.TimeoutAt.After(time.Now()) {
+		t.Fatalf("retry kept an EXPIRED deadline (%s) — the watchdog will reap it immediately", task.TimeoutAt)
 	}
 }
