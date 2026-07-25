@@ -1,6 +1,7 @@
 package cortex
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -350,5 +351,94 @@ func TestHandleEventMergeWalksToValidated(t *testing.T) {
 	}
 	if !sawMerged || !sawValidated {
 		t.Fatalf("expected merged then validated in history: %+v", history)
+	}
+}
+
+// realConfig loads the shipped cortex.yaml — so these tests also prove the live
+// routing config parses and validates (including the P3.2 retry route).
+func realConfig(t *testing.T) *Config {
+	t.Helper()
+	cfg, err := LoadConfig("../../configs/cortex.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig(configs/cortex.yaml): %v", err)
+	}
+	return cfg
+}
+
+// TestGateFailedRetriesWithEvidence pins P3.2: a failed mechanical gate routes
+// back to a builder on the SAME task carrying the gate's own output as failure
+// context — evidence, not a blind retry (D-LESSONS #2).
+func TestGateFailedRetriesWithEvidence(t *testing.T) {
+	cfg := realConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInBuilding(t, store, "hf-gf", "build-on-label")
+	if err := store.Transition("hf-gf", StatusFailed, "gate failed", Cause{Kind: CauseGate}); err != nil {
+		t.Fatal(err)
+	}
+	var requeued []string
+	c.OnTaskQueued = func(_ *Route, id string) { requeued = append(requeued, id) }
+
+	excerpt := "gate_failed:test-command exit 1: ./pkg/tools/x_test.go:12: undefined: Foo"
+	d, err := c.HandleEvent(Event{
+		Type: EventTaskGateFailed, Repo: "kit/hirdforge",
+		RouteID: "build-on-label", TaskID: "hf-gf", GateExcerpt: excerpt,
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if d.MatchedRoute != "retry-on-gate-failed" {
+		t.Fatalf("route = %q, want retry-on-gate-failed", d.MatchedRoute)
+	}
+	if len(requeued) != 1 || requeued[0] != "hf-gf" {
+		t.Fatalf("expected a retry dispatch of the SAME task, got %v", requeued)
+	}
+	task, _, _ := store.GetTask("hf-gf")
+	if task.Attempt != 2 { // Attempt starts at 1 (initial build); the retry bumps it
+		t.Fatalf("attempt = %d, want 2", task.Attempt)
+	}
+	var fc FailureContext
+	if err := json.Unmarshal(task.FailureContext, &fc); err != nil {
+		t.Fatalf("failure context: %v", err)
+	}
+	if fc.Reason != "gate_failed" || !strings.Contains(fc.GateExcerpt, "undefined: Foo") {
+		t.Fatalf("gate evidence not carried: %+v", fc)
+	}
+}
+
+// TestGateFailedRetryCapEscalates pins the bound: past maxBuildAttempts the task
+// stays failed and the decision says so loudly — escalate, never loop.
+func TestGateFailedRetryCapEscalates(t *testing.T) {
+	cfg := realConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInBuilding(t, store, "hf-cap", "build-on-label")
+	if err := store.Transition("hf-cap", StatusFailed, "gate failed", Cause{Kind: CauseGate}); err != nil {
+		t.Fatal(err)
+	}
+	// Burn the budget: drive Attempt (starts at 1) up to the cap.
+	for i := 0; i < maxBuildAttempts-1; i++ {
+		if err := store.PrepareRetry("hf-cap", []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var requeued []string
+	c.OnTaskQueued = func(_ *Route, id string) { requeued = append(requeued, id) }
+
+	d, err := c.HandleEvent(Event{
+		Type: EventTaskGateFailed, Repo: "kit/hirdforge",
+		RouteID: "build-on-label", TaskID: "hf-cap", GateExcerpt: "exit 1",
+	})
+	if err != nil {
+		t.Fatalf("HandleEvent: %v", err)
+	}
+	if len(requeued) != 0 {
+		t.Fatalf("past the cap there must be NO retry dispatch, got %v", requeued)
+	}
+	if !strings.Contains(d.Reason, "EXHAUSTED") {
+		t.Fatalf("decision must escalate loudly, got %q", d.Reason)
+	}
+	if task, _, _ := store.GetTask("hf-cap"); task.Status != StatusFailed {
+		t.Fatalf("task should remain failed, got %q", task.Status)
 	}
 }

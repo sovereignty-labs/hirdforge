@@ -44,6 +44,24 @@ routes:
       bundle: review-default
       artifact: pr-diff
 
+  # Retry-on-failure (P3.2): a FAILED mechanical gate routes back to a builder on
+  # the SAME task, carrying the gate's own output as failure context — evidence,
+  # never a blind retry. Bounded in code by maxBuildAttempts; past the cap the
+  # task stays failed and the decision says so loudly (escalate, never loop).
+  - id: retry-on-gate-failed
+    on:
+      event: task.gate_failed
+      route: build-on-label
+    dispatch:
+      role: builder
+      bundle: build-default
+      carry: gate-excerpt
+    done_gate:
+      type: test-command
+      command: "go build ./... && go vet ./... && go test ./..."
+      timeout_minutes: 20
+    on_gate_passed: review-on-gate
+
   # The sanctioned revise path (D-LESSONS #3) — wired in P1.6.
   - id: revise-on-changes-requested
     on:

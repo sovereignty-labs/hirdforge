@@ -256,7 +256,10 @@ func (d *Dispatcher) failTaskWithEvent(ctx context.Context, route *Route, taskID
 	if err := d.failTask(taskID, reason, cause); err != nil {
 		return err
 	}
-	d.emit(Event{Type: EventTaskGateFailed, RouteID: route.ID, TaskID: taskID})
+	// The reason carries the gate's own output (e.g. "gate_failed:test-command
+	// exit 1: <first line>"); pass it as the excerpt so a retry route can give
+	// the next builder the evidence rather than a bare "it failed" (P3.2).
+	d.emit(Event{Type: EventTaskGateFailed, RouteID: route.ID, TaskID: taskID, GateExcerpt: reason})
 	return nil
 }
 
