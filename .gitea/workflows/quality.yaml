@@ -20,6 +20,30 @@ jobs:
     container: golang:1.25-alpine
 
     steps:
+      # O-CI-RUNNER-WEDGE root cause: the cluster has NO IPv6 egress
+      # ("Network unreachable" to any AAAA), but the public mirrors resolve to an
+      # AAAA record first — so apk/go/pip connect to IPv6 and hang until the step
+      # timeout kills the job (exitcode 143) before any check runs. Pin each
+      # external host to its A record so every fetch goes over IPv4. Resolved at
+      # run time (no hardcoded CDN IPs), and a no-op if IPv6 ever works.
+      - name: Force IPv4 for external fetches
+        run: |
+          resolve4() {
+            # busybox nslookup is always present; getent is not (pre-apk alpine).
+            nslookup -type=A "$1" 2>/dev/null \
+              | awk '/^Address: /{print $2} /^Address [0-9]*: /{print $3}' \
+              | grep -E '^[0-9]+(\.[0-9]+){3}$' | head -1
+          }
+          for h in dl-cdn.alpinelinux.org proxy.golang.org sum.golang.org storage.googleapis.com; do
+            ip=$(resolve4 "$h")
+            if [ -n "$ip" ]; then
+              echo "$ip  $h" >> /etc/hosts
+              echo "pinned $h -> $ip"
+            else
+              echo "WARN: no A record for $h (leaving unpinned)"
+            fi
+          done
+
       - name: Install base packages
         run: timeout 180 apk add --no-cache git ca-certificates bash
 
@@ -119,6 +143,14 @@ jobs:
     container: python:3.12-slim
 
     steps:
+      # Same O-CI-RUNNER-WEDGE guard as the quality job: no IPv6 egress in the
+      # cluster, but these hosts resolve AAAA-first, so apt/pip hang to timeout.
+      # python:3.12-slim is glibc, so gai.conf is the cleanest lever here.
+      - name: Force IPv4 for external fetches
+        run: |
+          printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf
+          echo "gai.conf: IPv4 precedence set"
+
       - name: Install base packages
         run: |
           timeout 180 apt-get update -qq
