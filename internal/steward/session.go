@@ -28,18 +28,61 @@ type Created struct {
 }
 
 // SessionStore keeps conversation history in memory. Deliberately not persisted:
-// a Steward session is a conversation, not lifecycle state — the durable record
-// of anything it DID is the Gitea issue and the Cortex task, both of which
+// an interlocutor session is a conversation, not lifecycle state — the durable
+// record of anything it DID is the Gitea issue and the Cortex task, both of which
 // outlive this process. Losing chat scrollback on restart costs nothing that
-// matters; the task record is the source of truth.
+// matters; the task record is the source of truth. It also tracks what each
+// session filed (for traceability) and which plans have been blessed (so a plan
+// cannot be dispatched twice).
 type SessionStore struct {
 	mu       sync.Mutex
 	sessions map[string][]Turn
+	created  map[string][]Created // per-session record of issues a blessing filed
+	blessed  map[string]bool      // sessionID+"\x00"+planID -> already handed off
 	maxTurns int
 }
 
 func NewSessionStore() *SessionStore {
-	return &SessionStore{sessions: make(map[string][]Turn), maxTurns: 50}
+	return &SessionStore{
+		sessions: make(map[string][]Turn),
+		created:  make(map[string][]Created),
+		blessed:  make(map[string]bool),
+		maxTurns: 50,
+	}
+}
+
+// AppendCreated records an issue a blessing filed, so the session can trace a
+// dispatched step back to the conversation (§7).
+func (s *SessionStore) AppendCreated(sessionID string, c Created) {
+	if sessionID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.created[sessionID] = append(s.created[sessionID], c)
+}
+
+// Created returns a copy of the issues filed in a session.
+func (s *SessionStore) Created(sessionID string) []Created {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src := s.created[sessionID]
+	out := make([]Created, len(src))
+	copy(out, src)
+	return out
+}
+
+// MarkBlessed records that a plan has been handed off, returning false if it was
+// already blessed — the guard against a double-dispatch (e.g. a double-click).
+func (s *SessionStore) MarkBlessed(sessionID, planID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := sessionID + "\x00" + planID
+	if s.blessed[key] {
+		return false
+	}
+	s.blessed[key] = true
+	return true
 }
 
 // Append records a turn, bounding history so one long-lived session cannot grow
