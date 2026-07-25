@@ -478,6 +478,17 @@ func (d *Dispatcher) RunTimeoutWatchdog(ctx context.Context, interval time.Durat
 				if t.TimeoutAt == nil || now.Before(*t.TimeoutAt) {
 					continue
 				}
+				// The build deadline bounds the SANDBOX phases only. Once a task
+				// reaches review/approved/merged it is waiting on external actors —
+				// the reviewer verdict and the human Lockbox merge — not a running
+				// sandbox, so the build deadline must not reap it. (A build deadline
+				// killed an approved task that was correctly waiting for the
+				// operator's Lockbox tap.) A stuck reviewer leg is failed by
+				// DispatchReviewer's own deadline, not here.
+				switch t.Status {
+				case StatusReview, StatusApproved, StatusMerged:
+					continue
+				}
 				log.Printf("cortex: watchdog: task %s past timeout (%s, status %s) — failing", t.ID, t.TimeoutAt.Format(time.RFC3339), t.Status)
 				if err := d.Store.Transition(t.ID, StatusFailed,
 					"timeout: task exceeded its deadline (watchdog)",

@@ -403,3 +403,26 @@ func TestDispatchReviewerAdvancesOnObservedVerdict(t *testing.T) {
 		t.Fatalf("emitted event = %+v, want APPROVED on PR 55", *got)
 	}
 }
+
+// TestWatchdogSkipsApprovedWaitingOnLockbox pins the loop-tail fix: an approved
+// task is waiting on the human Lockbox merge, not a running sandbox, so the build
+// deadline must NOT reap it (a build timeout previously failed an approved task
+// mid-wait, then rejected its later pr.merged as failed->validated).
+func TestWatchdogSkipsApprovedWaitingOnLockbox(t *testing.T) {
+	store := NewMemStore()
+	taskInBuilding(t, store, "hf-appr", "build-on-label")
+	for _, to := range []string{StatusReview, StatusApproved} {
+		if err := store.Transition("hf-appr", to, "step", Cause{Kind: CauseWebhook}); err != nil {
+			t.Fatalf("transition %s: %v", to, err)
+		}
+	}
+	setMemTimeout(store, "hf-appr", time.Now().Add(-time.Minute)) // past the build deadline
+	d := &Dispatcher{Store: store, Sandbox: &fakeSandbox{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	go d.RunTimeoutWatchdog(ctx, 20*time.Millisecond)
+	time.Sleep(300 * time.Millisecond) // give the watchdog several ticks
+	cancel()
+	if tk, _, _ := store.GetTask("hf-appr"); tk.Status != StatusApproved {
+		t.Fatalf("approved task was reaped by the build watchdog: status=%q", tk.Status)
+	}
+}
