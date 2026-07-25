@@ -171,3 +171,74 @@ func TestCortexReadEndpoints(t *testing.T) {
 		}
 	}
 }
+
+// reviewWebhookBody builds a Gitea pull_request_review payload. Gitea sends
+// action "reviewed" for EVERY review; the verdict lives in review.type.
+func reviewWebhookBody(reviewType, reviewer string, pr int64) []byte {
+	payload := map[string]any{
+		"action":     "reviewed",
+		"repository": map[string]any{"full_name": "kit/hirdforge"},
+		"review":     map[string]any{"type": reviewType, "content": "verdict"},
+		"sender":     map[string]any{"login": reviewer},
+		"pull_request": map[string]any{
+			"number": pr,
+			"base":   map[string]any{"ref": "main", "repo": map[string]any{"full_name": "kit/hirdforge"}},
+			"head":   map[string]any{"ref": "agent/x", "repo": map[string]any{"full_name": "kit/hirdforge"}},
+			"user":   map[string]any{"login": "warband"},
+		},
+	}
+	b, _ := json.Marshal(payload)
+	return b
+}
+
+// TestWebhookDistinctReviewVerdictsAreNotDeduped pins a real defect found while
+// closing P3.1: Gitea sends action="reviewed" for every review, so the dedup key
+// (event:action:repo:number) collapsed EVERY verdict on a PR into one — the first
+// review won and every later one was silently dropped inside the dedup window.
+// That swallowed a human REQUEST_CHANGES landing after an agent's APPROVE,
+// leaving the revise route unreachable.
+func TestWebhookDistinctReviewVerdictsAreNotDeduped(t *testing.T) {
+	gw, _ := newCortexTestGateway(t)
+
+	approve := reviewWebhookBody("pull_request_review_approved", "reviewers", 77)
+	if rec := postWebhook(t, gw, "pull_request_review", approve, signBody("s3cret", approve)); rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d", rec.Code)
+	}
+	// A DIFFERENT verdict on the SAME PR, well inside the dedup window.
+	reject := reviewWebhookBody("pull_request_review_rejected", "kit", 77)
+	if rec := postWebhook(t, gw, "pull_request_review", reject, signBody("s3cret", reject)); rec.Code != http.StatusOK {
+		t.Fatalf("reject status = %d", rec.Code)
+	}
+
+	// Both verdicts must have reached Cortex as decisions — the second must not
+	// have been swallowed by dedup.
+	var sawApproved, sawRejected bool
+	for _, d := range gw.cortex.RecentDecisions(20) {
+		switch d.Event.ReviewState {
+		case "APPROVED":
+			sawApproved = true
+		case "REQUEST_CHANGES":
+			sawRejected = true
+		}
+	}
+	if !sawApproved {
+		t.Error("APPROVED verdict never reached Cortex")
+	}
+	if !sawRejected {
+		t.Fatal("REQUEST_CHANGES was DEDUPED away — the revise route is unreachable for a second verdict")
+	}
+
+	// A true re-delivery of the same verdict still dedups.
+	if rec := postWebhook(t, gw, "pull_request_review", reject, signBody("s3cret", reject)); rec.Code != http.StatusOK {
+		t.Fatalf("redelivery status = %d", rec.Code)
+	}
+	n := 0
+	for _, d := range gw.cortex.RecentDecisions(20) {
+		if d.Event.ReviewState == "REQUEST_CHANGES" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("identical re-delivery should dedup, got %d REQUEST_CHANGES decisions", n)
+	}
+}

@@ -78,6 +78,14 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		Repository struct {
 			FullName string `json:"full_name"`
 		} `json:"repository"`
+		// Review identity, used only to keep DISTINCT verdicts on one PR from
+		// deduping into each other (see dedupKey below).
+		Review struct {
+			Type string `json:"type"`
+		} `json:"review"`
+		Sender struct {
+			Login string `json:"login"`
+		} `json:"sender"`
 		PullRequest struct {
 			Number  int64  `json:"number"`
 			Title   string `json:"title"`
@@ -125,6 +133,17 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		Merged:  payload.PullRequest.Merged,
 	}
 	dedupKey := fmt.Sprintf("%s:%s:%s:%d", giteaEvent, strings.TrimSpace(payload.Action), repo, pr.Number)
+	if giteaEvent == "pull_request_review" {
+		// Gitea sends action="reviewed" for EVERY review, so the key above
+		// collapses every verdict on a PR into one — the first review wins and
+		// each later one is silently dropped inside the dedup window. That
+		// swallowed real verdicts: a human REQUEST_CHANGES after the agent's
+		// APPROVE simply vanished, leaving the revise route unreachable.
+		// Distinguish by verdict type + reviewer so genuine re-deliveries still
+		// dedup but distinct verdicts do not.
+		dedupKey = fmt.Sprintf("%s:%s:%s", dedupKey,
+			strings.TrimSpace(payload.Review.Type), strings.TrimSpace(payload.Sender.Login))
+	}
 	if g.shouldSkipWebhookEvent(dedupKey) {
 		log.Printf("webhook: dedup skipped %s", dedupKey)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
