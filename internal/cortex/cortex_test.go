@@ -522,3 +522,39 @@ func TestRetryRefreshesDeadline(t *testing.T) {
 		t.Fatalf("retry kept an EXPIRED deadline (%s) — the watchdog will reap it immediately", task.TimeoutAt)
 	}
 }
+
+// TestReviseFromAlreadyFailedTask pins an edge case seen live: requesting changes
+// on a task that had ALREADY failed (gate failure, or a watchdog reap) aborted
+// with "illegal transition failed->failed", because the revise path
+// unconditionally transitioned to failed before re-dispatching. That task is a
+// legitimate revise target — failed→dispatched is legal — so the retry must run.
+func TestReviseFromAlreadyFailedTask(t *testing.T) {
+	cfg := realConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInReview(t, store, "hf-rf", 12)
+	if err := store.Transition("hf-rf", StatusFailed, "reaped earlier", Cause{Kind: CauseTimeout}); err != nil {
+		t.Fatal(err)
+	}
+
+	var requeued []string
+	c.OnTaskQueued = func(_ *Route, id string) { requeued = append(requeued, id) }
+
+	d, err := c.HandleEvent(Event{
+		Type: EventPRReviewSubmitted, Repo: "kit/hirdforge",
+		ReviewState: "REQUEST_CHANGES", PRNumber: 12, Actor: "kit", ReviewBody: "please fix",
+	})
+	if err != nil {
+		t.Fatalf("revise from failed must not error: %v", err)
+	}
+	if len(requeued) != 1 || requeued[0] != "hf-rf" {
+		t.Fatalf("expected a revise dispatch of the same task, got %v (decision: %s)", requeued, d.Reason)
+	}
+	task, _, _ := store.GetTask("hf-rf")
+	if task.Attempt != 2 {
+		t.Fatalf("attempt = %d, want 2", task.Attempt)
+	}
+	if !strings.Contains(string(task.FailureContext), "please fix") {
+		t.Fatalf("reviewer feedback not carried: %s", task.FailureContext)
+	}
+}
