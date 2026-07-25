@@ -29,6 +29,12 @@ func selectProcedure(name string, reg *toolpkg.Registry) string {
 	switch strings.TrimSpace(name) {
 	case "reviewer":
 		return reviewerProcedure(reg)
+	case "steward":
+		// The interlocutor's plan-mode procedure is built in P4.2. Until then it
+		// resolves to no procedural prompt (like "none") rather than falling
+		// through to the builder procedure, which would mis-instruct a read-only
+		// conversational agent that holds no delivery tools.
+		return ""
 	case "none":
 		return ""
 	default: // "", "builder", or unknown

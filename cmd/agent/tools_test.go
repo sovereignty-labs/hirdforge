@@ -114,6 +114,41 @@ func TestConfigureToolRegistryReviewerProfile(t *testing.T) {
 	}
 }
 
+// TestConfigureToolRegistryStewardProfile pins the interlocutor's read-only
+// capability set: it can read the repo and the issue record, and holds NOTHING
+// that mutates code or the lifecycle. The absence is the security property
+// (O-PROFILE §4, D-INTERLOCUTOR) — the interlocutor proposes; it never does.
+func TestConfigureToolRegistryStewardProfile(t *testing.T) {
+	reg := toolpkg.NewRegistry()
+	configureToolRegistry(reg, toolSetupDeps{
+		workspace:     t.TempDir(),
+		giteaURL:      "http://gitea.test",
+		agentName:     "steward",
+		reviewTracker: newReviewContextTracker("steward", "", 0),
+		enabled:       map[string]bool{"read": true, "git-diff": true, "list-issues": true, "get-issue": true},
+	})
+	for _, want := range []string{"read", "git-diff", "list-issues", "get-issue"} {
+		if _, ok := reg.Get(want); !ok {
+			t.Errorf("steward profile missing read-only tool: %q", want)
+		}
+	}
+	// Nothing that writes code, a PR, an issue, or the lifecycle may be present —
+	// including read-only-adjacent gitea verbs the interlocutor must not hold.
+	for _, forbidden := range []string{
+		"create-pr", "merge-pr", "edit", "write", "exec", "git-commit", "git-clone",
+		"create-issue", "close-issue", "comment", "update-labels", "create-review",
+	} {
+		if _, ok := reg.Get(forbidden); ok {
+			t.Errorf("steward profile leaked mutating tool: %q", forbidden)
+		}
+	}
+	// The steward procedure is stubbed until P4.2: it renders no builder/reviewer
+	// prompt for a read-only conversational agent.
+	if p := selectProcedure("steward", reg); p != "" {
+		t.Fatalf("steward procedure should be empty until P4.2, got: %q", p)
+	}
+}
+
 // TestConfigureToolRegistryGiteaStillRegistersFullSuite ensures gitea opt-in
 // still pulls every gitea tool — only the auto-register-from-peers path
 // changed, not the explicit gitea path.
