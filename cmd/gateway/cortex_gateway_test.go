@@ -242,3 +242,35 @@ func TestWebhookDistinctReviewVerdictsAreNotDeduped(t *testing.T) {
 		t.Fatalf("identical re-delivery should dedup, got %d REQUEST_CHANGES decisions", n)
 	}
 }
+
+// TestWebhookSpecificReviewEventHeaderRoutes pins the P3.1 root cause: Gitea
+// delivers review verdicts under the SPECIFIC header
+// (pull_request_review_approved / _rejected), not the plain
+// "pull_request_review" the subscription is named after. Matching only the exact
+// name dropped every verdict silently — the gateway answered 200 "ignored" and
+// logged nothing, so the revise route looked broken while delivery looked fine.
+func TestWebhookSpecificReviewEventHeaderRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		event string
+		want  string
+	}{
+		{"pull_request_review_rejected", "REQUEST_CHANGES"},
+		{"pull_request_review_approved", "APPROVED"},
+	} {
+		gw, _ := newCortexTestGateway(t)
+		// Payload with an EMPTY review.type — the header alone must carry it.
+		body := reviewWebhookBody("", "kit", 88)
+		if rec := postWebhook(t, gw, tc.event, body, signBody("s3cret", body)); rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d", tc.event, rec.Code)
+		}
+		var got string
+		for _, d := range gw.cortex.RecentDecisions(10) {
+			if d.Event.ReviewState != "" {
+				got = d.Event.ReviewState
+			}
+		}
+		if got != tc.want {
+			t.Errorf("%s: review state = %q, want %q (verdict dropped?)", tc.event, got, tc.want)
+		}
+	}
+}

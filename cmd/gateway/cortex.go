@@ -235,7 +235,12 @@ type giteaReviewPayload struct {
 
 // handleCortexReviewEvent maps a Gitea review webhook to the mechanical
 // pr.review_submitted event. Review content rides as data only.
-func (g *gateway) handleCortexReviewEvent(body []byte) {
+// handleCortexReviewEvent maps a Gitea review webhook to the mechanical
+// pr.review_submitted event. eventHint is the X-Gitea-Event header, which for
+// review events carries the verdict itself (pull_request_review_approved /
+// _rejected) — the payload's review.type is not always populated the same way
+// across Gitea versions, so both are consulted.
+func (g *gateway) handleCortexReviewEvent(body []byte, eventHint string) {
 	if g.cortex == nil {
 		return
 	}
@@ -249,7 +254,7 @@ func (g *gateway) handleCortexReviewEvent(body []byte) {
 	// Match case-insensitively across both the review type and the action so a
 	// verdict is never silently dropped. (Agent reviews are also driven directly
 	// from DispatchReviewer's API observation; this covers human UI reviews.)
-	rt := strings.ToLower(p.Review.Type + " " + p.Action)
+	rt := strings.ToLower(p.Review.Type + " " + p.Action + " " + eventHint)
 	state := ""
 	switch {
 	case strings.Contains(rt, "approved"):
@@ -261,12 +266,12 @@ func (g *gateway) handleCortexReviewEvent(body []byte) {
 		// failure is invisible. (This path silently swallowed a real
 		// REQUEST_CHANGES: Gitea delivered it, the gateway logged nothing, and the
 		// revise route looked broken for hours. Degrade never silently.)
-		log.Printf("cortex: review webhook DROPPED (not a verdict): action=%q review.type=%q on %s#%d",
-			p.Action, p.Review.Type, p.Repository.FullName, p.PullRequest.Number)
+		log.Printf("cortex: review webhook DROPPED (not a verdict): event=%q action=%q review.type=%q on %s#%d",
+			eventHint, p.Action, p.Review.Type, p.Repository.FullName, p.PullRequest.Number)
 		return
 	}
-	log.Printf("cortex: review webhook: action=%q review.type=%q -> %s on %s#%d",
-		p.Action, p.Review.Type, state, p.Repository.FullName, p.PullRequest.Number)
+	log.Printf("cortex: review webhook: event=%q action=%q review.type=%q -> %s on %s#%d",
+		eventHint, p.Action, p.Review.Type, state, p.Repository.FullName, p.PullRequest.Number)
 	ev := cortex.Event{
 		Type:        cortex.EventPRReviewSubmitted,
 		Repo:        p.Repository.FullName,

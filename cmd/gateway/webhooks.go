@@ -68,7 +68,16 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "cortex"})
 		return
 	}
-	if giteaEvent != "pull_request" && giteaEvent != "pull_request_review" {
+	// Gitea delivers review events under the SPECIFIC header —
+	// pull_request_review_approved / _rejected / _comment — not the plain
+	// "pull_request_review" the subscription is named after. Matching only the
+	// exact name silently dropped every verdict here: Gitea delivered, the
+	// gateway answered 200 "ignored", and nothing was ever logged, so the revise
+	// route looked broken while the webhook looked delivered.
+	isReview := strings.HasPrefix(giteaEvent, "pull_request_review")
+	if giteaEvent != "pull_request" && !isReview {
+		// Say what we ignored — an unhandled event must be visible, not silent.
+		log.Printf("webhook: ignoring unhandled gitea event %q", giteaEvent)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ignored"})
 		return
 	}
@@ -149,9 +158,11 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 		return
 	}
-	if giteaEvent == "pull_request_review" {
+	if isReview {
 		// v2 Cortex consumes review verdicts (P1.6); v1 has no review path.
-		g.handleCortexReviewEvent(body)
+		// The header itself carries the verdict for the specific event names, so
+		// pass it through for mapping alongside the payload.
+		g.handleCortexReviewEvent(body, giteaEvent)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 		return
 	}
