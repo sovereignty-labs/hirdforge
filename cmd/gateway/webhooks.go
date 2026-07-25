@@ -162,7 +162,7 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 		// v2 Cortex consumes review verdicts (P1.6); v1 has no review path.
 		// The header itself carries the verdict for the specific event names, so
 		// pass it through for mapping alongside the payload.
-		g.handleCortexReviewEventWithHint(body, giteaEvent)
+		g.handleCortexReviewEvent(body, giteaEvent)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 		return
 	}

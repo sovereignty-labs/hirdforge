@@ -235,18 +235,12 @@ type giteaReviewPayload struct {
 
 // handleCortexReviewEvent maps a Gitea review webhook to the mechanical
 // pr.review_submitted event. Review content rides as data only.
-// handleCortexReviewEvent keeps the original signature for callers/tests that
-// have no header hint.
-func (g *gateway) handleCortexReviewEvent(body []byte) {
-	g.handleCortexReviewEventWithHint(body, "")
-}
-
-// handleCortexReviewEventWithHint maps a Gitea review webhook to the mechanical
+// handleCortexReviewEvent maps a Gitea review webhook to the mechanical
 // pr.review_submitted event. eventHint is the X-Gitea-Event header, which for
 // review events carries the verdict itself (pull_request_review_approved /
 // _rejected) — the payload's review.type is not always populated the same way
 // across Gitea versions, so both are consulted.
-func (g *gateway) handleCortexReviewEventWithHint(body []byte, eventHint string) {
+func (g *gateway) handleCortexReviewEvent(body []byte, eventHint string) {
 	if g.cortex == nil {
 		return
 	}
