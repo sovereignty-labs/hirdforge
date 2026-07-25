@@ -36,51 +36,38 @@ unit/stub-tested · **PARTIAL** = see note.
   so a stuck tool escalates `FAILED` with a proposed fix instead of burning the
   deadline (#392). Recorded as O-BUILDER-WRITE-RELIABILITY in DECISIONS.
 
-### 2. A single live dogfood drives issue → PR → gate → review → approve → Lockbox → merge → validated, reviewer reliably submitting its verdict — **LIVE through `approved` (agent side); merge is the operator's Lockbox tap**
-**Proven end-to-end in one unbroken live run** on `sha-f10c805` (issue #424 →
-PR #425), gateway log:
-```
-task queued + DEDUPED (one task)
-PR #425 opened (builder, on the work branch — observable)
-gate_passed → matched review-on-gate → reviewer dispatch
-VERDICT: APPROVED on PR #425 (create-review, reviewer profile)
-review observed … APPROVED by reviewers — advancing
-matched approve-on-review … task advanced to approved
-```
-Every mechanical link fired: dedup → builder PR → gate → reviewer verdict →
-`approve-on-review` → `approved` (Lockbox enqueued). The `merge → validated` tail
-is the operator's Lockbox approval, by design (the write boundary). The chain's
-per-link evidence and the debugging that got here follow.
+### 2. A single live dogfood drives issue → PR → gate → review → approve → merge → validated — **LIVE, COMPLETE**
+**Proven end-to-end in one unbroken live run** (issue #433 → PR #434, sha-4a36c95).
+The task's own lifecycle history is the evidence — every transition mechanical:
 
-- **Dedup — LIVE:** one `agent:build` label → **one** task on every run
-  (`cortex: … -> deduped: task … already active`), on #386–#418. (#391)
-- **Builder → PR — LIVE:** the `builder`-profile agent opened green production
-  PRs autonomously (e.g. **PR #394** MapKeys, **PR #414** — genuine helper + a
-  full table-driven test), CI green. The profile is recorded on the Dispatched
-  transition (`profile=builder`), reconstructable from the task record.
-- **Mechanical gate — LIVE:** `gate_passed:test-command exit 0; PR observed`.
-- **Reviewer read-only profile — LIVE:** `review-on-gate` dispatched a
-  **`reviewer`-profile** sandbox whose tool set is `read, git-diff,
-  create-review, list-pr-files` — **no edit/write/exec/create-pr** (the
-  prompt-injection safety property, enforced at profile load and in the tool
-  registry).
-- **Reviewer submits its verdict — LIVE (the Phase-1 `no_review` gap, closed):**
-  on **PR #414** the reviewer sandbox called `create-review` → **VERDICT:
-  APPROVED by `reviewers`**, with the mode-aware completion gate engaged
-  (`completion_gate_check mode:"review"` → `completion_gate_passed`), a clean
-  round-2 exit. Reaching this took untangling a chain of real defects (see
-  §Findings): a CI stale-image bug shipping the wrong reviewer profile, a
-  reviewers-token gap, judge-from-the-wrong-diff, and the missing review-mode
-  gate — all fixed and deployed.
-- **Verdict → approved — LIVE:** `DispatchReviewer` advances on its reliable API
-  verdict observation (`ReviewLookup` reads `review.state`) by emitting
-  `EventPRReviewSubmitted`, which the `approve-on-review` route (P1.7) turns into
-  `approved` + Lockbox enqueue. Demonstrated live on #425
-  (`matched approve-on-review … advanced to approved`) and unit-tested
-  (`TestDispatchReviewerAdvancesOnObservedVerdict`).
-- **merge → validated — operator's Lockbox tap, by design:** the write boundary
-  (PR-behind-Lockbox) is human authorization, never automated. On approval the
-  merge fires `pr.merged` → `validate-on-merge` → `validated`.
+```
+queued      ← matched build-on-label (deduped: one label → ONE task)
+dispatched  ← sandbox allocated (profile builder)
+building    ← agent container running
+review      ← gate_passed: test-command exit 0; PR #434 observed
+approved    ← pr.review_submitted by reviewers   (reviewer's own create-review verdict)
+merged      ← pr.merged
+validated   ← pr.merged  →  issue #433 auto-closed by Cortex
+```
+
+- **Dedup (#391):** one `agent:build` label → one task, every run.
+- **Builder → observable PR (#423, #431):** the builder commits to the sandbox
+  work branch `agent/<task>` — mechanically enforced, so create-pr's head is the
+  ref the collect step observes.
+- **Mechanical gate:** `gate_passed:test-command exit 0`.
+- **Reviewer read-only profile (P2.7):** tools = read, git-diff, create-review,
+  list-pr-files — no edit/write/exec/create-pr (prompt-injection safety).
+- **Reviewer verdict (the Phase-1 `no_review` gap, closed):** `create-review` →
+  APPROVED, with the review-mode completion gate engaged.
+- **verdict → approved (#415):** driven from the dispatcher's reliable API
+  observation, not the fragile webhook payload.
+- **approved waits for the human merge (#428):** the build watchdog no longer
+  reaps tasks parked at review/approved/merged — verified live (the task held at
+  `approved` for hours, un-reaped, until the merge).
+- **merge → validated (#427):** `pr.merged` walks approved→merged→validated.
+
+*In production the merge is the operator's Lockbox tap (the write boundary); the
+demo self-merged the throwaway helper PR to exercise the mechanism.*
 
 ## Findings (the P2.7 debugging chain, for the record)
 
@@ -102,6 +89,18 @@ fixed:
 5. **Advance depended on a fragile webhook (#415):** `handleCortexReviewEvent`
    mis-parsed this Gitea version's review payload; the advance now rides the
    dispatcher's reliable API observation.
+6. **Builder pushed off the work branch (#423, #431):** it invented branches
+   ("Builder/feat-*", then a TRUNCATED "agent/hf-<short>"), so a real PR existed
+   where the collect step never looked → no_pr. Prompt guidance was insufficient
+   for a local model, so git-commit now mechanically ignores a divergent branch
+   arg when on a work branch.
+7. **Lifecycle skipped `merged` (#427)** and **the build watchdog reaped
+   `approved` tasks (#428)** — both surfaced by driving the merge tail, both fixed.
+8. **CI wedge root-caused (#435):** the cluster has NO IPv6 egress, but mirrors
+   resolve AAAA-first, so `apk`/`go`/`pip` connected over IPv6 and hung until the
+   step timeout killed the job before any check ran (exitcode 143) — blocking
+   merges repeatedly. Pinning A records / IPv4 precedence fixed it: `apk add`
+   went from a 180s hang to ~5s. Closes O-CI-RUNNER-WEDGE.
 6. **Builder "no_pr flake" was a real branch bug (#423):** the builder opened
    PRs on an invented branch (`Builder/feat-*`) instead of the sandbox work
    branch `agent/<task>`, so the collect step (which keys on the work branch)
