@@ -24,15 +24,13 @@ import (
 // from which Cortex routes deterministically. The engine has no other write path.
 
 // stewardConfig is the deployment-configurable wiring. Model/endpoint are per-role
-// config and collapse to one endpoint for a single-model install (D-INTERLOCUTOR):
-// point AgentURL's agent and InferenceURL at the same lane everything else uses.
+// config and collapse to one for a single-model install (D-INTERLOCUTOR): the
+// summarizer defaults to the interlocutor agent, so one agent serves both.
 type stewardConfig struct {
-	AgentURL       string // A2A base URL of the interlocutor agent (empty = surface disabled)
-	InferenceURL   string // OpenAI-compatible base URL for the fold summarizer
-	InferenceKey   string
-	InferenceModel string
-	DefaultRepo    string // where a blessing files issues
-	DefaultLabel   string // the routing label a code step is filed under
+	AgentURL      string // A2A base URL of the interlocutor agent (empty = surface disabled)
+	SummarizerURL string // A2A base URL of the fold agent (defaults to AgentURL)
+	DefaultRepo   string // where a blessing files issues
+	DefaultLabel  string // the routing label a code step is filed under
 }
 
 // firstNonEmpty returns the first argument that is non-empty after trimming — used
@@ -47,39 +45,75 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// a2aTurnRunner runs one interlocutor turn by sending it to the agent over A2A and
-// polling for the completed result. It implements steward.TurnRunner.
-type a2aTurnRunner struct {
-	url    string
-	client *http.Client
-}
-
-func (r a2aTurnRunner) RunTurn(ctx context.Context, sessionID, message string, sc steward.SessionContext) (string, error) {
-	if strings.TrimSpace(r.url) == "" {
-		return "", fmt.Errorf("steward: no interlocutor agent configured (--steward-url)")
+// runAgentTask sends one task to a persistent agent over A2A and returns its
+// completed output text. This is the ONE place the gateway consults a model — and
+// it does so by delegating to an agent, which is where inference egress lives. The
+// gateway itself is walled off from the inference fabric by NetworkPolicy (and by
+// doctrine — the privileged coordination component holds no model), so anything
+// needing a model, including session summarization, goes through here.
+func runAgentTask(ctx context.Context, url string, client *http.Client, content, from, sessionID string) (string, error) {
+	if strings.TrimSpace(url) == "" {
+		return "", fmt.Errorf("steward: no agent url configured")
 	}
-	body, _ := json.Marshal(taskSendRequest{Content: formatTurnContent(message, sc), From: "gateway-steward", SessionID: sessionID})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(r.url, "/")+"/tasks/send", bytes.NewReader(body))
+	body, _ := json.Marshal(taskSendRequest{Content: content, From: from, SessionID: sessionID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(url, "/")+"/tasks/send", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := r.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("steward agent send %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return "", fmt.Errorf("agent send %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var sent struct {
 		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&sent); err != nil || strings.TrimSpace(sent.ID) == "" {
-		return "", fmt.Errorf("steward agent: no task id in response")
+		return "", fmt.Errorf("agent: no task id in response")
 	}
-	return r.pollResult(ctx, sent.ID)
+	return pollAgentTask(ctx, url, client, sent.ID)
+}
+
+// a2aTurnRunner runs one interlocutor turn by delegating it to the agent over A2A.
+// It implements steward.TurnRunner.
+type a2aTurnRunner struct {
+	url    string
+	client *http.Client
+}
+
+func (r a2aTurnRunner) RunTurn(ctx context.Context, sessionID, message string, sc steward.SessionContext) (string, error) {
+	return runAgentTask(ctx, r.url, r.client, formatTurnContent(message, sc), "gateway-steward", sessionID)
+}
+
+// a2aSummarizer folds older turns into a running summary by delegating to an agent
+// that CAN reach inference (the gateway cannot). It implements steward.Summarizer.
+// A failed fold is logged loudly — the endurance policy retains the turns (no
+// silent loss), but the operator/telemetry must see that a fold did not happen.
+type a2aSummarizer struct {
+	url    string
+	client *http.Client
+}
+
+func (s a2aSummarizer) Fold(ctx context.Context, prior string, older []steward.Turn) (string, error) {
+	var u strings.Builder
+	if strings.TrimSpace(prior) != "" {
+		u.WriteString("Existing summary so far:\n" + prior + "\n\n")
+	}
+	u.WriteString("Fold these additional earlier turns into the summary, preserving concrete facts (names, hosts, numbers, decisions). Reply with ONLY the updated summary prose, no plan:\n")
+	for _, t := range older {
+		fmt.Fprintf(&u, "- Operator: %s\n  You: %s\n", t.Message, t.Reply)
+	}
+	out, err := runAgentTask(ctx, s.url, s.client, u.String(), "gateway-fold", "fold")
+	if err != nil {
+		log.Printf("steward: session fold FAILED (turns retained, no summary this round): %v", err)
+		return "", err
+	}
+	return out, nil
 }
 
 // agentTask is the shape the agent's /tasks/{id} returns: a string status and the
@@ -90,9 +124,9 @@ type agentTask struct {
 	Result string `json:"result"`
 }
 
-// pollResult waits for the agent's task to complete and returns its output text.
-func (r a2aTurnRunner) pollResult(ctx context.Context, taskID string) (string, error) {
-	url := strings.TrimRight(r.url, "/") + "/tasks/" + taskID
+// pollAgentTask waits for an agent's task to complete and returns its output text.
+func pollAgentTask(ctx context.Context, baseURL string, client *http.Client, taskID string) (string, error) {
+	url := strings.TrimRight(baseURL, "/") + "/tasks/" + taskID
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -105,7 +139,7 @@ func (r a2aTurnRunner) pollResult(ctx context.Context, taskID string) (string, e
 		if err != nil {
 			return "", err
 		}
-		resp, err := r.client.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return "", err
 		}
@@ -154,65 +188,6 @@ func formatTurnContent(message string, sc steward.SessionContext) string {
 	}
 	fmt.Fprintf(&b, "Operator: %s", message)
 	return b.String()
-}
-
-// inferenceSummarizer folds older turns into a running summary via an
-// OpenAI-compatible endpoint. It implements steward.Summarizer. The endpoint/model
-// are configuration and may point at a faster lane than the interlocutor's.
-type inferenceSummarizer struct {
-	url, key, model string
-	client          *http.Client
-}
-
-func (s inferenceSummarizer) Fold(ctx context.Context, prior string, older []steward.Turn) (string, error) {
-	if strings.TrimSpace(s.url) == "" {
-		return "", fmt.Errorf("steward: no summarizer inference configured")
-	}
-	var u strings.Builder
-	if strings.TrimSpace(prior) != "" {
-		u.WriteString("Existing summary so far:\n" + prior + "\n\n")
-	}
-	u.WriteString("Fold these additional earlier turns into the summary, preserving concrete facts (names, hosts, numbers, decisions). Return ONLY the updated summary prose:\n")
-	for _, t := range older {
-		fmt.Fprintf(&u, "- Operator: %s\n  You: %s\n", t.Message, t.Reply)
-	}
-	reqBody, _ := json.Marshal(map[string]any{
-		"model":       s.model,
-		"temperature": 0,
-		"max_tokens":  2000, // headroom: a reasoning model spends tokens thinking first
-		"messages": []map[string]string{
-			{"role": "system", "content": "You compress conversation history without losing concrete facts. Answer directly with the summary; keep thinking brief."},
-			{"role": "user", "content": u.String()},
-		},
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.url, "/")+"/v1/chat/completions", bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if strings.TrimSpace(s.key) != "" {
-		req.Header.Set("Authorization", "Bearer "+s.key)
-	}
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("summarizer %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-	var out struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || len(out.Choices) == 0 {
-		return "", fmt.Errorf("summarizer: undecodable response")
-	}
-	return out.Choices[0].Message.Content, nil // empty is handled as a no-fold by the store
 }
 
 // newStewardFiler builds the StepFiler that turns a blessed step into routed work
