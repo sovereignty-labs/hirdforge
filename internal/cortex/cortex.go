@@ -131,6 +131,7 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		if err := c.store.PrepareRetry(task.ID, fc); err != nil {
 			return d, fmt.Errorf("cortex: prepare gate retry: %w", err)
 		}
+		c.refreshDeadline(cfg, route, task.ID)
 		d.TaskID = task.ID
 		d.Reason = fmt.Sprintf("%s -> retry dispatch for task %s (attempt %d) with gate evidence",
 			reason, task.ID, task.Attempt+2)
@@ -156,6 +157,7 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		if err := c.store.PrepareRetry(task.ID, fc); err != nil {
 			return d, fmt.Errorf("cortex: prepare revise: %w", err)
 		}
+		c.refreshDeadline(cfg, route, task.ID)
 		cause := Cause{Kind: CauseWebhook, Detail: map[string]any{"review_state": ev.ReviewState, "reviewer": ev.Actor}}
 		if err := c.store.Transition(task.ID, StatusFailed,
 			fmt.Sprintf("changes_requested by %s on PR #%d — revise dispatch follows", orDash(ev.Actor), ev.PRNumber),
@@ -271,6 +273,22 @@ func (c *Cortex) activeTaskFor(repo string, issue int64, routeID string) (string
 		}
 	}
 	return "", false
+}
+
+// refreshDeadline gives a re-dispatched task a FRESH deadline. The timeout bounds
+// one sandbox run, so a retry that inherits the prior attempt's (long-expired)
+// deadline is reaped by the watchdog the instant it reaches building — observed
+// live: "watchdog: task … past timeout (…, status building) — failing" on the
+// first revise. Best-effort: a failure here is logged, never fatal to the retry.
+func (c *Cortex) refreshDeadline(cfg *Config, route *Route, taskID string) {
+	minutes := effectiveTimeout(cfg, route)
+	if minutes <= 0 {
+		return
+	}
+	at := time.Now().Add(time.Duration(minutes) * time.Minute)
+	if err := c.store.SetTimeoutAt(taskID, &at); err != nil {
+		log.Printf("cortex: WARNING could not refresh deadline for %s: %v", taskID, err)
+	}
 }
 
 func (c *Cortex) recordDecision(d Decision) {

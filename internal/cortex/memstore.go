@@ -163,6 +163,18 @@ func (m *MemStore) PrepareRetry(taskID string, failureContext []byte) error {
 	return nil
 }
 
+func (m *MemStore) SetTimeoutAt(taskID string, at *time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.tasks[taskID]
+	if !ok {
+		return fmt.Errorf("cortex memstore: task %s: not found", taskID)
+	}
+	t.TimeoutAt = at
+	t.UpdatedAt = time.Now()
+	return nil
+}
+
 func (m *MemStore) FindTaskByPR(prRepo string, prNumber int64) (*TaskRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
