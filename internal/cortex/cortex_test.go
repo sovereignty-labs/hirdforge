@@ -442,3 +442,48 @@ func TestGateFailedRetryCapEscalates(t *testing.T) {
 		t.Fatalf("task should remain failed, got %q", task.Status)
 	}
 }
+
+// TestSkilledBundleDispatchesDifferentKnowledge pins P3.4 / O-SKILL-BUNDLE
+// acceptance: two routes with different bundles dispatch agents carrying
+// different skills and memory scopes, provable from the task record — with no
+// code change, only a skill file and a bundle.
+func TestSkilledBundleDispatchesDifferentKnowledge(t *testing.T) {
+	cfg := realConfig(t)
+	store := NewMemStore()
+	c := New(cfg, store)
+
+	plain, err := c.HandleEvent(Event{
+		Type: EventIssueLabeled, Repo: "kit/hirdforge", Label: "agent:build",
+		IssueNumber: 900, IssueTitle: "plain",
+	})
+	if err != nil {
+		t.Fatalf("plain dispatch: %v", err)
+	}
+	skilled, err := c.HandleEvent(Event{
+		Type: EventIssueLabeled, Repo: "kit/hirdforge", Label: "agent:build-skilled",
+		IssueNumber: 901, IssueTitle: "skilled",
+	})
+	if err != nil {
+		t.Fatalf("skilled dispatch: %v", err)
+	}
+	if plain.MatchedRoute != "build-on-label" || skilled.MatchedRoute != "build-with-conventions" {
+		t.Fatalf("routes = %q / %q", plain.MatchedRoute, skilled.MatchedRoute)
+	}
+
+	pt, _, _ := store.GetTask(plain.TaskID)
+	st, _, _ := store.GetTask(skilled.TaskID)
+
+	// Same profile (same capability) — different knowledge and memory scope.
+	if pt.Bundle.Profile != st.Bundle.Profile {
+		t.Fatalf("profiles should match: %q vs %q", pt.Bundle.Profile, st.Bundle.Profile)
+	}
+	if len(pt.Bundle.Skills) != 0 {
+		t.Fatalf("plain bundle should carry no skills, got %v", pt.Bundle.Skills)
+	}
+	if len(st.Bundle.Skills) != 1 || st.Bundle.Skills[0] != "hirdforge/repo-conventions" {
+		t.Fatalf("skilled bundle skills = %v", st.Bundle.Skills)
+	}
+	if len(st.Bundle.MemoryScopes) != 1 || st.Bundle.MemoryScopes[0] != "repo:kit/hirdforge" {
+		t.Fatalf("skilled bundle scopes = %v", st.Bundle.MemoryScopes)
+	}
+}
