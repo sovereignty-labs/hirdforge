@@ -1206,10 +1206,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				})
 				failOpenPending = false
 			}
-			if deps.maxContext > 0 && len(messages)-1 > int(float64(deps.maxContext)*0.8) {
-				trimmed := progressiveTrim(messages[1:], deps.maxContext)
-				messages = append([]message{messages[0]}, trimmed...)
-			}
+			messages = compactIfNeeded(messages, deps.maxContext, deps.agentName, sessionID, taskID)
 			inferenceCtx, cancel := withInferenceTimeout(ctx)
 			resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, deps.toolDefs, deps.inferenceURL, deps.model, deps.apiKey)
 			cancel()
@@ -1355,10 +1352,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 		var xmlToolResults []string
 		insideThink := false
 		streamCtx, cancelStream := withInferenceTimeout(ctx)
-		if deps.maxContext > 0 && len(messages)-1 > int(float64(deps.maxContext)*0.8) {
-			trimmed := progressiveTrim(messages[1:], deps.maxContext)
-			messages = append([]message{messages[0]}, trimmed...)
-		}
+		messages = compactIfNeeded(messages, deps.maxContext, deps.agentName, sessionID, taskID)
 		for evt := range streamOllamaWithContext(streamCtx, messages, nil, deps.inferenceURL, deps.model, deps.apiKey) {
 			if evt.Err != nil {
 				errText := evt.Err.Error()
@@ -1640,10 +1634,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 			resultMsg := "Tool execution results:\n\n" + strings.Join(xmlToolResults, "\n\n")
 			messages = append(messages, message{Role: "user", Content: resultMsg})
 			for i := 0; i < 3; i++ {
-				if deps.maxContext > 0 && len(messages)-1 > int(float64(deps.maxContext)*0.8) {
-					trimmed := progressiveTrim(messages[1:], deps.maxContext)
-					messages = append([]message{messages[0]}, trimmed...)
-				}
+				messages = compactIfNeeded(messages, deps.maxContext, deps.agentName, sessionID, taskID)
 				inferenceCtx, cancel := withInferenceTimeout(ctx)
 				resp, err := callOllamaNonStreamingWithContext(inferenceCtx, messages, deps.toolDefs, deps.inferenceURL, deps.model, deps.apiKey)
 				cancel()

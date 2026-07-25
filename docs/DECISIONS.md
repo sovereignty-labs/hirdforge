@@ -150,6 +150,23 @@ Workbench, each earned:
 
 ## Open items
 
+**O-M7-SCOPE — M7 compaction: the dangerous half is fixed, summarization is
+deferred (P3.3).** The loop always compacted (`progressiveTrim` at ~80% of the
+context budget), but it pinned only `messages[0]` — so on a long TASK-mode run it
+could drop `messages[1]`, *the task statement itself*, leaving the agent with the
+generic procedure but not the requirements. It was also entirely silent: nothing
+logged, and the model was never told history had been dropped, so it reasoned
+from a hole (the silent degradation the doctrine forbids). **Fixed 2026-07-25:**
+the task statement is pinned alongside the system prompt, and every compaction is
+logged (`context_compacted`) AND announced in-context so the agent re-reads
+rather than recalls. **Still deferred:** summarization of the dropped span (true
+M7). Rationale: no evidence of need — every task exercised so far is a
+one-function helper finishing in 2–25 rounds against an 80-round cap, which says
+nothing about real multi-file work; and the pin + announcement remove the
+correctness risk that made it urgent. Revisit with telemetry from a genuinely
+large task (watch `context_compacted` counts and `context_exhaustion`
+terminations). *Owner: Phase 6 or first evidence, whichever comes first.*
+
 **O-CI-RUNNER-WEDGE — The single Gitea act_runner can wedge indefinitely and
 stall all CI.** Observed 2026-07-24: a `quality` job hung ~106 min past its
 `timeout-minutes: 10` — the runner did NOT enforce the job timeout — while the
