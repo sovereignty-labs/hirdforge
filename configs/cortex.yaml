@@ -18,6 +18,18 @@ bundles:
     memory_scopes: []
     profile: reviewer
 
+  # P3.4 — the first bundle that actually loads a skill (O-SKILL-BUNDLE). Same
+  # builder profile as build-default; the ONLY difference is the knowledge it
+  # carries and the Seidr scopes it reads/writes. Adding a skill file to the
+  # personas repo changes this agent's behaviour with no code change — that is
+  # the whole point of the mechanism.
+  build-conventions:
+    skills:
+      - hirdforge/repo-conventions
+    memory_scopes:
+      - repo:kit/hirdforge
+    profile: builder
+
 routes:
   # THE build route: label an issue agent:build and the skeleton runs.
   - id: build-on-label
@@ -43,6 +55,23 @@ routes:
       role: reviewer
       bundle: review-default
       artifact: pr-diff
+
+  # P3.4 — same build flow, but dispatched WITH the repo-conventions skill and a
+  # repo-scoped memory. Proves two routes with different bundles dispatch
+  # measurably different agents, provable from the task record.
+  - id: build-with-conventions
+    on:
+      event: issue.labeled
+      label: agent:build-skilled
+    dispatch:
+      role: builder
+      bundle: build-conventions
+    done_gate:
+      type: test-command
+      command: "go build ./... && go vet ./... && go test ./..."
+      timeout_minutes: 20
+    on_gate_passed: review-on-gate
+    timeout_minutes: 60
 
   # Retry-on-failure (P3.2): a FAILED mechanical gate routes back to a builder on
   # the SAME task, carrying the gate's own output as failure context — evidence,
