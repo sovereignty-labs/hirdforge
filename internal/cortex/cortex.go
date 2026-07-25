@@ -181,6 +181,17 @@ func (c *Cortex) HandleEvent(ev Event) (Decision, error) {
 		}
 		cause := Cause{Kind: CauseWebhook, Detail: map[string]any{"event": ev.Type, "actor": ev.Actor, "review_state": ev.ReviewState}}
 		why := fmt.Sprintf("%s by %s on PR #%d", ev.Type, orDash(ev.Actor), ev.PRNumber)
+		// The lifecycle inserts `merged` between `approved` and `validated`: a
+		// pr.merged means the PR is merged (approved→merged), and the post-merge
+		// close is validated (merged→validated). A single pr.merged event must
+		// walk both — the CI-gated, Lockbox-approved merge IS the validation for
+		// the skeleton (a stricter post-merge validator is a Phase 3 gate).
+		if route.To == StatusValidated && task.Status == StatusApproved {
+			if err := c.store.Transition(task.ID, StatusMerged, why+" — merged", cause); err != nil {
+				d.Reason = fmt.Sprintf("%s -> advance to %s REJECTED at merged: %v", reason, route.To, err)
+				break
+			}
+		}
 		if err := c.store.Transition(task.ID, route.To, why, cause); err != nil {
 			// An advance that violates the lifecycle table is loud, not silent.
 			d.Reason = fmt.Sprintf("%s -> advance to %s REJECTED: %v", reason, route.To, err)

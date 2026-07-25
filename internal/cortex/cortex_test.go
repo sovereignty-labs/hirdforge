@@ -311,3 +311,44 @@ func countActiveForIssue(t *testing.T, store *MemStore, issue int64) int {
 	}
 	return n
 }
+
+// TestHandleEventMergeWalksToValidated pins the P2 loop-tail fix: a pr.merged
+// event on an approved task walks the lifecycle's intermediate `merged` state so
+// the task reaches `validated` (approved→merged→validated), instead of being
+// rejected as an illegal approved→validated transition.
+func TestHandleEventMergeWalksToValidated(t *testing.T) {
+	// The real config carries validate-on-merge (validYAML does not).
+	cfg, err := LoadConfig("../../configs/cortex.yaml")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	store := NewMemStore()
+	c := New(cfg, store)
+	taskInReview(t, store, "hf-val", 7)
+	if _, err := c.HandleEvent(Event{Type: EventPRReviewSubmitted, Repo: "kit/hirdforge", ReviewState: "APPROVED", PRNumber: 7, Actor: "reviewers"}); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	d, err := c.HandleEvent(Event{Type: EventPRMerged, Repo: "kit/hirdforge", PRNumber: 7, Actor: "kit"})
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if d.MatchedRoute != "validate-on-merge" {
+		t.Fatalf("route = %q", d.MatchedRoute)
+	}
+	task, history, _ := store.GetTask("hf-val")
+	if task.Status != StatusValidated {
+		t.Fatalf("final status = %q, want validated", task.Status)
+	}
+	var sawMerged, sawValidated bool
+	for _, h := range history {
+		if h.ToStatus == StatusMerged {
+			sawMerged = true
+		}
+		if h.ToStatus == StatusValidated {
+			sawValidated = true
+		}
+	}
+	if !sawMerged || !sawValidated {
+		t.Fatalf("expected merged then validated in history: %+v", history)
+	}
+}
