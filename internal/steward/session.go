@@ -34,20 +34,30 @@ type Created struct {
 // matters; the task record is the source of truth. It also tracks what each
 // session filed (for traceability) and which plans have been blessed (so a plan
 // cannot be dispatched twice).
+//
+// For endurance (P4.5) it holds only the UNFOLDED tail of turns: older turns are
+// folded into a running summary (FoldOldest) and removed, so an hours-long session
+// stays bounded WITHOUT losing coverage. Proposed plans are kept separately from
+// the turn tail, so a plan survives folding — it can still be pinned into context
+// and blessed after its originating turn has been summarized away.
 type SessionStore struct {
 	mu       sync.Mutex
-	sessions map[string][]Turn
+	sessions map[string][]Turn    // unfolded tail only
+	summary  map[string]string    // running summary of the folded span
+	folded   map[string]int       // count of turns folded into summary
+	plans    map[string][]*Plan   // every plan proposed, kept for pinning + blessing
 	created  map[string][]Created // per-session record of issues a blessing filed
 	blessed  map[string]bool      // sessionID+"\x00"+planID -> already handed off
-	maxTurns int
 }
 
 func NewSessionStore() *SessionStore {
 	return &SessionStore{
 		sessions: make(map[string][]Turn),
+		summary:  make(map[string]string),
+		folded:   make(map[string]int),
+		plans:    make(map[string][]*Plan),
 		created:  make(map[string][]Created),
 		blessed:  make(map[string]bool),
-		maxTurns: 50,
 	}
 }
 
@@ -85,22 +95,21 @@ func (s *SessionStore) MarkBlessed(sessionID, planID string) bool {
 	return true
 }
 
-// Append records a turn, bounding history so one long-lived session cannot grow
-// without limit.
+// Append records a turn in the unfolded tail. A turn's proposed plan is also kept
+// in the durable plan list, so folding the turn away later does not lose the plan.
 func (s *SessionStore) Append(sessionID string, t Turn) {
 	if sessionID == "" {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	turns := append(s.sessions[sessionID], t)
-	if len(turns) > s.maxTurns {
-		turns = turns[len(turns)-s.maxTurns:]
+	s.sessions[sessionID] = append(s.sessions[sessionID], t)
+	if t.Plan != nil {
+		s.plans[sessionID] = append(s.plans[sessionID], t.Plan)
 	}
-	s.sessions[sessionID] = turns
 }
 
-// History returns a copy of a session's turns.
+// History returns a copy of a session's UNFOLDED turns (the recent tail).
 func (s *SessionStore) History(sessionID string) []Turn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -108,4 +117,73 @@ func (s *SessionStore) History(sessionID string) []Turn {
 	out := make([]Turn, len(src))
 	copy(out, src)
 	return out
+}
+
+// FoldFunc condenses newly-aged-out turns into a running summary given the prior
+// summary. Returns the updated summary.
+type FoldFunc func(prior string, older []Turn) (string, error)
+
+// FoldOldest folds every turn beyond keepRecent into the running summary and drops
+// them from the tail, returning how many were folded. It is the incremental heart
+// of endurance: coverage moves into the summary instead of being lost, and the
+// tail stays bounded. On a fold error nothing is dropped (no silent loss) and the
+// error is returned. A no-op (tail already within keepRecent) returns 0.
+func (s *SessionStore) FoldOldest(sessionID string, keepRecent int, fold FoldFunc) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	turns := s.sessions[sessionID]
+	if keepRecent < 0 || len(turns) <= keepRecent {
+		return 0, nil
+	}
+	cut := len(turns) - keepRecent
+	older := turns[:cut]
+	newSummary, err := fold(s.summary[sessionID], older)
+	if err != nil {
+		return 0, err // keep the turns; do not drop coverage on a failed fold
+	}
+	s.summary[sessionID] = newSummary
+	s.folded[sessionID] += len(older)
+	// Retain the tail in a fresh slice so the folded prefix can be GC'd.
+	s.sessions[sessionID] = append([]Turn(nil), turns[cut:]...)
+	return len(older), nil
+}
+
+// Summary returns the running summary of a session's folded span.
+func (s *SessionStore) Summary(sessionID string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.summary[sessionID]
+}
+
+// FoldedCount returns how many turns are folded into the summary.
+func (s *SessionStore) FoldedCount(sessionID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.folded[sessionID]
+}
+
+// ActivePlan returns the most recently proposed plan (pinned across folding), or
+// nil. A revised plan supersedes an earlier one.
+func (s *SessionStore) ActivePlan(sessionID string) *Plan {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ps := s.plans[sessionID]
+	if len(ps) == 0 {
+		return nil
+	}
+	return ps[len(ps)-1]
+}
+
+// PlanByID returns a plan the session proposed, by id (latest wins), or nil. Kept
+// durably so a blessing can act on it even after its turn was folded away.
+func (s *SessionStore) PlanByID(sessionID, planID string) *Plan {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ps := s.plans[sessionID]
+	for i := len(ps) - 1; i >= 0; i-- {
+		if ps[i].ID == planID {
+			return ps[i]
+		}
+	}
+	return nil
 }

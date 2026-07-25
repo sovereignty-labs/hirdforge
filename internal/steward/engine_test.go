@@ -11,13 +11,13 @@ import (
 // inference. It records the history it was handed, to prove the engine threads the
 // conversation through.
 type stubRunner struct {
-	out      string
-	err      error
-	lastHist []Turn
+	out     string
+	err     error
+	lastCtx SessionContext
 }
 
-func (s *stubRunner) RunTurn(_ context.Context, _, _ string, history []Turn) (string, error) {
-	s.lastHist = history
+func (s *stubRunner) RunTurn(_ context.Context, _, _ string, sc SessionContext) (string, error) {
+	s.lastCtx = sc
 	return s.out, s.err
 }
 
@@ -107,7 +107,7 @@ func TestEngineThreadsHistory(t *testing.T) {
 	e := NewEngine(r).WithClock(fixedClock())
 	_, _ = e.Chat(context.Background(), "s", "first")
 	_, _ = e.Chat(context.Background(), "s", "second")
-	if len(r.lastHist) != 1 || r.lastHist[0].Message != "first" {
-		t.Fatalf("engine did not thread history to the runner: %+v", r.lastHist)
+	if len(r.lastCtx.Recent) != 1 || r.lastCtx.Recent[0].Message != "first" {
+		t.Fatalf("engine did not thread history to the runner: %+v", r.lastCtx.Recent)
 	}
 }
