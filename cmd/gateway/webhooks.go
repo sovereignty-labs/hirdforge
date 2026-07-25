@@ -74,7 +74,14 @@ func (g *gateway) handleGiteaWebhook(w http.ResponseWriter, r *http.Request) {
 	// exact name silently dropped every verdict here: Gitea delivered, the
 	// gateway answered 200 "ignored", and nothing was ever logged, so the revise
 	// route looked broken while the webhook looked delivered.
-	isReview := strings.HasPrefix(giteaEvent, "pull_request_review")
+	// Observed on the live Gitea: verdicts arrive as "pull_request_rejected" /
+	// "pull_request_approved" — NOT "pull_request_review_*" (the subscription
+	// name) and not the payload's review.type (which is empty). Accept every
+	// spelling; the header is the only reliable carrier of the verdict.
+	isReview := strings.HasPrefix(giteaEvent, "pull_request_review") ||
+		giteaEvent == "pull_request_approved" ||
+		giteaEvent == "pull_request_rejected" ||
+		giteaEvent == "pull_request_comment"
 	if giteaEvent != "pull_request" && !isReview {
 		// Say what we ignored — an unhandled event must be visible, not silent.
 		log.Printf("webhook: ignoring unhandled gitea event %q", giteaEvent)

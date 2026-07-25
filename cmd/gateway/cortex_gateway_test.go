@@ -254,8 +254,12 @@ func TestWebhookSpecificReviewEventHeaderRoutes(t *testing.T) {
 		event string
 		want  string
 	}{
+		// The subscription-style names…
 		{"pull_request_review_rejected", "REQUEST_CHANGES"},
 		{"pull_request_review_approved", "APPROVED"},
+		// …and the ones the LIVE Gitea actually sends (observed 2026-07-25).
+		{"pull_request_rejected", "REQUEST_CHANGES"},
+		{"pull_request_approved", "APPROVED"},
 	} {
 		gw, _ := newCortexTestGateway(t)
 		// Payload with an EMPTY review.type — the header alone must carry it.
