@@ -20,6 +20,7 @@ package steward
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -107,19 +108,100 @@ const (
 	maxSteps      = 24
 )
 
-// ParseChatOutput decodes a turn's model output. Models wrap JSON in prose or
-// fences often enough that we extract the object rather than demand purity — but
-// the RESULT is validated strictly.
+var fencedBlockRE = regexp.MustCompile("(?s)```(?:json|plan)?\\s*\\n?(.*?)```")
+
+// ParseChatOutput decodes a turn's model output, robust to the two model shapes
+// we must support (D-INTERLOCUTOR: configurable to any model):
+//
+//   - A CAPABLE model may emit one clean JSON object {"reply":..., "plan":...}.
+//   - A CHATTY / reasoning model replies in PROSE and, when proposing work, appends
+//     the plan as a fenced ```json block. Requiring it to JSON-encode its prose
+//     reply is an invariant it cannot hold — it produces unescaped quotes and
+//     duplicate text (observed live on qwen-reserved). So the reply is taken as
+//     prose and never has to be valid JSON; only the optional plan is structured,
+//     and a malformed plan degrades to a reply-only turn (safe — no work).
+//
+// The RESULT is validated strictly by Validate; a plan that parses but is
+// ill-formed is rejected there.
 func ParseChatOutput(raw string) (ChatOutput, error) {
-	var c ChatOutput
-	body := extractJSONObject(raw)
-	if body == "" {
-		return c, fmt.Errorf("steward: no JSON object in model output")
+	// Prefer a plan from a fenced block; the prose around it is the reply.
+	plan, _ := extractFencedPlan(raw)
+	prose := strings.TrimSpace(fencedBlockRE.ReplaceAllString(raw, ""))
+	prose = strings.TrimSpace(stripTrailingJSONEcho(prose))
+
+	// If the reply is prose (the common, robust case) return it with any plan.
+	if prose != "" && !looksLikeBareJSONObject(prose) {
+		return ChatOutput{Reply: prose, Plan: plan}, nil
 	}
-	if err := json.Unmarshal([]byte(body), &c); err != nil {
-		return c, fmt.Errorf("steward: malformed turn output: %w", err)
+
+	// Otherwise the model emitted JSON where prose was expected (a capable model, or
+	// a fenced/bare {reply,plan} object). Try to read a clean {reply,...} from the
+	// whole output or any fenced body; honor the first that carries a reply.
+	for _, cand := range candidateJSON(raw) {
+		var c ChatOutput
+		if err := json.Unmarshal([]byte(cand), &c); err == nil && strings.TrimSpace(c.Reply) != "" {
+			return c, nil
+		}
 	}
-	return c, nil
+	return ChatOutput{}, fmt.Errorf("steward: no usable reply in model output")
+}
+
+// looksLikeBareJSONObject reports whether s is (just) a JSON object — so raw JSON
+// the model failed to make usable is not passed off as a prose reply.
+func looksLikeBareJSONObject(s string) bool {
+	s = strings.TrimSpace(s)
+	return strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")
+}
+
+// candidateJSON returns JSON strings worth trying as a clean ChatOutput: the first
+// balanced object in the raw output, plus each fenced block body.
+func candidateJSON(raw string) []string {
+	var out []string
+	if obj := extractJSONObject(raw); obj != "" {
+		out = append(out, obj)
+	}
+	for _, m := range fencedBlockRE.FindAllStringSubmatch(raw, -1) {
+		if body := strings.TrimSpace(m[1]); body != "" {
+			out = append(out, body)
+		}
+	}
+	return out
+}
+
+// extractFencedPlan returns the first fenced code block that parses as a valid
+// Plan (a title and at least one step). A block that does not parse as a plan is
+// ignored — it is not this turn's plan.
+func extractFencedPlan(raw string) (*Plan, bool) {
+	for _, m := range fencedBlockRE.FindAllStringSubmatch(raw, -1) {
+		body := strings.TrimSpace(m[1])
+		if body == "" {
+			continue
+		}
+		var p Plan
+		if err := json.Unmarshal([]byte(body), &p); err != nil {
+			continue
+		}
+		if strings.TrimSpace(p.Title) != "" && len(p.Steps) > 0 {
+			return &p, true
+		}
+	}
+	return nil, false
+}
+
+// stripTrailingJSONEcho removes a trailing bare JSON object that some models append
+// after their prose (echoing a "{\"reply\":...}" contract). It only strips when the
+// tail begins a `{"reply"`-shaped object, so ordinary prose ending in a brace is
+// left alone.
+func stripTrailingJSONEcho(s string) string {
+	idx := strings.LastIndex(s, "{")
+	if idx < 0 {
+		return s
+	}
+	tail := strings.TrimSpace(s[idx:])
+	if strings.HasPrefix(tail, `{"reply"`) || strings.HasPrefix(tail, `{ "reply"`) || strings.HasPrefix(tail, "{\n") && strings.Contains(tail, `"reply"`) {
+		return s[:idx]
+	}
+	return s
 }
 
 // Validate enforces the turn invariants. A turn always has a reply; a plan, when

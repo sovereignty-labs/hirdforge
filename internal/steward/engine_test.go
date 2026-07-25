@@ -74,8 +74,8 @@ func TestEngineChatProposesPlanWithHeldStep(t *testing.T) {
 // caller turns it into a graceful reply, never a side effect.
 func TestEngineChatRejectsBadOutputWithoutRecording(t *testing.T) {
 	for _, tc := range []struct{ name, out string }{
-		{"no json", "I couldn't decide."},
-		{"no reply", `{"plan":{"id":"x","title":"t","steps":[{"id":"s1","title":"t","gate":"ci-status"}]}}`},
+		{"bare json, no reply", `{"plan":{"id":"x","title":"t","steps":[{"id":"s1","title":"t","gate":"ci-status"}]}}`},
+		{"empty output", "   "},
 		{"fleet step with operator gate", `{"reply":"ok","plan":{"id":"x","title":"t","steps":[{"id":"s1","title":"t","gate":"operator","needs_operator":false}]}}`},
 	} {
 		r := &stubRunner{out: tc.out}
