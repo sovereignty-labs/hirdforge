@@ -89,6 +89,34 @@ The UI never invents state or decisions; it renders this contract. If a surface
 needs data this contract doesn't expose, the contract is extended *here first*
 (stop-and-ask), then the UI consumes it.
 
+## 7. Steward surface (conversational front door — Phase 4)
+
+Approved 2026-07-25. The Steward turns operator prose into a well-formed issue
+and answers "what's happening?" from the surface above.
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/steward/chat` | One conversational turn. Request `{session_id, message}`. Response `{reply, intent, created_issue?}` where `intent ∈ {chat, create_issue, status_query, clarify}` and `created_issue = {repo, number, url, label}` when one was created. |
+| `GET /api/v1/steward/sessions/{id}` | Turn history for one session, so a UI can rehydrate a conversation. |
+
+Streaming reuses §4 with one added event, `steward.turn`.
+
+**Invariants (what keeps an LLM front door compatible with the doctrine):**
+- **The Steward writes issues; it never decides what the system does with them.**
+  It has the authority of a person typing an issue. It creates issues through the
+  existing `POST /cortex/dispatch` path — issue → webhook → deterministic route.
+- It may **not** dispatch, retry, cancel, approve, or merge. Those remain
+  operator verbs (D-CONTROL) and are not reachable from this surface.
+- The model **emits a structured proposal; it does not execute**. The gateway
+  validates the proposal and performs the action in deterministic Go. There is no
+  agent tool-loop on this path, so there is no way for model output to become an
+  action other than "an issue was created".
+- Issues it creates are attributed: the task record carries `created_by: steward`
+  and the session id, so Steward-authored work is distinguishable from
+  operator-authored work.
+- Status answers are **projections of this contract**, never recollection, and
+  must cite task ids. Prose without a citable id is a bug (§6).
+
 ## 6. Observability doctrine (the standing test)
 
 At every point, the operator can name (a) what step each task is on, (b) why it
