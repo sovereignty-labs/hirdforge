@@ -82,10 +82,18 @@ func (r a2aTurnRunner) RunTurn(ctx context.Context, sessionID, message string, s
 	return r.pollResult(ctx, sent.ID)
 }
 
+// agentTask is the shape the agent's /tasks/{id} returns: a string status and the
+// output in `result` (NOT the gateway's richer A2A Task type — the persistent
+// agent server uses this simpler envelope).
+type agentTask struct {
+	Status string `json:"status"`
+	Result string `json:"result"`
+}
+
 // pollResult waits for the agent's task to complete and returns its output text.
 func (r a2aTurnRunner) pollResult(ctx context.Context, taskID string) (string, error) {
 	url := strings.TrimRight(r.url, "/") + "/tasks/" + taskID
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -101,40 +109,23 @@ func (r a2aTurnRunner) pollResult(ctx context.Context, taskID string) (string, e
 		if err != nil {
 			return "", err
 		}
-		var task Task
+		var task agentTask
 		derr := json.NewDecoder(resp.Body).Decode(&task)
 		resp.Body.Close()
 		if derr != nil {
 			return "", derr
 		}
-		switch task.Status.State {
-		case TaskStateCompleted:
-			if txt := taskOutputText(task); strings.TrimSpace(txt) != "" {
-				return txt, nil
+		switch st := strings.ToLower(strings.TrimSpace(task.Status)); {
+		case st == "completed":
+			if strings.TrimSpace(task.Result) != "" {
+				return task.Result, nil
 			}
-			return "", fmt.Errorf("steward agent: completed with empty output")
-		case TaskStateFailed, TaskStateCanceled:
-			return "", fmt.Errorf("steward agent task %s: %s", taskID, task.Status.State)
+			return "", fmt.Errorf("steward agent: completed with empty result")
+		case strings.Contains(st, "fail"), strings.Contains(st, "error"), st == "canceled", st == "cancelled":
+			return "", fmt.Errorf("steward agent task %s: %s", taskID, task.Status)
 		}
 		// submitted / working / input-needed → keep polling until ctx deadline.
 	}
-}
-
-// taskOutputText pulls the agent's final text from a completed task: its artifacts'
-// text parts, falling back to the status message.
-func taskOutputText(t Task) string {
-	var b strings.Builder
-	for _, a := range t.Artifacts {
-		for _, p := range a.Parts {
-			b.WriteString(p.Text)
-		}
-	}
-	if b.Len() == 0 && t.Status.Message != nil {
-		for _, p := range t.Status.Message.Parts {
-			b.WriteString(p.Text)
-		}
-	}
-	return b.String()
 }
 
 // formatTurnContent threads the session context the engine decided to keep — the
