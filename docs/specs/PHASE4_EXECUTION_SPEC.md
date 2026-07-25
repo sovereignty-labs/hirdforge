@@ -62,12 +62,25 @@ Streaming reuses the existing §4 mechanism with one added event,
 
 ## Tasks (ordered)
 
-**P4.1 — The Steward profile (no new contract needed).** A `steward` profile in
-`config/profiles/` (O-PROFILE): tools `read`, `create-issue`, `list-issues`,
-`get-issue` — **no** edit/write/exec/git/merge, the same physical-capability
-argument that makes the reviewer safe. `procedure: steward`. *Acceptance: the
-profile loads; a steward-profile agent provably cannot mutate code or the
-lifecycle (tool-registry test, mirroring the reviewer's).*
+**P4.1 — The Steward turn: structured proposal, deterministic execution.**
+*(Design corrected from the first draft, which specified a sandboxed agent with a
+`create-issue` tool.)* The Steward does **not** run as a tool-loop agent in a
+sandbox. Three reasons, in order of weight:
+
+1. **Safety.** A tool-loop lets the model *act*. Here the model returns a typed
+   proposal — `{intent, reply, issue?}` — and deterministic Go validates it and
+   performs the action. Model output cannot become an action other than "an issue
+   was created", which is the invariant §7 promises. That is strictly stronger
+   than restricting a tool set.
+2. **Fit.** The sandbox exists to isolate agents that touch a repo. The Steward
+   touches no code, so the isolation buys nothing.
+3. **Latency.** A k8s Job per conversational turn is unusable for chat.
+
+So the gateway gains a small inference client and a steward package: prompt →
+structured JSON → validate → act via the existing dispatch path. *Acceptance: a
+malformed or hostile proposal (unknown intent, missing fields, an attempt to name
+a control verb) is rejected by the validator and answered as a clarification —
+never executed.*
 
 **P4.2 — Conversation → issue.** The chat endpoint, a session store, and the
 Steward turn: given prose, either answer conversationally or produce a
