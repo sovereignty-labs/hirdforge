@@ -5,23 +5,85 @@ import (
 	"testing"
 )
 
-func TestParseChatOutputExtractsFromProse(t *testing.T) {
-	// Models wrap JSON in fences and commentary; the object must still be found.
-	raw := "Sure!\n```json\n{\"reply\":\"hello\"}\n```\nHope that helps."
+func TestParseChatOutputCleanJSON(t *testing.T) {
+	// A capable model may emit one clean JSON object; honor it verbatim.
+	c, err := ParseChatOutput(`{"reply":"hello"}`)
+	if err != nil || c.Reply != "hello" || c.Plan != nil {
+		t.Fatalf("clean JSON reply: %+v %v", c, err)
+	}
+	// A fenced whole-{reply} object with no prose is still usable.
+	if c2, err := ParseChatOutput("```json\n{\"reply\":\"fenced hi\"}\n```"); err != nil || c2.Reply != "fenced hi" {
+		t.Fatalf("fenced reply object: %+v %v", c2, err)
+	}
+	// Nested braces inside strings must not confuse the extractor.
+	if c3, err := ParseChatOutput(`{"reply":"use {\"a\":1} like this"}`); err != nil || !strings.Contains(c3.Reply, `{"a":1}`) {
+		t.Fatalf("nested-brace parse failed: %+v %v", c3, err)
+	}
+	// Plain prose with no JSON at all is now a valid reply-only turn.
+	if c4, err := ParseChatOutput("no json here, just talking"); err != nil || c4.Reply != "no json here, just talking" {
+		t.Fatalf("prose reply: %+v %v", c4, err)
+	}
+	// Empty output has no usable reply.
+	if _, err := ParseChatOutput("   "); err == nil {
+		t.Fatal("empty output must error")
+	}
+}
+
+// A chatty/reasoning model replies in prose (no JSON wrapper); the whole prose is
+// the reply. This is the qwen-reserved shape that broke the strict parser.
+func TestParseChatOutputAcceptsProseReply(t *testing.T) {
+	raw := "Depends on what you mean! If it's software, the \"weather\" is usually coffee-fueled. What's your build scene?"
+	c, err := ParseChatOutput(raw)
+	if err != nil {
+		t.Fatalf("prose reply rejected: %v", err)
+	}
+	if c.Plan != nil || !strings.Contains(c.Reply, "coffee-fueled") {
+		t.Fatalf("prose not taken as reply: %+v", c)
+	}
+}
+
+// A trailing JSON echo (some models append "{\"reply\":...}" after their prose) is
+// stripped so the reply is the clean prose, not a duplicate.
+func TestParseChatOutputStripsTrailingJSONEcho(t *testing.T) {
+	raw := "Here's my answer to you.\n{\"reply\":\"Here's my answer to you.\"}"
 	c, err := ParseChatOutput(raw)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if c.Reply != "hello" || c.Plan != nil {
-		t.Fatalf("parsed = %+v", c)
+	if strings.Count(c.Reply, "Here's my answer") != 1 {
+		t.Fatalf("trailing JSON echo not stripped: %q", c.Reply)
 	}
-	// Nested braces inside strings must not confuse the extractor.
-	raw2 := `{"reply":"use {\"a\":1} like this"}`
-	if c2, err := ParseChatOutput(raw2); err != nil || !strings.Contains(c2.Reply, `{"a":1}`) {
-		t.Fatalf("nested-brace parse failed: %+v %v", c2, err)
+}
+
+// Prose reply plus a plan in a fenced ```json block: reply is the prose, plan is
+// parsed from the fence.
+func TestParseChatOutputProsePlusFencedPlan(t *testing.T) {
+	raw := "Sure, here's how I'd do it:\n\n```json\n{\"id\":\"tls\",\"title\":\"Serve over TLS\",\"steps\":[{\"id\":\"s1\",\"title\":\"cert\",\"gate\":\"custom-validator\",\"needs_operator\":false}]}\n```\n\nSound good?"
+	c, err := ParseChatOutput(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
-	if _, err := ParseChatOutput("no json here"); err == nil {
-		t.Fatal("output with no JSON object must error")
+	if c.Plan == nil || c.Plan.ID != "tls" || len(c.Plan.Steps) != 1 {
+		t.Fatalf("fenced plan not parsed: %+v", c.Plan)
+	}
+	if !strings.Contains(c.Reply, "here's how I'd do it") || strings.Contains(c.Reply, "```") {
+		t.Fatalf("reply should be the prose with the fence removed: %q", c.Reply)
+	}
+}
+
+// A malformed plan block (unescaped quotes) degrades to a reply-only turn — safe,
+// no work — rather than failing the whole turn.
+func TestParseChatOutputMalformedPlanDegradesToReply(t *testing.T) {
+	raw := "Here's the idea.\n```json\n{\"id\":\"x\",\"title\":\"the \"broken\" plan\",\"steps\":[]}\n```"
+	c, err := ParseChatOutput(raw)
+	if err != nil {
+		t.Fatalf("should not error, should degrade: %v", err)
+	}
+	if c.Plan != nil {
+		t.Fatalf("malformed plan must not survive as a plan: %+v", c.Plan)
+	}
+	if !strings.Contains(c.Reply, "Here's the idea") {
+		t.Fatalf("reply lost: %q", c.Reply)
 	}
 }
 

@@ -145,7 +145,7 @@ func TestConfigureToolRegistryStewardProfile(t *testing.T) {
 	// The steward procedure renders plan mode: read-only, grounds first, emits the
 	// {reply, plan?} contract, and files nothing.
 	p := selectProcedure("steward", reg)
-	for _, want := range []string{"interlocutor", "READ-ONLY", "GROUND", "\"reply\"", "\"plan\"", "custom-validator", "needs_operator"} {
+	for _, want := range []string{"interlocutor", "READ-ONLY", "GROUND", "PROSE", "custom-validator", "needs_operator"} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("steward procedure missing %q; got:\n%s", want, p)
 		}

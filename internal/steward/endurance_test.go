@@ -128,3 +128,28 @@ type failSummarizer struct{}
 func (failSummarizer) Fold(context.Context, string, []Turn) (string, error) {
 	return "", fmt.Errorf("model unreachable")
 }
+
+// An EMPTY summary (no error) — a reasoning model that spent its whole budget
+// thinking and returned no content — must be treated as a failed fold: turns are
+// retained, nothing is dropped, no coverage lost. (Regression: FoldOldest used to
+// drop the span and leave the summary empty.)
+func TestEnduranceEmptySummaryLosesNothing(t *testing.T) {
+	r := &stubRunner{out: `{"reply":"ok"}`}
+	e := NewEngine(r).WithClock(fixedClock()).WithSummarizer(emptySummarizer{}).WithRecentWindow(4)
+	drive(t, e, 12)
+	if r.lastCtx.Folded != 0 {
+		t.Fatalf("empty summary must fold nothing; folded=%d", r.lastCtx.Folded)
+	}
+	if r.lastCtx.Summary != "" {
+		t.Fatalf("must not record an empty summary: %q", r.lastCtx.Summary)
+	}
+	if len(r.lastCtx.Recent) <= 4 {
+		t.Fatalf("turns must be retained when the summary is empty; recent=%d", len(r.lastCtx.Recent))
+	}
+}
+
+type emptySummarizer struct{}
+
+func (emptySummarizer) Fold(context.Context, string, []Turn) (string, error) {
+	return "   ", nil // whitespace only — no real content
+}

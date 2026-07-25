@@ -1,6 +1,7 @@
 package steward
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -140,6 +141,12 @@ func (s *SessionStore) FoldOldest(sessionID string, keepRecent int, fold FoldFun
 	newSummary, err := fold(s.summary[sessionID], older)
 	if err != nil {
 		return 0, err // keep the turns; do not drop coverage on a failed fold
+	}
+	// An empty summary is a failed fold too (e.g. a reasoning model that spent its
+	// whole budget thinking and returned no content). Dropping turns here would
+	// lose coverage silently — so keep them until a real summary comes back.
+	if strings.TrimSpace(newSummary) == "" {
+		return 0, nil
 	}
 	s.summary[sessionID] = newSummary
 	s.folded[sessionID] += len(older)
