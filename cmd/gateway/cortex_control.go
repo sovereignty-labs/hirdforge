@@ -195,3 +195,42 @@ func makeSandboxDestroyer(client *sandbox.K8sClient, namespace string) func(stri
 		}
 	}
 }
+
+// createLabeledIssueAndRoute is the ONE path from "someone wants work done" to a
+// routed task: create the issue, label it, and fire the routing event. Gitea does
+// not emit a webhook for label changes made through the API, so this owns its own
+// trigger. The operator's manual dispatch and (Phase 4) the Steward's blessed
+// handoff both go through here, so the two entry points cannot drift apart.
+func (g *gateway) createLabeledIssueAndRoute(ctx context.Context, repo, title, body, label, createdBy string) (int64, error) {
+	_ = ctx
+	issueBody, _ := json.Marshal(map[string]any{"title": title, "body": body})
+	resp, err := giteaRequest(http.DefaultClient, http.MethodPost, g.giteaURL, g.giteaToken,
+		fmt.Sprintf("/api/v1/repos/%s/issues", repo), strings.NewReader(string(issueBody)))
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	var issue struct {
+		Number int64 `json:"number"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&issue)
+	if resp.StatusCode != http.StatusCreated || issue.Number == 0 {
+		return 0, fmt.Errorf("gitea issue create: status %d", resp.StatusCode)
+	}
+	labelBody, _ := json.Marshal(map[string]any{"labels": []string{label}})
+	if lresp, lerr := giteaRequest(http.DefaultClient, http.MethodPost, g.giteaURL, g.giteaToken,
+		fmt.Sprintf("/api/v1/repos/%s/issues/%d/labels", repo, issue.Number), strings.NewReader(string(labelBody))); lerr == nil {
+		_ = lresp.Body.Close()
+	}
+	log.Printf("cortex: %s dispatch -> issue %s#%d labeled %s", createdBy, repo, issue.Number, label)
+
+	ev := cortex.Event{
+		Type: cortex.EventIssueLabeled, Repo: repo, Label: label,
+		IssueNumber: issue.Number, IssueTitle: title, IssueBody: body,
+		IssueLabels: []string{label},
+	}
+	if _, herr := g.cortex.HandleEvent(ev); herr != nil {
+		log.Printf("cortex: ERROR routing %s-created issue %s#%d: %v", createdBy, repo, issue.Number, herr)
+	}
+	return issue.Number, nil
+}

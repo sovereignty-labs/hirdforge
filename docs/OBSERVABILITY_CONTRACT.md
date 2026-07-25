@@ -89,33 +89,37 @@ The UI never invents state or decisions; it renders this contract. If a surface
 needs data this contract doesn't expose, the contract is extended *here first*
 (stop-and-ask), then the UI consumes it.
 
-## 7. Steward surface (conversational front door — Phase 4)
+## 7. Steward surface (plan mode — Phase 4)
 
-Approved 2026-07-25. The Steward turns operator prose into a well-formed issue
-and answers "what's happening?" from the surface above.
+Approved 2026-07-25; **revised the same day** when the role was clarified: the
+Steward is the main chat interface — think with the best model, investigate,
+converge on a plan — and work is created only when the operator **blesses** that
+plan. Conversation itself is inert.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/v1/steward/chat` | One conversational turn. Request `{session_id, message}`. Response `{reply, intent, created_issue?}` where `intent ∈ {chat, create_issue, status_query, clarify}` and `created_issue = {repo, number, url, label}` when one was created. |
-| `GET /api/v1/steward/sessions/{id}` | Turn history for one session, so a UI can rehydrate a conversation. |
+| `POST /api/v1/steward/chat` | One conversational turn. **No side effects.** Response `{session_id, reply, plan?}`, where `plan` is a *proposal* — `{id, title, body, acceptance}` — never an action. |
+| `POST /api/v1/steward/handoff` | **The blessing.** Body `{session_id, plan_id}`. Files the issue(s) and returns `{created_issues:[{repo,number,url,label}]}`. The only writing endpoint on this surface. |
+| `GET /api/v1/steward/sessions/{id}` | Turn + plan history, so a UI can rehydrate the thread. |
 
 Streaming reuses §4 with one added event, `steward.turn`.
 
-**Invariants (what keeps an LLM front door compatible with the doctrine):**
-- **The Steward writes issues; it never decides what the system does with them.**
-  It has the authority of a person typing an issue. It creates issues through the
-  existing `POST /cortex/dispatch` path — issue → webhook → deterministic route.
-- It may **not** dispatch, retry, cancel, approve, or merge. Those remain
-  operator verbs (D-CONTROL) and are not reachable from this surface.
-- The model **emits a structured proposal; it does not execute**. The gateway
-  validates the proposal and performs the action in deterministic Go. There is no
-  agent tool-loop on this path, so there is no way for model output to become an
-  action other than "an issue was created".
-- Issues it creates are attributed: the task record carries `created_by: steward`
-  and the session id, so Steward-authored work is distinguishable from
-  operator-authored work.
-- Status answers are **projections of this contract**, never recollection, and
-  must cite task ids. Prose without a citable id is a bug (§6).
+**Invariants:**
+- **Chat never writes.** There is no path from a conversational turn to a state
+  change. Work is created only by an explicit operator blessing — not "the model
+  decided to create work" but "the operator approved a plan".
+- The Steward's tools are **read-only** (repo + observability surface). It has no
+  operator verbs — dispatch, retry, cancel, approve, merge remain D-CONTROL and
+  are unreachable here.
+- A blessing files issues through the same `createLabeledIssueAndRoute` path the
+  operator's manual dispatch uses; Cortex then routes deterministically.
+- Issues it files are attributed to the Steward and the originating session.
+- Status answers are **projections** of this contract, cite task ids, and quote
+  the recorded mechanical reason verbatim — never recollection (§6).
+
+*Implementation note:* the Steward runs as a persistent agent (its own model —
+the deep lane), and the gateway proxies `/steward/*` to it. Where the model runs
+is deliberately not part of this contract; the surface above is.
 
 ## 6. Observability doctrine (the standing test)
 

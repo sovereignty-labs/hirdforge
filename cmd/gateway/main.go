@@ -24,7 +24,6 @@ import (
 
 	"git.hirdforge.com/kit/hirdforge/internal/cortex"
 	"git.hirdforge.com/kit/hirdforge/internal/profile"
-	"git.hirdforge.com/kit/hirdforge/internal/steward"
 	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
@@ -338,7 +337,6 @@ type gateway struct {
 	injections           map[string][]InjectionMessage // keyed by agent name
 	pausedAgents         map[string]bool
 	webhookSecret        string
-	steward              *steward.Engine
 	taskRepo             string
 	giteaURL             string
 	giteaToken           string
@@ -1583,23 +1581,6 @@ func main() {
 			gw.broadcastPayload(map[string]any{"type": "cortex.decision", "decision": d})
 		}
 		log.Printf("cortex: enabled: %d routes from %s", len(cfg.Routes), path)
-		// Phase 4 §7: the Steward front door. It proposes; the gateway decides.
-		// Enabled only alongside Cortex, since its one side effect (file an
-		// issue) is meaningless without a router to pick the issue up.
-		gw.steward = &steward.Engine{
-			Infer: &stewardInference{
-				url:    strings.TrimSpace(*cortexInferenceURL),
-				model:  strings.TrimSpace(*cortexModel),
-				apiKey: strings.TrimSpace(*cortexInferenceKey),
-				client: &http.Client{Timeout: 2 * time.Minute},
-			},
-			Issues:      &stewardIssues{g: gw},
-			Status:      &stewardStatus{g: gw},
-			Sessions:    steward.NewSessionStore(),
-			DefaultRepo: cfg.Defaults.Repo,
-			BuildLabel:  "agent:build",
-		}
-		log.Printf("steward: enabled (repo=%s label=agent:build)", cfg.Defaults.Repo)
 		// O-PROFILE: load the harness profiles the dispatcher resolves bundles
 		// against. A load failure disables dispatch LOUDLY (queued tasks stay
 		// visibly queued) rather than dispatching an unconfigured loop.
@@ -1715,7 +1696,6 @@ func main() {
 	registerCortexRoutes(mux, gw)
 	registerCortexInternalRoutes(mux, gw, strings.TrimSpace(*cortexMergeSecret))
 	registerCortexControlRoutes(mux, gw)
-	registerStewardRoutes(mux, gw)
 	go func() {
 		time.Sleep(10 * time.Second)
 		gw.ensureGiteaWebhooks()

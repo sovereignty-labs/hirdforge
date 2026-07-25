@@ -5,102 +5,107 @@
 to `HIRDFORGE_V2_PRD.md` (Phase 4), `OBSERVABILITY_CONTRACT.md`, and
 `LOOP_SPEC.md`.
 
-## Goal
+## Goal — plan mode, then a blessed handoff
 
-Give the platform a **conversational front door**: the operator says what they
-want in prose, and a Steward agent turns it into a well-formed issue that the
-deterministic router picks up exactly as it would any other issue — plus answers
-"what's happening?" from the observability surface.
+**Corrected 2026-07-25 after Kit clarified the role.** The first draft built a
+prose-to-issue translator: single-shot, no tools, on the local worker model. That
+is too small. The Steward is the **main chat interface** — the place you think
+with the best model available, investigate, and turn ideas into action.
 
-Per D-BRAND the role is **Steward** (was Concierge). Nothing of it exists yet;
-this is a from-scratch build.
+The shape, borrowed from what KWS prototyped (OWUI chat on the deep lane →
+narrowed to a plan → handed off to omniagent) and from plan mode in tools like
+OpenCode:
+
+1. **Chat freely** with a big model. Casual, exploratory, tool-assisted: it can
+   read the repo, query task records, and dig into a question with you.
+2. **Converge on a plan.** The Steward proposes concrete work — what to change
+   and how you would know it is done.
+3. **You bless it.** An explicit human action, not a model decision.
+4. **Handoff to Cortex.** The blessing files the issue(s); from there the
+   deterministic router does what it always does.
+
+The blessing is the whole point. Conversation has **no side effects** — the
+Steward cannot file anything by deciding to. Work is created only when the
+operator approves a plan, which is both what Kit asked for and stronger
+doctrinally than the first draft: not "the model decided to create work" but
+"the operator approved a plan and the system executed it deterministically".
 
 ## The doctrine question, answered up front
 
 A Steward is an LLM, and the charter forbids models in the coordination path. It
-is safe for exactly one reason, which every task below preserves:
+stays safe because:
 
-> **The Steward writes issues; it never decides what the system does with them.**
+- **Chat is inert.** A conversational turn changes nothing. There is no path from
+  model output to a state change without a human blessing.
+- **Its tools are read-only.** Investigation means reading the repo and querying
+  the observability surface — the reviewer's proven "physically cannot mutate"
+  pattern (O-PROFILE), not a promise to behave.
+- **The blessing is mechanical.** It takes an agreed plan and calls the same
+  `createLabeledIssueAndRoute` path the operator's manual dispatch uses. Cortex
+  then routes deterministically, as for any other issue.
 
-It has the authority of a person typing an issue — no more. It cannot dispatch,
-route, gate, approve, or merge. It creates an issue through the **existing**
-`POST /api/v1/cortex/dispatch` path (create labeled issue → Gitea webhook →
-Cortex routes it deterministically). If the Steward hallucinates, the blast
-radius is a badly-worded issue, which the operator can close — never a wrong
-state transition. Status answers are **read-only projections** of the
-observability contract, never the Steward's recollection.
+## Task 0 — the contract (STOP-AND-ASK) — §7 revised
 
-## Task 0 — the contract extension (STOP-AND-ASK, before code)
-
-`OBSERVABILITY_CONTRACT.md` §5 is explicit: *"If a surface needs data this
-contract doesn't expose, the contract is extended here first (stop-and-ask), then
-the UI consumes it."* The Steward is a new surface, so it goes in the contract
-before it goes in code — and Phase 5's UI then inherits it rather than inventing
-its own chat surface.
-
-**Proposed §7 — Steward surface (conversational front door):**
+§7 was approved for the first design; plan mode changes its shape, so the
+revision is called out here rather than slipped in:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/v1/steward/chat` | One conversational turn. Request: `{session_id, message}`. Response: `{reply, intent, created_issue?}` where `intent ∈ {chat, create_issue, status_query}` and `created_issue = {repo, number, url, label}` when one was created. |
-| `GET /api/v1/steward/sessions/{id}` | The turn history of one session (for the UI to rehydrate a conversation). |
+| `POST /api/v1/steward/chat` | One conversational turn. **No side effects.** Response `{reply, plan?}` — `plan` is a *proposal*, not an action. |
+| `POST /api/v1/steward/handoff` | **The blessing.** Body `{session_id, plan_id}`. Files the issue(s) and returns `{created_issues:[...]}`. The ONLY writing endpoint. |
+| `GET /api/v1/steward/sessions/{id}` | Turn + plan history, so a UI can rehydrate the thread. |
 
-Streaming reuses the existing §4 mechanism with one added event,
-`steward.turn`, so the UI can render replies live rather than polling.
+Invariants: chat never writes; only an explicit handoff does. The Steward has no
+operator verbs (dispatch/retry/cancel/approve/merge). Issues it files are
+attributed to the Steward and the session. Status answers project the
+observability surface, never recollection.
 
-**Invariants the contract must state:**
-- The Steward may create issues and read the observability surface. It may
-  **not** dispatch, retry, cancel, approve, or merge — those stay operator verbs
-  (D-CONTROL).
-- Every issue it creates records `created_by: steward` and the session id, so a
-  Steward-authored task is distinguishable from an operator-authored one in the
-  task record.
-- A status answer must cite task ids; the UI links them. Prose without a citable
-  id is a bug (§6 doctrine: everything explainable).
+## Architecture — a persistent agent, not gateway code
 
-*Awaiting Kit's approval before P4.2+ code.*
+*(Also corrected: the first draft put the turn engine inside the gateway. Wrong
+home.)* The Steward runs as a **persistent agent deployment** — `cmd/agent` in
+its existing server mode, like the chuck/ragnar/freya pods — with a `steward`
+profile. Reasons:
+
+- **It needs a real tool loop** to investigate, which is what the agent runtime
+  already is. The gateway is privileged infrastructure, not an agent runtime.
+- **Its own model.** The Steward points at the **deep lane** (the biggest model
+  available), independent of the local worker the builders use. Persistent agents
+  already do this (ragnar runs on an external API).
+- **No security widening.** `gateway-policy` already permits egress to agents on
+  `:8081`, and agents already have their own inference egress. The gateway-hosted
+  design would have required opening the gateway — the most privileged
+  component — to the inference fabric.
+
+The gateway's `/steward/*` endpoints become a **thin proxy** to that agent, so
+the §7 surface (and the Phase 5 UI built on it) is unchanged by where the model
+actually runs.
 
 ## Tasks (ordered)
 
-**P4.1 — The Steward turn: structured proposal, deterministic execution.**
-*(Design corrected from the first draft, which specified a sandboxed agent with a
-`create-issue` tool.)* The Steward does **not** run as a tool-loop agent in a
-sandbox. Three reasons, in order of weight:
+**P4.1 — The `steward` profile.** `config/profiles/steward.yaml`: read-only
+investigative tools (`read`, `git-diff`, `list-issues`, `get-issue`) plus the
+plan/handoff path — **no** edit/write/exec/git-commit/create-pr/merge. Enforced
+at load like the reviewer's. *Acceptance: a steward-profile agent provably cannot
+mutate code or the lifecycle (tool-registry test).*
 
-1. **Safety.** A tool-loop lets the model *act*. Here the model returns a typed
-   proposal — `{intent, reply, issue?}` — and deterministic Go validates it and
-   performs the action. Model output cannot become an action other than "an issue
-   was created", which is the invariant §7 promises. That is strictly stronger
-   than restricting a tool set.
-2. **Fit.** The sandbox exists to isolate agents that touch a repo. The Steward
-   touches no code, so the isolation buys nothing.
-3. **Latency.** A k8s Job per conversational turn is unusable for chat.
+**P4.2 — Plan mode.** The conversational loop with plan proposal; chat produces
+`{reply, plan?}` and nothing else. *Acceptance: no conversational turn, however
+phrased, creates an issue.*
 
-So the gateway gains a small inference client and a steward package: prompt →
-structured JSON → validate → act via the existing dispatch path. *Acceptance: a
-malformed or hostile proposal (unknown intent, missing fields, an attempt to name
-a control verb) is rejected by the validator and answered as a clarification —
-never executed.*
+**P4.3 — The blessing.** `POST /steward/handoff` turns an agreed plan into
+issue(s) via `createLabeledIssueAndRoute`. *Acceptance: a blessed plan produces a
+real labeled issue that Cortex routes to a builder; an unblessed plan produces
+nothing.*
 
-**P4.2 — Conversation → issue.** The chat endpoint, a session store, and the
-Steward turn: given prose, either answer conversationally or produce a
-`{title, body, label}` and create it through the existing dispatch path. The
-issue body must capture acceptance criteria explicitly — a vague issue produces a
-vague build, and the builder's DONE WHEN comes from it. *Acceptance: a live
-conversation creates a real labeled issue that Cortex routes to a builder, and
-the resulting task record shows `created_by: steward`.*
+**P4.4 — Status projection.** "What's running?" / "why did X fail?" answered from
+`/tasks` + `/log`, citing ids and quoting the mechanical reason verbatim.
+*Acceptance: the answer matches the task record exactly; an unknown task is
+answered "I don't have that", never invented.*
 
-**P4.3 — Status queries.** "What's building?" / "why did task X fail?" answered
-from `/tasks`, `/tasks/{id}`, and `/log` — projections, never recollection. The
-answer cites task ids and the mechanical reason already recorded. *Acceptance: a
-status answer matches the task record exactly, including the failure reason
-verbatim; an unknown task is answered "I don't have that", never invented.*
-
-**P4.4 — Clarify rather than guess.** When the request is underspecified, the
-Steward asks one focused question instead of inventing acceptance criteria — the
-same fail-open discipline the builder has (never fabricate; ask). *Acceptance: a
-deliberately vague request produces a clarifying question, not a speculative
-issue.*
+**P4.5 — Deployment.** A `steward` agent deployment on the deep lane, and the
+gateway proxying `/steward/*` to it. *Acceptance: a live conversation
+investigates, proposes a plan, and on blessing drives a real build.*
 
 ## Explicitly NOT in Phase 4
 
