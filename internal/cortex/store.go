@@ -288,7 +288,10 @@ func (s *PGStore) GetTask(id string) (*TaskRecord, []TransitionRecord, error) {
 }
 
 func (s *PGStore) ListTasks(f TaskFilter) ([]TaskRecord, error) {
-	q := `SELECT id, route_id, status, attempt, issue_repo, issue_number, agent, pr_number, created_at, updated_at
+	// pr_repo + work_branch belong here: the observability surface (and the Phase 5
+	// UI) link a task to its PR and branch. Omitting pr_repo made /cortex/tasks
+	// report an empty repo even when the DB row had it set.
+	q := `SELECT id, route_id, status, attempt, issue_repo, issue_number, agent, pr_repo, pr_number, work_branch, created_at, updated_at
 		FROM cortex_tasks WHERE 1=1`
 	args := []any{}
 	if f.Status != "" {
@@ -320,14 +323,16 @@ func (s *PGStore) ListTasks(f TaskFilter) ([]TaskRecord, error) {
 	for rows.Next() {
 		var t TaskRecord
 		var issueNumber, prNumber sql.NullInt64
-		var agent sql.NullString
+		var agent, prRepo, workBranch sql.NullString
 		if err := rows.Scan(&t.ID, &t.RouteID, &t.Status, &t.Attempt, &t.IssueRepo, &issueNumber,
-			&agent, &prNumber, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			&agent, &prRepo, &prNumber, &workBranch, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, err
 		}
 		t.IssueNumber = issueNumber.Int64
 		t.Agent = agent.String
+		t.PRRepo = prRepo.String
 		t.PRNumber = prNumber.Int64
+		t.WorkBranch = workBranch.String
 		out = append(out, t)
 	}
 	return out, rows.Err()

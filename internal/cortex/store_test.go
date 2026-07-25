@@ -75,7 +75,12 @@ func storeInvariantSuite(t *testing.T, s Store) {
 		t.Fatalf("decisions not newest-first: %+v", ds)
 	}
 
-	// List filter.
+	// List filter. ListTasks must project pr_repo + work_branch, not just
+	// pr_number — the observability surface / UI links a task to its PR by repo,
+	// and PGStore.ListTasks once dropped pr_repo from its SELECT (issue #—).
+	if err := s.SetPR(task.ID, "kit/hirdforge", 467); err != nil {
+		t.Fatalf("SetPR: %v", err)
+	}
 	tasks, err := s.ListTasks(TaskFilter{Status: StatusDispatched})
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
@@ -84,6 +89,9 @@ func storeInvariantSuite(t *testing.T, s Store) {
 	for _, x := range tasks {
 		if x.ID == task.ID {
 			found = true
+			if x.PRRepo != "kit/hirdforge" || x.PRNumber != 467 {
+				t.Fatalf("ListTasks dropped pr fields: pr_repo=%q pr_number=%d", x.PRRepo, x.PRNumber)
+			}
 		}
 	}
 	if !found {
