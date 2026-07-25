@@ -257,8 +257,16 @@ func (g *gateway) handleCortexReviewEvent(body []byte) {
 	case strings.Contains(rt, "rejected"), strings.Contains(rt, "request_changes"), strings.Contains(rt, "changes_requested"):
 		state = "REQUEST_CHANGES"
 	default:
-		return // comment-only reviews are not verdicts
+		// A verdict we cannot map is DROPPED — say so, with the raw shape, or the
+		// failure is invisible. (This path silently swallowed a real
+		// REQUEST_CHANGES: Gitea delivered it, the gateway logged nothing, and the
+		// revise route looked broken for hours. Degrade never silently.)
+		log.Printf("cortex: review webhook DROPPED (not a verdict): action=%q review.type=%q on %s#%d",
+			p.Action, p.Review.Type, p.Repository.FullName, p.PullRequest.Number)
+		return
 	}
+	log.Printf("cortex: review webhook: action=%q review.type=%q -> %s on %s#%d",
+		p.Action, p.Review.Type, state, p.Repository.FullName, p.PullRequest.Number)
 	ev := cortex.Event{
 		Type:        cortex.EventPRReviewSubmitted,
 		Repo:        p.Repository.FullName,
