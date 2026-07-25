@@ -24,6 +24,7 @@ import (
 
 	"git.hirdforge.com/kit/hirdforge/internal/cortex"
 	"git.hirdforge.com/kit/hirdforge/internal/profile"
+	"git.hirdforge.com/kit/hirdforge/internal/steward"
 	workspacepkg "git.hirdforge.com/kit/hirdforge/pkg/workspace"
 )
 
@@ -343,6 +344,12 @@ type gateway struct {
 	seidrURL             string
 	defaultFleet         string
 	discordWebhookURL    string
+
+	// The interlocutor surface (§7, P4.6). stewardEngine holds the conversation +
+	// blessing; stewardFiler is the one write path (createLabeledIssueAndRoute).
+	// Both nil when no interlocutor is configured — the surface then does not load.
+	stewardEngine *steward.Engine
+	stewardFiler  steward.StepFiler
 
 	// delegationTimelines stores typed events indexed by session_id.
 	// Access is protected by dtlMu.
@@ -1503,6 +1510,14 @@ func main() {
 	cortexInferenceURL := flag.String("cortex-inference-url", "http://203.0.113.20:4000", "inference base URL for sandbox agents (LiteLLM)")
 	cortexModel := flag.String("cortex-model", "qwen", "model/lane for sandbox builder agents")
 	cortexInferenceKey := flag.String("cortex-inference-key", envOrDefault("CORTEX_INFERENCE_KEY", ""), "inference API key for sandbox agents")
+	// The interlocutor surface (§7, P4.6). Empty --steward-url disables it. The
+	// summarizer endpoint/model default to the cortex (single-lane) values so a
+	// single-model install works with no extra config; override for a separate lane.
+	stewardURL := flag.String("steward-url", envOrDefault("STEWARD_URL", ""), "A2A base URL of the interlocutor agent (empty disables the /steward/* surface)")
+	stewardInferenceURL := flag.String("steward-inference-url", envOrDefault("STEWARD_INFERENCE_URL", ""), "OpenAI-compatible base URL for the session-summarizer (defaults to --cortex-inference-url)")
+	stewardInferenceKey := flag.String("steward-inference-key", envOrDefault("STEWARD_INFERENCE_KEY", ""), "API key for the summarizer (defaults to --cortex-inference-key)")
+	stewardInferenceModel := flag.String("steward-inference-model", envOrDefault("STEWARD_INFERENCE_MODEL", ""), "model/lane for the summarizer (defaults to --cortex-model)")
+	stewardDefaultLabel := flag.String("steward-default-label", "agent:build", "routing label a blessed code step is filed under")
 	cortexAgentSoul := flag.String("cortex-agent-soul", "/work/repo/bench/builder/soul.md", "persona file path (inside the cloned repo) for sandbox agents")
 	cortexMaxRounds := flag.Int("cortex-max-tool-rounds", 80, "max tool-loop rounds for sandbox builder agents")
 	cortexProfilesDir := flag.String("cortex-profiles-dir", "/etc/valhalla/profiles", "directory of harness profile YAML files (O-PROFILE)")
@@ -1696,6 +1711,27 @@ func main() {
 	registerCortexRoutes(mux, gw)
 	registerCortexInternalRoutes(mux, gw, strings.TrimSpace(*cortexMergeSecret))
 	registerCortexControlRoutes(mux, gw)
+
+	// The interlocutor surface (§7, P4.6). Only wired when an agent URL is set.
+	if u := strings.TrimSpace(*stewardURL); u != "" {
+		scfg := stewardConfig{
+			AgentURL:       u,
+			InferenceURL:   firstNonEmpty(*stewardInferenceURL, *cortexInferenceURL),
+			InferenceKey:   firstNonEmpty(*stewardInferenceKey, *cortexInferenceKey),
+			InferenceModel: firstNonEmpty(*stewardInferenceModel, *cortexModel),
+			DefaultRepo:    firstNonEmpty(strings.TrimSpace(*giteaRepo), gw.taskRepo),
+			DefaultLabel:   strings.TrimSpace(*stewardDefaultLabel),
+		}
+		client := &http.Client{Timeout: 6 * time.Minute} // interlocutor turns can be long (reasoning model)
+		gw.stewardFiler = gw.newStewardFiler(scfg)
+		gw.stewardEngine = steward.NewEngine(a2aTurnRunner{url: scfg.AgentURL, client: client}).
+			WithSummarizer(inferenceSummarizer{url: scfg.InferenceURL, key: scfg.InferenceKey, model: scfg.InferenceModel, client: client}).
+			OnCompact(func(sessionID string, folded int) {
+				log.Printf("steward: context_compacted session=%q folded=%d", sessionID, folded)
+			})
+		registerStewardRoutes(mux, gw)
+		log.Printf("steward: interlocutor surface enabled — agent=%s summarizer-model=%s default-repo=%s", scfg.AgentURL, scfg.InferenceModel, scfg.DefaultRepo)
+	}
 	go func() {
 		time.Sleep(10 * time.Second)
 		gw.ensureGiteaWebhooks()
