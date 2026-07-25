@@ -299,3 +299,29 @@ func TestGitCommitToolNoBranchNamesTheWorkBranch(t *testing.T) {
 	}
 	assertRemoteBranch(t, repoDir, "agent/hf-work-123")
 }
+
+// TestGitCommitToolIgnoresDivergentBranchOnWorkBranch pins the robust P3.0b fix:
+// when the agent is on a work branch (agent/<task>), a divergent branch arg the
+// model invented (e.g. a truncated agent/hf-<short>) is IGNORED — git-commit
+// pushes the work branch it is on, so the collect step (which keys on the work
+// branch) finds the PR. Prompt guidance wasn't enough for a local model.
+func TestGitCommitToolIgnoresDivergentBranchOnWorkBranch(t *testing.T) {
+	workspace, repoDir := setupWorkspaceRepo(t)
+	runGitCmd(t, repoDir, "git", "checkout", "-b", "agent/hf-019f96da655e-197131ebe6")
+	writeFile(t, filepath.Join(repoDir, "notes.txt"), "work branch\n")
+
+	tool := NewGitCommitTool(workspace, "", "", "Builder")
+	res := tool.Execute(map[string]interface{}{
+		"repo":    "project",
+		"message": "add notes",
+		"branch":  "agent/hf-197131ebe6", // divergent (truncated) — must be ignored
+	})
+	if res.Error != "" {
+		t.Fatalf("git-commit failed: %s", res.Error)
+	}
+	if !strings.Contains(res.Output, "Pushed to agent/hf-019f96da655e-197131ebe6") {
+		t.Fatalf("must push the work branch, not the divergent arg: %q", res.Output)
+	}
+	assertCurrentBranch(t, repoDir, "agent/hf-019f96da655e-197131ebe6")
+	assertRemoteBranch(t, repoDir, "agent/hf-019f96da655e-197131ebe6")
+}

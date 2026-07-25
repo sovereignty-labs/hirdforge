@@ -748,6 +748,18 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 		return ToolResult{Error: RepoNotFoundMessage(t.WorkDir, repo)}
 	}
 
+	// In the Cortex sandbox the agent is pre-checked-out on the work branch
+	// ("agent/<task>") and the collect step observes the PR on exactly that ref.
+	// A local model routinely invents a DIVERGENT branch — "Builder/feat-*", or a
+	// truncated "agent/hf-<short>" — which git-commit would then create and push,
+	// producing a PR the collect step cannot find (no_pr). When we are already on
+	// a work branch, ignore any divergent branch arg and commit to the branch we
+	// are on. This makes the build robust regardless of the model's branch choice.
+	if cur := currentGitBranch(repoDir); strings.HasPrefix(cur, "agent/") && branch != "" && branch != cur {
+		log.Printf("git-commit: on work branch %q — ignoring divergent branch arg %q", cur, branch)
+		branch = ""
+	}
+
 	// Only rewrite origin to a credentialed URL when we can actually build a
 	// valid one. Token alone is insufficient: the token is resolved from the
 	// environment (e.g. /vault/secrets/gitea-token), so with an empty GiteaURL
@@ -820,9 +832,7 @@ func (t *GitCommitTool) Execute(args map[string]interface{}) ToolResult {
 		// branch). Resolve and name it so the caller (create-pr's head) is
 		// unambiguous — "current branch" left the model guessing and it invented
 		// a wrong branch name, which the collect step could not find.
-		if headRes := runGit(repoDir, []string{"git", "rev-parse", "--abbrev-ref", "HEAD"}, 10*time.Second); headRes.Error == "" {
-			target = strings.TrimSpace(headRes.Output)
-		}
+		target = currentGitBranch(repoDir)
 		if target == "" {
 			target = "current branch"
 		}
