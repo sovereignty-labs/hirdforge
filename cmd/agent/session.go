@@ -1239,6 +1239,13 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					assistant.Content = cleaned
 				}
 			}
+			if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<tool_call>") {
+				qwCalls, cleaned := parseQwenToolCalls(assistant.Content)
+				if len(qwCalls) > 0 {
+					assistant.ToolCalls = qwCalls
+					assistant.Content = cleaned
+				}
+			}
 			if len(assistant.ToolCalls) == 0 {
 				lastNoToolAssistantContent = strings.TrimSpace(stripThinkTags(assistant.Content))
 				toolLoopExitReason = classifyModelTurn(lastNoToolAssistantContent)
@@ -1653,6 +1660,13 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					if len(mmCalls) > 0 {
 						assistant.ToolCalls = mmCalls
 						assistant.Content = mmCleaned
+					}
+				}
+				if len(assistant.ToolCalls) == 0 && strings.Contains(assistant.Content, "<tool_call>") {
+					qwCalls, qwCleaned := parseQwenToolCalls(assistant.Content)
+					if len(qwCalls) > 0 {
+						assistant.ToolCalls = qwCalls
+						assistant.Content = qwCleaned
 					}
 				}
 				if len(assistant.ToolCalls) > 0 {

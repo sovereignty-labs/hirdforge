@@ -430,6 +430,12 @@ var (
 	xmlToolCallRe     = regexp.MustCompile(`(?s)<minimax:tool_call>\s*<invoke\s*name="([^"]+)">(.*?)</invoke>\s*</minimax:tool_call>`)
 	xmlParamRe        = regexp.MustCompile(`<parameter name="([^"]+)">([^<]*)</parameter>`)
 	minimaxToolCallRE = regexp.MustCompile(`(?s)<minimax:tool_call>(.*?)</minimax:tool_call>`)
+	// Hermes/Qwen function-call format: <tool_call><function=NAME><parameter=KEY>VALUE</parameter>…</function></tool_call>.
+	// Qwen models (qwen27b-worker, qwen-reserved) emit this; without a parser it leaks
+	// as raw text into the reply (observed live in the cockpit 2026-07-26).
+	qwenToolCallRE  = regexp.MustCompile(`(?s)<tool_call>(.*?)</tool_call>`)
+	qwenFunctionRE  = regexp.MustCompile(`<function=([^>\s]+)\s*>`)
+	qwenParameterRE = regexp.MustCompile(`(?s)<parameter=([^>\s]+)\s*>(.*?)</parameter>`)
 
 	metricsRequestsTotal      int64
 	metricsToolCallsTotal     int64
@@ -537,6 +543,53 @@ func parseMiniMaxToolCalls(content string) ([]toolCall, string) {
 	}
 	cleaned := minimaxToolCallRE.ReplaceAllString(content, "")
 	return calls, cleaned
+}
+
+// parseQwenToolCalls extracts Hermes/Qwen-format tool calls (<tool_call><function=
+// NAME><parameter=KEY>VALUE</parameter>…</function></tool_call>) that the OpenAI
+// tool_calls field did not carry. Without this the raw XML leaks into the reply —
+// the interlocutor looked broken in the cockpit until this landed.
+func parseQwenToolCalls(content string) ([]toolCall, string) {
+	blocks := qwenToolCallRE.FindAllStringSubmatch(content, -1)
+	if len(blocks) == 0 {
+		return nil, content
+	}
+	calls := make([]toolCall, 0, len(blocks))
+	for i, m := range blocks {
+		block := m[1]
+		fn := qwenFunctionRE.FindStringSubmatch(block)
+		if len(fn) < 2 {
+			continue
+		}
+		name := strings.TrimSpace(fn[1])
+		if name == "" {
+			continue
+		}
+		args := map[string]string{}
+		for _, pm := range qwenParameterRE.FindAllStringSubmatch(block, -1) {
+			if len(pm) < 3 {
+				continue
+			}
+			k := strings.TrimSpace(pm[1])
+			if k == "" {
+				continue
+			}
+			args[k] = strings.TrimSpace(pm[2])
+		}
+		b, err := json.Marshal(args)
+		if err != nil {
+			continue
+		}
+		calls = append(calls, toolCall{
+			ID:       fmt.Sprintf("qw_%d", i),
+			Type:     "function",
+			Function: toolCallFunction{Name: name, Arguments: string(b)},
+		})
+	}
+	if len(calls) == 0 {
+		return nil, content
+	}
+	return calls, qwenToolCallRE.ReplaceAllString(content, "")
 }
 
 func extractAndExecuteXMLToolCalls(content string, execute func(toolCall) ToolResult) (cleanedContent string, toolResults []ToolResult) {
