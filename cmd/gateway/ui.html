@@ -366,15 +366,45 @@
   function cleanStream(t){
     if(!t) return '';
     return t.replace(/<think>[\s\S]*?<\/think>/g,'').replace(/<think>[\s\S]*$/,'')
+            // Hermes/Qwen tool-call XML streams in raw tokens before the agent's
+            // cleaned snapshot arrives; hide it (closed and partial-at-tail) so it
+            // never flashes in the reply.
+            .replace(/<tool_call>[\s\S]*?<\/tool_call>/g,'').replace(/<tool_call>[\s\S]*$/,'')
+            .replace(/<function=[\s\S]*?<\/function>/g,'').replace(/<function=[\s\S]*$/,'')
             .replace(/```json[\s\S]*?```/g,'').replace(/```json[\s\S]*$/,'').trim();
+  }
+
+  // A long grounding turn (minutes) can outlive the streaming connection — an
+  // upstream proxy (the Cloudflare tunnel) may drop it before `done`. But the
+  // gateway drives each turn on a background context and RECORDS it on completion
+  // regardless of the client, so the answer still lands server-side. On a cut,
+  // poll the session store until the turn appears and render it — the turn is
+  // never lost, only its live stream.
+  async function pollForTurn(text, proseEl, thinking){
+    for(let i=0;i<160;i++){                 // ~8 min ceiling at 3s
+      await new Promise(r=>setTimeout(r,3000));
+      try{
+        const s=await (await fetch('/api/v1/steward/sessions/'+encodeURIComponent(sessionId))).json();
+        const turns=(s&&s.turns)||[];
+        const t=turns[turns.length-1];
+        if(t && t.message===text && (t.reply||'').trim()){
+          proseEl.innerHTML=renderMarkdown(t.reply);
+          if(t.plan){ plans[t.plan.id]=t.plan; thinking.appendChild(planCard(t.plan)); }
+          stream.scrollTop=stream.scrollHeight;
+          return true;
+        }
+      }catch(e){}
+    }
+    return false;
   }
 
   async function sendMessage(text){
     addMsg('op', $('#userName').textContent||'Operator', null, el('div','prose',fmtCode(text)));
     const thinking=addMsg('ai', $('#laneName').textContent||'Steward', $('#laneModel').textContent, el('div','prose','<span class="caret"></span>'));
     const proseEl=thinking.querySelector('.prose');
-    let toolLine=null, lastText='';
+    let toolLine=null, lastText='', sawDone=false;
     const atBottom=()=> stream.scrollTop+stream.clientHeight >= stream.scrollHeight-40;
+    const reconnecting=()=>{ if(!toolLine){ toolLine=el('div','grounding'); proseEl.after(toolLine); } toolLine.innerHTML='<span class="gspin"></span>reconnecting — the interlocutor is still working…'; };
     try{
       const resp=await fetch('/api/v1/steward/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:sessionId,message:text})});
       if(!resp.ok||!resp.body){ let m='HTTP '+resp.status; try{m=(await resp.json()).error||m}catch(e){} throw new Error(m); }
@@ -389,14 +419,31 @@
           if(!line.startsWith('data: ')) continue;
           let o; try{ o=JSON.parse(line.slice(6)); }catch(e){ continue; }
           const stick=atBottom();
-          if(o.tool){ if(!toolLine){ toolLine=el('div','grounding'); proseEl.after(toolLine); } toolLine.innerHTML='<span class="gspin"></span>grounding · '+esc(o.tool); }
+          if(o.tool){ if(!toolLine){ toolLine=el('div','grounding'); proseEl.after(toolLine); } toolLine.innerHTML='<span class="gspin"></span>forging · '+esc(o.tool); }
           if(o.text!=null){ lastText=o.text; proseEl.innerHTML=renderMarkdown(cleanStream(lastText))+'<span class="caret"></span>'; }
-          if(o.done){ if(toolLine){toolLine.remove();toolLine=null;} proseEl.innerHTML=renderMarkdown(o.reply||cleanStream(lastText)); if(o.error){ proseEl.innerHTML+='<div class="softerr">('+esc(o.error)+')</div>'; } if(o.plan){ plans[o.plan.id]=o.plan; thinking.appendChild(planCard(o.plan)); } }
+          if(o.done){ sawDone=true; if(toolLine){toolLine.remove();toolLine=null;} proseEl.innerHTML=renderMarkdown(o.reply||cleanStream(lastText)); if(o.error){ proseEl.innerHTML+='<div class="softerr">('+esc(o.error)+')</div>'; } if(o.plan){ plans[o.plan.id]=o.plan; thinking.appendChild(planCard(o.plan)); } }
           if(stick) stream.scrollTop=stream.scrollHeight;
         }
       }
+      // Ended without a terminal 'done' — the stream was cut. Recover the turn.
+      if(!sawDone){
+        reconnecting();
+        const ok=await pollForTurn(text, proseEl, thinking);
+        if(toolLine){ toolLine.remove(); toolLine=null; }
+        if(!ok){ proseEl.innerHTML+='<div class="softerr">(lost the connection and the turn didn\'t land — try again)</div>'; }
+      }
       refreshInspector();
-    }catch(e){ if(toolLine)toolLine.remove(); proseEl.innerHTML='<span style="color:var(--crit)">Couldn\'t reach the interlocutor — '+esc(e.message)+'</span>'; }
+    }catch(e){
+      // A mid-stream network error throws here; the turn may still be completing
+      // server-side, so attempt recovery before surfacing a hard error.
+      if(!sawDone){
+        reconnecting();
+        const ok=await pollForTurn(text, proseEl, thinking);
+        if(ok){ if(toolLine){toolLine.remove();toolLine=null;} refreshInspector(); return; }
+      }
+      if(toolLine)toolLine.remove();
+      proseEl.innerHTML='<span style="color:var(--crit)">Couldn\'t reach the interlocutor — '+esc(e.message)+'</span>';
+    }
   }
 
   const input=$('#input'), sendBtn=$('#send');

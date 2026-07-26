@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -105,5 +106,55 @@ func TestStreamStewardChatForwardsToolThenReplace(t *testing.T) {
 	// not survive into the final reply.
 	if !strings.Contains(got, "Final grounded answer.") || strings.Contains(got, "Let me look...Final") {
 		t.Errorf("replace snapshot not honored:\n%s", got)
+	}
+}
+
+// TestStreamStewardChatRecordsTurnDespiteClientDisconnect proves the contract the
+// cockpit's recovery poll depends on: when a proxy (the Cloudflare tunnel) cuts a
+// long stream, the gateway keeps driving the turn on its background context and
+// still records it — so the answer is recoverable from the session store, never
+// lost. This is why a cut turn is a reconnect, not a failure.
+func TestStreamStewardChatRecordsTurnDespiteClientDisconnect(t *testing.T) {
+	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fl := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"tool_call\",\"tool\":\"read\"}\n\n")
+		fl.Flush()
+		time.Sleep(60 * time.Millisecond) // the turn is still working when the client leaves
+		_, _ = io.WriteString(w, "data: {\"type\":\"replace\",\"content\":\"Recovered answer.\"}\n\n")
+		fl.Flush()
+	}))
+	defer agent.Close()
+
+	gw := &gateway{stewardEngine: steward.NewEngine(&scriptedRunner{outs: []string{""}}), stewardURL: agent.URL}
+	mux := http.NewServeMux()
+	registerStewardRoutes(mux, gw)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Start the turn, read the first event, then DISCONNECT mid-turn.
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/api/v1/steward/chat/stream",
+		strings.NewReader(`{"session_id":"disc","message":"go"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 32)
+	_, _ = resp.Body.Read(buf)
+	cancel() // client goes away before the turn finishes
+	_ = resp.Body.Close()
+
+	var found bool
+	for i := 0; i < 100; i++ {
+		if h := gw.stewardEngine.History("disc"); len(h) > 0 && strings.Contains(h[len(h)-1].Reply, "Recovered answer.") {
+			found = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !found {
+		t.Fatal("turn must be recorded server-side despite client disconnect — the cockpit recovery depends on it")
 	}
 }
