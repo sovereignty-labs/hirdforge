@@ -758,6 +758,55 @@ func useAnthropicAPI(model string) bool {
 	return strings.Contains(strings.ToLower(model), "claude")
 }
 
+// maxInferenceConnRetries bounds how many times a failed inference connection is
+// retried. The local model fabric is a set of per-host llama-servers (O-149); a
+// contended or bounced server closes the socket (EOF/reset) and, without this, a
+// single drop kills the whole turn — which reads as a total outage to the operator.
+const maxInferenceConnRetries = 3
+
+// inferenceRetryBaseDelay is the first backoff step (doubled each retry). A var so
+// tests can shrink it.
+var inferenceRetryBaseDelay = 400 * time.Millisecond
+
+// doInferenceRequest issues an inference HTTP request, retrying transient
+// connection failures with bounded exponential backoff. A non-nil error from Do
+// means NO response was received (the socket dropped before headers), so a retry
+// has no duplicate side effect — this never retries a request the server actually
+// began answering. build() is called per attempt because the request body is
+// consumed on each try. Every retry is logged: doctrine is escalate loudly,
+// degrade never silently — a silent retry would hide fabric flakiness.
+func doInferenceRequest(ctx context.Context, build func() (*http.Request, error)) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxInferenceConnRetries; attempt++ {
+		if attempt > 0 {
+			logJSON("warn", "inference connection failed, retrying", map[string]interface{}{
+				"event":   "inference_retry",
+				"attempt": attempt,
+				"max":     maxInferenceConnRetries,
+				"error":   lastErr.Error(),
+			})
+			select {
+			case <-time.After(inferenceRetryBaseDelay * time.Duration(int64(1)<<(attempt-1))):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		req, err := build()
+		if err != nil {
+			return nil, err
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("after %d attempts: %w", maxInferenceConnRetries+1, lastErr)
+}
+
 func callOllamaNonStreamingWithContext(ctx context.Context, messages []message, defs []toolDef, inferenceURL, model, apiKey string) (chatResponse, error) {
 	if useAnthropicAPI(model) {
 		return callAnthropicNonStreamingWithContext(ctx, messages, defs, inferenceURL, model, apiKey)
@@ -774,15 +823,17 @@ func callChatCompletionsNonStreamingWithContext(ctx context.Context, messages []
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return chatResponse{}, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doInferenceRequest(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("request failed: %w", err)
 	}
@@ -807,15 +858,17 @@ func callResponsesNonStreamingWithContext(ctx context.Context, messages []messag
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return chatResponse{}, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doInferenceRequest(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		return req, nil
+	})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("request failed: %w", err)
 	}
@@ -884,14 +937,16 @@ func callAnthropicNonStreamingWithContext(ctx context.Context, messages []messag
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("failed to marshal request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return chatResponse{}, fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", apiKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := doInferenceRequest(ctx, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		return req, nil
+	})
 	if err != nil {
 		return chatResponse{}, fmt.Errorf("request failed: %w", err)
 	}
@@ -1016,16 +1071,17 @@ func streamChatCompletionsWithContext(ctx context.Context, messages []message, d
 			send(inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)})
 			return
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err != nil {
-			send(inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)})
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := doInferenceRequest(ctx, func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if apiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			return req, nil
+		})
 		if err != nil {
 			send(inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)})
 			return
@@ -1093,16 +1149,17 @@ func streamResponsesWithContext(ctx context.Context, messages []message, defs []
 			send(inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)})
 			return
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err != nil {
-			send(inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)})
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := doInferenceRequest(ctx, func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			if apiKey != "" {
+				req.Header.Set("Authorization", "Bearer "+apiKey)
+			}
+			return req, nil
+		})
 		if err != nil {
 			send(inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)})
 			return
@@ -1299,15 +1356,16 @@ func streamAnthropicWithContext(ctx context.Context, messages []message, defs []
 			send(inferenceStreamEvent{Err: fmt.Errorf("failed to marshal request: %w", err)})
 			return
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err != nil {
-			send(inferenceStreamEvent{Err: fmt.Errorf("failed to create request: %w", err)})
-			return
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-api-key", apiKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := doInferenceRequest(ctx, func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("x-api-key", apiKey)
+			req.Header.Set("anthropic-version", "2023-06-01")
+			return req, nil
+		})
 		if err != nil {
 			send(inferenceStreamEvent{Err: fmt.Errorf("request failed: %w", err)})
 			return
