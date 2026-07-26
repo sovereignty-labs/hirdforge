@@ -105,8 +105,11 @@ func stewardProcedure(reg *toolpkg.Registry) string {
 	if has("list-issues") || has("get-issue") {
 		b.WriteString("   - \"What should we build?\" / what's open or in flight → `list-issues`; one specific issue → `get-issue`.\n")
 	}
+	if has("list-dir") {
+		b.WriteString("   - Exploring the code → `list-dir` a directory to SEE what's there (the repo is under `hirdforge/` — start with `list-dir hirdforge/` or `hirdforge/cmd/`), then `read` the specific files that matter. Explore, then read; don't guess paths.\n")
+	}
 	if has("read") {
-		b.WriteString("   - A question about the code → `read` a SPECIFIC FILE, never a directory (reading a directory errors). The repo is under `hirdforge/` — e.g. `hirdforge/go.mod`, `hirdforge/README.md`, `hirdforge/docs/HIRDFORGE_V2_PRD.md`. You have no directory-listing tool, so read known anchor files rather than guessing folder paths.\n")
+		b.WriteString("   - `read` takes a SPECIFIC FILE, never a directory — reading a directory errors. Use `list-dir` to find the file first.\n")
 	}
 	if has("git-diff") {
 		b.WriteString("   - Uncommitted working changes → `git-diff`.\n")

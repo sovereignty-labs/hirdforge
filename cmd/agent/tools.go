@@ -1214,6 +1214,9 @@ func configureToolRegistry(reg *toolpkg.Registry, deps toolSetupDeps) (*toolpkg.
 	if deps.enabled["http"] {
 		reg.Register(toolpkg.NewHTTPTool())
 	}
+	if deps.enabled["list-dir"] {
+		reg.Register(toolpkg.NewListDirTool(deps.workspace))
+	}
 	if deps.enabled["read"] {
 		reg.Register(toolpkg.NewReadTool(deps.workspace))
 	}

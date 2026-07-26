@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -166,6 +167,86 @@ func pathNotFoundMessage(workDir, requested string) string {
 		}
 	}
 	return msg
+}
+
+// ListDirTool lists the contents of a workspace directory — the read-only "sense"
+// that lets an agent explore the tree instead of guessing file paths (and lets the
+// interlocutor ground itself in real code before proposing work). Read-only by
+// construction: it never mutates, and it cannot escape the workspace.
+type ListDirTool struct {
+	WorkDir string
+}
+
+func NewListDirTool(workDir string) *ListDirTool { return &ListDirTool{WorkDir: workDir} }
+
+func (t *ListDirTool) Name() string { return "list-dir" }
+
+func (t *ListDirTool) Description() string {
+	return "List files and subdirectories in a workspace directory (read-only). Use this to explore before reading specific files."
+}
+
+func (t *ListDirTool) Parameters() map[string]string {
+	return map[string]string{"path": "Directory path relative to workspace ('.' or empty = workspace root)"}
+}
+
+func (t *ListDirTool) Execute(args map[string]interface{}) ToolResult {
+	path, _ := args["path"].(string)
+	if strings.TrimSpace(path) == "" {
+		path = "."
+	}
+	absPath, err := resolvePath(t.WorkDir, path)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ToolResult{Error: pathNotFoundMessage(t.WorkDir, path)}
+		}
+		return ToolResult{Error: err.Error()}
+	}
+	if !info.IsDir() {
+		return ToolResult{Error: fmt.Sprintf("%s is a file, not a directory — use `read` for a file, `list-dir` for a directory.", path)}
+	}
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return ToolResult{Error: err.Error()}
+	}
+	// Directories first, then files, alphabetical within each — the way you'd read a tree.
+	sort.Slice(entries, func(i, j int) bool {
+		di, dj := entries[i].IsDir(), entries[j].IsDir()
+		if di != dj {
+			return di
+		}
+		return entries[i].Name() < entries[j].Name()
+	})
+	const maxEntries = 300
+	var b strings.Builder
+	shown, skipped := 0, 0
+	for _, e := range entries {
+		name := e.Name()
+		if name == ".git" { // the git object store is noise, never useful to list
+			continue
+		}
+		if shown >= maxEntries {
+			skipped++
+			continue
+		}
+		if e.IsDir() {
+			b.WriteString(name + "/\n")
+		} else {
+			b.WriteString(name + "\n")
+		}
+		shown++
+	}
+	if skipped > 0 {
+		fmt.Fprintf(&b, "… (%d more entries — narrow with a subdirectory path)\n", skipped)
+	}
+	out := strings.TrimRight(b.String(), "\n")
+	if out == "" {
+		out = "(empty directory)"
+	}
+	return ToolResult{Output: out}
 }
 
 // ReadTool reads workspace files.

@@ -1610,8 +1610,8 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				atomic.AddInt64(&metricsStallsTotal, 1)
 			}
 		}
-		if strings.Contains(finalContent, "<minimax:tool_call>") {
-			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
+		if hasFinalToolCallXML(finalContent) {
+			cleanedFinal, _ := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
 				result := executeOneToolCall(tc)
 				out := result.Output
 				if result.Error != "" {
@@ -1623,7 +1623,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
 				return result
 			})
-			if len(postResults) > 0 {
+			if cleanedFinal != finalContent {
 				hadXMLToolCalls = true
 				full.Reset()
 				full.WriteString(cleanedFinal)
