@@ -55,6 +55,26 @@ func TestParseChatOutputStripsTrailingJSONEcho(t *testing.T) {
 	}
 }
 
+// A chatty model (qwen27b) echoes its tool calls into the prose — including
+// malformed <function/...> and <parameter>path> variants. They must be stripped
+// so the reply is clean prose, never raw tool markup, while the real answer that
+// follows survives.
+func TestParseChatOutputStripsEchoedToolCalls(t *testing.T) {
+	raw := "<tool_call>\n<function=list-dir>\n<parameter=path>\ninternal/cortex\n</parameter>\n</function>\n</tool_call>\n\n" +
+		"<tool_call>\n<function/list-dir>\n<parameter>path>\ninternal/steward\n</parameter>\n</function>\n</tool_call>" +
+		"Here is my analysis of the repository: it is well structured."
+	c, err := ParseChatOutput(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if strings.Contains(c.Reply, "tool_call") || strings.Contains(c.Reply, "<function") || strings.Contains(c.Reply, "<parameter") {
+		t.Fatalf("tool-call XML leaked into reply: %q", c.Reply)
+	}
+	if !strings.Contains(c.Reply, "Here is my analysis of the repository") {
+		t.Fatalf("the real answer was lost: %q", c.Reply)
+	}
+}
+
 // Prose reply plus a plan in a fenced ```json block: reply is the prose, plan is
 // parsed from the fence.
 func TestParseChatOutputProsePlusFencedPlan(t *testing.T) {
