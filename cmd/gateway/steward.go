@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -220,6 +221,91 @@ func (g *gateway) newStewardFiler(cfg stewardConfig) steward.StepFiler {
 	}
 }
 
+// streamStewardChat relays the interlocutor agent's token stream to the operator so
+// the reply appears AS IT IS WRITTEN — not all at once after a long silence — then
+// parses the plan and records the turn at the end (the same inert Record path Chat
+// uses). It streams Server-Sent Events: {text} snapshots as the reply grows, {tool}
+// when the interlocutor grounds itself, and a final {done, reply, plan}.
+func (g *gateway) streamStewardChat(w http.ResponseWriter, r *http.Request, sessionID, message string) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "streaming unsupported"})
+		return
+	}
+	if strings.TrimSpace(g.stewardURL) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "interlocutor not configured"})
+		return
+	}
+	// The gateway owns the conversation; the agent gets the full threaded context in
+	// `content` each turn and a fresh per-turn session so it keeps no state of its own.
+	content := formatTurnContent(message, g.stewardEngine.Context(r.Context(), sessionID))
+	agentSession := fmt.Sprintf("steward-%d", time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	defer cancel()
+	body, _ := json.Marshal(agentMessageRequest{Content: content, SessionID: agentSession})
+	uReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(g.stewardURL, "/")+"/message", bytes.NewReader(body))
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+	uReq.Header.Set("Content-Type", "application/json")
+	uResp, err := (&http.Client{Timeout: 6 * time.Minute}).Do(uReq)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "interlocutor unreachable: " + err.Error()})
+		return
+	}
+	defer uResp.Body.Close()
+	if uResp.StatusCode < 200 || uResp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(uResp.Body, 2048))
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": strings.TrimSpace(string(b))})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	send := func(obj map[string]any) {
+		b, _ := json.Marshal(obj)
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
+
+	var buf strings.Builder
+	reader := bufio.NewReader(uResp.Body)
+	for {
+		line, rerr := reader.ReadBytes('\n')
+		if s := strings.TrimRight(string(line), "\r\n"); strings.HasPrefix(s, "data: ") {
+			var obj map[string]any
+			if json.Unmarshal([]byte(strings.TrimPrefix(s, "data: ")), &obj) == nil {
+				typ, _ := obj["type"].(string)
+				if typ == "tool_call" {
+					if name, _ := obj["tool"].(string); name != "" {
+						send(map[string]any{"tool": name})
+					}
+				}
+				if c, ok := obj["content"].(string); ok && c != "" {
+					if typ == "replace" {
+						buf.Reset()
+					}
+					buf.WriteString(c)
+					send(map[string]any{"text": buf.String()})
+				}
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	// Finalize: strip reasoning, parse the plan, record the turn (inert unless it produced work).
+	out, rerr := g.stewardEngine.Record(sessionID, message, thinkTagRE.ReplaceAllString(buf.String(), ""))
+	if rerr != nil {
+		send(map[string]any{"done": true, "reply": strings.TrimSpace(thinkTagRE.ReplaceAllString(buf.String(), "")), "error": rerr.Error()})
+		return
+	}
+	send(map[string]any{"done": true, "reply": out.Reply, "plan": out.Plan})
+}
+
 // registerStewardRoutes wires the §7 surface. All four endpoints are inert except
 // /handoff, which is the blessing. If no interlocutor agent is configured the chat
 // endpoints answer 503 (a valid deployment may not run one), but the surface still
@@ -228,6 +314,22 @@ func registerStewardRoutes(mux *http.ServeMux, g *gateway) {
 	if g.stewardEngine == nil {
 		return
 	}
+
+	mux.HandleFunc("/api/v1/steward/chat/stream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var in struct {
+			SessionID string `json:"session_id"`
+			Message   string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || strings.TrimSpace(in.Message) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id and message required"})
+			return
+		}
+		g.streamStewardChat(w, r, strings.TrimSpace(in.SessionID), in.Message)
+	})
 
 	mux.HandleFunc("/api/v1/steward/chat", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
