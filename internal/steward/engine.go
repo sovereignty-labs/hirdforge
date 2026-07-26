@@ -87,10 +87,26 @@ func (e *Engine) OnCompact(f func(sessionID string, folded int)) *Engine {
 // a malformed or hostile model output costs an error the caller can turn into a
 // graceful reply, never a side effect.
 func (e *Engine) Chat(ctx context.Context, sessionID, message string) (ChatOutput, error) {
-	raw, err := e.runner.RunTurn(ctx, sessionID, message, e.buildContext(ctx, sessionID))
+	raw, err := e.runner.RunTurn(ctx, sessionID, message, e.Context(ctx, sessionID))
 	if err != nil {
 		return ChatOutput{}, err
 	}
+	return e.Record(sessionID, message, raw)
+}
+
+// Context returns the threaded SessionContext the next turn should run with — the
+// running summary, the pinned plan, and the recent window. Exported so a streaming
+// caller can format the turn itself and stream the model's output live, rather than
+// going through the synchronous RunTurn.
+func (e *Engine) Context(ctx context.Context, sessionID string) SessionContext {
+	return e.buildContext(ctx, sessionID)
+}
+
+// Record parses a completed turn's raw model output, strictly validates it, and
+// records the turn. It is the tail of Chat, split out so the streaming path (which
+// produces the raw output itself, token by token) shares the exact same parse /
+// validate / record — and the same inertness: a malformed turn records nothing.
+func (e *Engine) Record(sessionID, message, raw string) (ChatOutput, error) {
 	out, err := ParseChatOutput(raw)
 	if err != nil {
 		return ChatOutput{}, err

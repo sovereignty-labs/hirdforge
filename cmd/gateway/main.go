@@ -350,6 +350,7 @@ type gateway struct {
 	// Both nil when no interlocutor is configured — the surface then does not load.
 	stewardEngine *steward.Engine
 	stewardFiler  steward.StepFiler
+	stewardURL    string // A2A base URL of the interlocutor agent (for the streaming /message relay)
 
 	// delegationTimelines stores typed events indexed by session_id.
 	// Access is protected by dtlMu.
@@ -1722,6 +1723,7 @@ func main() {
 		}
 		client := &http.Client{Timeout: 6 * time.Minute} // interlocutor turns can be long (reasoning model)
 		gw.stewardFiler = gw.newStewardFiler(scfg)
+		gw.stewardURL = scfg.AgentURL
 		gw.stewardEngine = steward.NewEngine(a2aTurnRunner{url: scfg.AgentURL, client: client}).
 			WithSummarizer(a2aSummarizer{url: scfg.SummarizerURL, client: client}).
 			OnCompact(func(sessionID string, folded int) {
