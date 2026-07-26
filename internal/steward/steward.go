@@ -110,6 +110,34 @@ const (
 
 var fencedBlockRE = regexp.MustCompile("(?s)```(?:json|plan)?\\s*\\n?(.*?)```")
 
+var (
+	// toolCallBlockRE matches a whole Hermes/Qwen tool-call block, closed. A chatty
+	// model (qwen27b) sometimes ECHOES its tool calls into its prose reply — even
+	// malformed ones (<function/list-dir>, <parameter>path>) — because it narrates
+	// what it did. The agent executes and strips well-formed calls, but the echoed
+	// and malformed ones survive into the final content, so strip them here so the
+	// recorded and rendered reply is never raw tool markup.
+	toolCallBlockRE = regexp.MustCompile(`(?s)<tool_call>.*?</tool_call>`)
+	// toolCallTailRE catches an unclosed block at the very tail (a cut mid-call).
+	toolCallTailRE = regexp.MustCompile(`(?s)<tool_call>.*$`)
+	// functionBlockRE catches an orphan <function=...>/<function/...> block outside
+	// any tool_call wrapper.
+	functionBlockRE = regexp.MustCompile(`(?s)<function[=/].*?</function>`)
+	// orphanToolTagRE mops up stray individual tags left by malformed markup.
+	orphanToolTagRE = regexp.MustCompile(`</?(?:tool_call|function|parameter)[^>]*>`)
+)
+
+// stripToolCallXML removes tool-call markup a model echoed into its prose, in the
+// robust order: whole closed blocks, an unclosed trailing block, orphan function
+// blocks, then any leftover individual tags.
+func stripToolCallXML(s string) string {
+	s = toolCallBlockRE.ReplaceAllString(s, "")
+	s = toolCallTailRE.ReplaceAllString(s, "")
+	s = functionBlockRE.ReplaceAllString(s, "")
+	s = orphanToolTagRE.ReplaceAllString(s, "")
+	return s
+}
+
 // ParseChatOutput decodes a turn's model output, robust to the two model shapes
 // we must support (D-INTERLOCUTOR: configurable to any model):
 //
@@ -127,6 +155,7 @@ func ParseChatOutput(raw string) (ChatOutput, error) {
 	// Prefer a plan from a fenced block; the prose around it is the reply.
 	plan, _ := extractFencedPlan(raw)
 	prose := strings.TrimSpace(fencedBlockRE.ReplaceAllString(raw, ""))
+	prose = strings.TrimSpace(stripToolCallXML(prose))
 	prose = strings.TrimSpace(stripTrailingJSONEcho(prose))
 
 	// If the reply is prose (the common, robust case) return it with any plan.
