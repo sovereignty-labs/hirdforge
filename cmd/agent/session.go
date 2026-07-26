@@ -1610,8 +1610,8 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				atomic.AddInt64(&metricsStallsTotal, 1)
 			}
 		}
-		if strings.Contains(finalContent, "<minimax:tool_call>") {
-			cleanedFinal, postResults := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
+		if hasFinalToolCallXML(finalContent) {
+			cleanedFinal, _ := extractAndExecuteXMLToolCalls(finalContent, func(tc toolCall) ToolResult {
 				result := executeOneToolCall(tc)
 				out := result.Output
 				if result.Error != "" {
@@ -1623,7 +1623,7 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
 				return result
 			})
-			if len(postResults) > 0 {
+			if cleanedFinal != finalContent {
 				hadXMLToolCalls = true
 				full.Reset()
 				full.WriteString(cleanedFinal)
@@ -1631,33 +1631,6 @@ func newConversationProcessor(deps conversationDeps) conversationProcessor {
 					logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "emit_replace", nil))
 					return cleanedFinal, context.Canceled
 				}
-			}
-		}
-		// Same for the Hermes/Qwen format in the final content. Parse+execute any
-		// calls; and ALWAYS strip leftover <tool_call> XML so the operator never sees
-		// a raw tool call in the reply, even if a block was unparseable (the #149 leak).
-		if strings.Contains(finalContent, "<tool_call>") {
-			qwCalls, qwCleaned := parseQwenToolCalls(finalContent)
-			for _, tc := range qwCalls {
-				result := executeOneToolCall(tc)
-				out := result.Output
-				if result.Error != "" {
-					out = "ERROR: " + result.Error
-				}
-				if len(out) > 500 {
-					out = out[:500] + "...[truncated]"
-				}
-				xmlToolResults = append(xmlToolResults, fmt.Sprintf("[%s]: %s", tc.Function.Name, out))
-			}
-			if len(qwCalls) > 0 {
-				hadXMLToolCalls = true
-			}
-			stripped := strings.TrimSpace(qwenToolCallRE.ReplaceAllString(qwCleaned, ""))
-			full.Reset()
-			full.WriteString(stripped)
-			if !emit(sseChunk{Type: "replace", Content: stripped, Done: false}) {
-				logSessionTermination(terminationContextCanceled, streamTerminationFields(deps.agentName, deps.model, sessionID, taskID, "emit_replace_qwen", nil))
-				return stripped, context.Canceled
 			}
 		}
 		cleaned := strings.TrimSpace(full.String())

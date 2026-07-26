@@ -592,46 +592,55 @@ func parseQwenToolCalls(content string) ([]toolCall, string) {
 	return calls, qwenToolCallRE.ReplaceAllString(content, "")
 }
 
+// hasFinalToolCallXML reports whether content carries a minimax OR Hermes/Qwen
+// tool-call block — the guard for the final-content handler, kept as a helper so
+// callers stay single-condition.
+func hasFinalToolCallXML(content string) bool {
+	return strings.Contains(content, "<minimax:tool_call>") || strings.Contains(content, "<tool_call>")
+}
+
+// extractAndExecuteXMLToolCalls executes any XML tool calls in content — both the
+// minimax (<minimax:tool_call><invoke>) and Hermes/Qwen (<tool_call><function=…>)
+// formats — and returns the content with EVERY such block stripped, so raw
+// tool-call XML can never leak to the operator, even a block that would not parse
+// into a call (the #149 leak). A malformed match is skipped, not fatal.
 func extractAndExecuteXMLToolCalls(content string, execute func(toolCall) ToolResult) (cleanedContent string, toolResults []ToolResult) {
-	matches := xmlToolCallRe.FindAllStringSubmatch(content, -1)
-	if len(matches) == 0 {
-		return content, nil
-	}
-	calls := make([]toolCall, 0, len(matches))
-	for i, m := range matches {
+	var calls []toolCall
+	for i, m := range xmlToolCallRe.FindAllStringSubmatch(content, -1) {
 		if len(m) < 3 {
-			return content, nil
+			continue
 		}
 		toolName := strings.TrimSpace(m[1])
 		if toolName == "" {
-			return content, nil
+			continue
 		}
-		rawParams := m[2]
 		args := map[string]string{}
-		for _, pm := range xmlParamRe.FindAllStringSubmatch(rawParams, -1) {
-			if len(pm) < 3 {
-				continue
+		for _, pm := range xmlParamRe.FindAllStringSubmatch(m[2], -1) {
+			if len(pm) >= 3 {
+				if key := strings.TrimSpace(pm[1]); key != "" {
+					args[key] = strings.TrimSpace(pm[2])
+				}
 			}
-			key := strings.TrimSpace(pm[1])
-			if key == "" {
-				continue
-			}
-			args[key] = strings.TrimSpace(pm[2])
 		}
 		argBytes, err := json.Marshal(args)
 		if err != nil {
-			return content, nil
+			continue
 		}
 		calls = append(calls, toolCall{
-			ID:   fmt.Sprintf("xml_%d", i),
-			Type: "function",
-			Function: toolCallFunction{
-				Name:      toolName,
-				Arguments: string(argBytes),
-			},
+			ID:       fmt.Sprintf("xml_%d", i),
+			Type:     "function",
+			Function: toolCallFunction{Name: toolName, Arguments: string(argBytes)},
 		})
 	}
-	cleaned := xmlToolCallRe.ReplaceAllString(content, "")
+	qwCalls, _ := parseQwenToolCalls(content)
+	calls = append(calls, qwCalls...)
+	cleaned := strings.TrimSpace(qwenToolCallRE.ReplaceAllString(xmlToolCallRe.ReplaceAllString(content, ""), ""))
+	if len(calls) == 0 {
+		if cleaned == strings.TrimSpace(content) {
+			return content, nil
+		}
+		return cleaned, nil
+	}
 	results := make([]ToolResult, 0, len(calls))
 	for _, tc := range calls {
 		results = append(results, execute(tc))
