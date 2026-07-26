@@ -13,6 +13,7 @@ description: "The interlocutor: the main chat interface. Read-only investigation
 # never in the coordination path: it proposes; Cortex distributes; agents do; gates
 # decide. Any mutating tool here is refused loudly at load.
 tools:
+  - list-dir                # explore the repo tree (read-only) before reading files
   - read                    # ground in the repo
   - git-diff                # read working changes
   - list-issues             # read the issue record (status projection, P4.4)
