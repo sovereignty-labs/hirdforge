@@ -99,7 +99,7 @@
   /* center / conversation */
   .main{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--ground);
     background-image:radial-gradient(130% 60% at 50% -8%,var(--accent-glow),transparent 60%)}
-  .maincol{max-width:760px;width:100%;margin:0 auto;padding:22px 26px 0;flex:1;overflow-y:auto;min-height:0}
+  .maincol{max-width:920px;width:100%;margin:0 auto;padding:22px 26px 0;flex:1;overflow-y:auto;min-height:0}
   .msg{display:flex;gap:12px;margin-bottom:22px}
   .msg .who{width:30px;height:30px;border-radius:8px;flex:none;display:grid;place-items:center;font-size:11px;font-weight:700}
   .who.op{background:var(--surface-2);color:var(--text-2);border:1px solid var(--line)}
@@ -157,7 +157,7 @@
   .btn[disabled]{opacity:.5;pointer-events:none}
 
   /* composer */
-  .composer{max-width:760px;width:100%;margin:0 auto;padding:12px 26px 20px}
+  .composer{max-width:920px;width:100%;margin:0 auto;padding:12px 26px 20px}
   .inputwrap{border:1px solid var(--line);border-radius:12px;background:var(--surface);box-shadow:var(--shadow);padding:11px 13px;display:flex;align-items:flex-end;gap:8px}
   .inputwrap:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
   .inputwrap textarea{flex:1;border:none;background:transparent;color:var(--text);font-size:13.5px;resize:none;max-height:160px;line-height:1.5}
@@ -346,12 +346,12 @@
     if(!md) return '';
     let s=esc(md);
     const blocks=[];
-    s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,code)=>{blocks.push('<pre class="cb"><code>'+code.replace(/\n+$/,'')+'</code></pre>');return ' '+(blocks.length-1)+' ';});
-    s=s.replace(/(?:^\|.*\|[ \t]*\n?)+/gm,b=>{blocks.push(renderTable(b));return ' '+(blocks.length-1)+' ';});
+    s=s.replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,code)=>{blocks.push('<pre class="cb"><code>'+code.replace(/\n+$/,'')+'</code></pre>');return ''+(blocks.length-1)+'';});
+    s=s.replace(/(?:^\|.*\|[ \t]*\n?)+/gm,b=>{blocks.push(renderTable(b));return ''+(blocks.length-1)+'';});
     const out=[];
     for(let para of s.split(/\n{2,}/)){
       para=para.trim(); if(!para) continue;
-      const ph=para.match(/^ (\d+) $/);
+      const ph=para.match(/^(\d+)$/);
       if(ph){ out.push(blocks[+ph[1]]); continue; }
       if(/^### /.test(para)){ out.push('<h3>'+inlineMd(para.slice(4))+'</h3>'); continue; }
       if(/^## /.test(para)){ out.push('<h2>'+inlineMd(para.slice(3))+'</h2>'); continue; }

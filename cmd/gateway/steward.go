@@ -226,6 +226,10 @@ func (g *gateway) newStewardFiler(cfg stewardConfig) steward.StepFiler {
 // parses the plan and records the turn at the end (the same inert Record path Chat
 // uses). It streams Server-Sent Events: {text} snapshots as the reply grows, {tool}
 // when the interlocutor grounds itself, and a final {done, reply, plan}.
+// stewardHeartbeatInterval is how often the relay emits an SSE keepalive comment
+// during a silent grounding round. A var so tests can shrink it.
+var stewardHeartbeatInterval = 15 * time.Second
+
 func (g *gateway) streamStewardChat(w http.ResponseWriter, r *http.Request, sessionID, message string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -272,29 +276,62 @@ func (g *gateway) streamStewardChat(w http.ResponseWriter, r *http.Request, sess
 	}
 
 	var buf strings.Builder
-	reader := bufio.NewReader(uResp.Body)
-	for {
-		line, rerr := reader.ReadBytes('\n')
-		if s := strings.TrimRight(string(line), "\r\n"); strings.HasPrefix(s, "data: ") {
-			var obj map[string]any
-			if json.Unmarshal([]byte(strings.TrimPrefix(s, "data: ")), &obj) == nil {
-				typ, _ := obj["type"].(string)
-				if typ == "tool_call" {
-					if name, _ := obj["tool"].(string); name != "" {
-						send(map[string]any{"tool": name})
-					}
-				}
-				if c, ok := obj["content"].(string); ok && c != "" {
-					if typ == "replace" {
-						buf.Reset()
-					}
-					buf.WriteString(c)
-					send(map[string]any{"text": buf.String()})
-				}
+	// Read the agent's SSE in a goroutine so the main loop can emit heartbeats
+	// during long SILENT rounds. A deep grounding turn (e.g. investigating an
+	// issue across the codebase) can go >100s between tokens while the model
+	// prefills a large, grown context on the local GPU — and an idle intermediary
+	// (the Cloudflare tunnel fronting the cockpit) drops a stream that goes quiet,
+	// which reads to the operator as the turn "glitching out and dying" partway.
+	// A ":" comment every 15s keeps bytes flowing so the connection survives; the
+	// cockpit ignores any line that is not a `data:` event.
+	lines := make(chan string, 64)
+	go func() {
+		defer close(lines)
+		reader := bufio.NewReader(uResp.Body)
+		for {
+			line, rerr := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				lines <- strings.TrimRight(string(line), "\r\n")
+			}
+			if rerr != nil {
+				return
 			}
 		}
-		if rerr != nil {
-			break
+	}()
+	ticker := time.NewTicker(stewardHeartbeatInterval)
+	defer ticker.Stop()
+readLoop:
+	for {
+		select {
+		case s, ok := <-lines:
+			if !ok {
+				break readLoop
+			}
+			if !strings.HasPrefix(s, "data: ") {
+				continue
+			}
+			var obj map[string]any
+			if json.Unmarshal([]byte(strings.TrimPrefix(s, "data: ")), &obj) != nil {
+				continue
+			}
+			typ, _ := obj["type"].(string)
+			if typ == "tool_call" {
+				if name, _ := obj["tool"].(string); name != "" {
+					send(map[string]any{"tool": name})
+				}
+			}
+			if c, ok := obj["content"].(string); ok && c != "" {
+				if typ == "replace" {
+					buf.Reset()
+				}
+				buf.WriteString(c)
+				send(map[string]any{"text": buf.String()})
+			}
+		case <-ticker.C:
+			// Heartbeat: an SSE comment line. Keeps the tunnel from idling the
+			// stream out during a long silent grounding round.
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
 		}
 	}
 	// Finalize: strip reasoning, parse the plan, record the turn (inert unless it produced work).
