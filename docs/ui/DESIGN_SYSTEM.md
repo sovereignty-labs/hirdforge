@@ -1,3 +1,17 @@
+> ## ⚠️ THE COLOURS IN THIS FILE ARE RETIRED
+>
+> The copper-ember palette below was **superseded on 2026-07-25** by the "Phosphor"
+> palette. See **[`/DESIGN.md`](../../DESIGN.md)** at the repo root — that is the
+> current brand contract and it wins on all colour.
+>
+> `#B25E36` / `#D08453` and the token table in the *Tokens* section are **dead
+> values**. An agent generating UI from this file will produce off-brand output; the
+> `tasks_frontend` conformance suite treats these hexes as a hard fail.
+>
+> Everything else here — type scale, layout grammar, component rules, the five
+> surfaces — is **still correct and still binding**. `/DESIGN.md` defers to this file
+> on all of it. Only the colours moved.
+
 # Hirdforge v2 — Design System ("the quiet forge")
 
 **The visual north-star is `docs/ui/cockpit-mock.html`** — open it in a browser (toggle
