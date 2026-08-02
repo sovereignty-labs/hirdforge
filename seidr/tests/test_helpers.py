@@ -4,7 +4,7 @@ import main
 
 
 def test_sanitize_agent_name_normalizes():
-    assert main.sanitize_agent_name("inference-host-01") == "frey_01"
+    assert main.sanitize_agent_name("Worker-01") == "worker_01"
     assert main.sanitize_agent_name("  Ragnar!! ") == "ragnar"
     assert main.sanitize_agent_name("a/b//c") == "a_b_c"
 
