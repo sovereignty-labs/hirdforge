@@ -147,7 +147,7 @@ not squashed.
 
 ## License
 
-MIT
+Apache-2.0
 
 A [Sovereignty Labs](https://github.com/sovereignty-labs) project ·
 [kitporath](https://github.com/kitporath)
