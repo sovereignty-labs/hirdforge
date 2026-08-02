@@ -1508,7 +1508,7 @@ func main() {
 	cortexCloneBase := flag.String("cortex-clone-base", "http://gitea-http.gitea.svc.cluster.local:3000", "base URL for sandbox clone URLs")
 	cortexBaseBranch := flag.String("cortex-base-branch", "main", "base branch sandbox tasks branch from")
 	cortexMergeSecret := flag.String("cortex-merge-secret", envOrDefault("CORTEX_MERGE_SECRET", ""), "shared secret for the Lockbox merge callback")
-	cortexInferenceURL := flag.String("cortex-inference-url", "http://203.0.113.20:4000", "inference base URL for sandbox agents (LiteLLM)")
+	cortexInferenceURL := flag.String("cortex-inference-url", envOrDefault("CORTEX_INFERENCE_URL", "http://localhost:4000"), "inference base URL for sandbox agents (LiteLLM)")
 	cortexModel := flag.String("cortex-model", "qwen", "model/lane for sandbox builder agents")
 	cortexInferenceKey := flag.String("cortex-inference-key", envOrDefault("CORTEX_INFERENCE_KEY", ""), "inference API key for sandbox agents")
 	// The interlocutor surface (§7, P4.6). Empty --steward-url disables it. Session

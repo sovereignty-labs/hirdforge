@@ -131,6 +131,13 @@ jobs:
             echo "No Go files exceed $THRESHOLD lines."
           fi
           exit $exit_code
+      - name: Redaction check
+        # This repository is public. Live addresses, internal DNS and host
+        # nicknames must not re-enter it. Added with the 2026-08-02 redaction
+        # pass — the gate is what keeps it true, rather than a one-off cleanup
+        # that quietly decays.
+        run: bash scripts/check-redaction.sh
+
 
   seidr-python:
     # Seidr Python quality lane: ruff lint + pytest smoke tests. Always runs —
