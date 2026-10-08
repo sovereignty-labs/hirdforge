@@ -18,9 +18,10 @@ That constraint is the whole design. Everything below is downstream of it.
 
 ## Status
 
-**Deployed to production Kubernetes; in validation.** The end-to-end pipeline is
-operational and being hardened against real tasks. The embedded gateway UI is 11 of 12
-phases complete. This is not a finished product, and the roadmap says so.
+**Deployed to production Kubernetes and in use. Not a finished product.** The Go
+code in this tree is the extract committed on 2026-08-02 (`266ea25`). Production has
+moved on, and that later work is not fully published here. In this tree, the embedded
+gateway UI is 11 of 12 phases complete. The counts below are for this tree.
 
 ## How this was built, plainly
 
